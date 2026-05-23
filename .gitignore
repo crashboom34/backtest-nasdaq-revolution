@@ -1,0 +1,42 @@
+# === Données volumineuses (ne pas versionner) ===
+nasdaq_3m.csv
+equity_curve.csv
+trades.csv
+
+# === Environnement Python ===
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# === Cache ===
+.pytest_cache/
+*.pytest_cache/
+.mypy_cache/
+
+# === Résultats de runs (générés localement) ===
+optimization_history/
+results/
+
+# === Configs de test temporaires ===
+test_job_*.config.json
+
+# === MetaTrader ===
+*.ex5
+*.log
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo

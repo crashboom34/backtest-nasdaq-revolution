@@ -1,0 +1,29 @@
+# requirements-server.txt — dépendances pour serveur Linux / Docker
+# Différences vs requirements.txt :
+#   - metatrader5 retiré  (DLL Windows uniquement)
+#   - colorama retiré     (inutile sur Linux)
+#   - streamlit ajouté    (interface web)
+#   - plotly ajouté       (graphiques interactifs)
+
+contourpy==1.3.3
+cycler==0.12.1
+et_xmlfile==2.0.0
+fonttools==4.63.0
+kiwisolver==1.5.0
+llvmlite==0.44.0
+matplotlib==3.10.9
+numba==0.61.2
+numpy==2.2.6
+openpyxl==3.1.5
+packaging==26.2
+pandas==3.0.3
+pandas-ta==0.4.71b0
+pillow==12.2.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+six==1.17.0
+scipy>=1.12.0
+tqdm==4.67.3
+tzdata==2026.2
+streamlit>=1.32.0
+plotly>=5.18.0
