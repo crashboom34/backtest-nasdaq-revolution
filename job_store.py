@@ -90,10 +90,18 @@ def write_best_strategies(
     n: int = 100,
 ) -> None:
     """Écrit best_strategies.csv — top N stratégies triées par score."""
+    path = os.path.join(job_dir, "best_strategies.csv")
+
     if not top_results:
+        fieldnames = [
+            "rank", "score", "score_train", "score_test",
+            "degradation_pct", "overfitting_alert", "warnings",
+        ]
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
         return
 
-    path = os.path.join(job_dir, "best_strategies.csv")
     rows = top_results[:n]
 
     # Collecter toutes les clés de params et stats

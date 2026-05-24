@@ -459,7 +459,7 @@ def list_jobs() -> list:
 
         meta = load_meta(run_id, job_dir)
         if meta is None:
-            # Job en cours ou vide — essayer progress.json
+            # Job en cours, juste créé, ou vide — essayer progress/config.
             prog = read_progress(run_id, job_dir)
             if prog:
                 jobs.append({
@@ -475,6 +475,34 @@ def list_jobs() -> list:
                     "best_score":          prog.get("best_score", 0),
                     "workers_used":        prog.get("workers_used", 1),
                     "progress_pct":        prog.get("progress_pct", 0),
+                })
+                continue
+
+            cfg = load_config(run_id, job_dir)
+            if cfg:
+                cfg_path = _path(run_id, ".config.json", job_dir)
+                try:
+                    date = datetime.fromtimestamp(os.path.getmtime(cfg_path)).isoformat()
+                except Exception:
+                    date = ""
+                jobs.append({
+                    "job_id":              job_id,
+                    "job_dir":             job_dir,
+                    "date":                date,
+                    "strategy_name":       cfg.get("strategy_name", ""),
+                    "mode":                cfg.get("mode", ""),
+                    "status":              "created",
+                    "total_combinations":  cfg.get("total_combinations", 0),
+                    "combinations_tested": 0,
+                    "duration_seconds":    0,
+                    "best_score":          0,
+                    "workers_used":        cfg.get("n_workers", 1),
+                    "variables_tested": [
+                        pr.get("name", "")
+                        for pr in cfg.get("param_ranges", [])
+                        if pr.get("enabled")
+                    ],
+                    "progress_pct":        0,
                 })
             continue
 

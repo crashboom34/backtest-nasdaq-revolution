@@ -44,7 +44,6 @@ Codes de sortie
 
 import argparse
 import json
-import os
 import sys
 import time
 import subprocess
@@ -55,8 +54,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from path_resolver import BASE_DIR, resolve_path
-from optimization_store import make_job_id, get_job_dir, save_config
+from path_resolver import resolve_path
+from job_launcher import launch_optimizer_job
 
 
 # ── Couleurs terminal (optionnel) ─────────────────────────────────────────────
@@ -182,19 +181,20 @@ def main():
         cfg["max_rows"] = args.max_rows
         print(f"{YELLOW}  max_rows surcharge -> {args.max_rows}{RESET}")
 
-    # ── Génération du job_id et job_dir ───────────────────────────────────────
-    job_id = args.run_id or cfg.get("run_id") or make_job_id()
-    # Forcer le format job_ si ce n'est pas déjà le cas
-    if not job_id.startswith("job_"):
-        job_id = f"job_{job_id}"
-
-    cfg["run_id"] = job_id
-
-    job_dir = get_job_dir(job_id)
-
-    # ── Écriture de la config dans job_dir/config_used.json ──────────────────
-    save_config(job_id, cfg, job_dir=job_dir)
-    config_in_job = str(Path(job_dir) / "config_used.json")
+    # ── Création du job et lancement via le helper partagé ───────────────────
+    launched = launch_optimizer_job(
+        cfg,
+        run_id=args.run_id,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    job_id        = launched.job_id
+    job_dir       = launched.job_dir
+    config_in_job = launched.config_path
+    cfg           = launched.config
 
     # ── Infos de démarrage ────────────────────────────────────────────────────
     strat  = cfg.get("strategy_name", "?")
@@ -215,20 +215,9 @@ def main():
     print(f"  Max rows  : {m_rows}")
     print(f"{GREEN}{'='*60}{RESET}\n")
 
-    # ── Lancement du subprocess optimizer_process.py ─────────────────────────
-    optimizer_script = SCRIPT_DIR / "optimizer_process.py"
-    cmd = [sys.executable, str(optimizer_script), job_id, config_in_job, job_dir]
-
-    print(f"Lancement : {' '.join(cmd)}\n")
-
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    # ── Subprocess optimizer_process.py ──────────────────────────────────────
+    proc = launched.process
+    print(f"Lancement : {' '.join(launched.command)}\n")
 
     # ── Polling de la progression ─────────────────────────────────────────────
     last_pct     = -1.0

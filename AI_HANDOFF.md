@@ -134,12 +134,14 @@ pip install -r requirements-server.txt
 - [x] `job_store.py` : metrics, best_strategies, report HTML, logs, archive zip
 - [x] `run_job.py` CLI : génération job_id, subprocess, polling progression, résumé final
 - [x] `app.py` : liste les jobs `results/job_xxx/`, permet de consulter un job et de télécharger ses artefacts disponibles
+- [x] `job_launcher.py` : création/lancement partagé des jobs `results/job_xxx/` pour Streamlit et CLI
+- [x] `app.py` : le bouton d'optimisation lance maintenant un job `results/job_xxx/` au lieu de l'ancien mode `optimization_history/`
 - [x] Tests validés : 12 combos / 1 worker et 42 combos / 2 workers → 7/7 fichiers présents
 - [x] Dépôt GitHub créé (privé) : https://github.com/crashboom34/backtest-nasdaq-revolution
 
 ### Reste à faire (prochaines étapes suggérées)
 
-- [ ] Tester le lancement complet depuis Streamlit avec le nouveau système de jobs
+- [ ] Tester manuellement le lancement complet depuis Streamlit avec le nouveau système de jobs
 - [ ] Documenter la source / format exact de `nasdaq_3m.csv`
 - [ ] Éventuellement : déploiement serveur Linux avec `BACKTEST_BASE_DIR`
 
@@ -150,6 +152,7 @@ pip install -r requirements-server.txt
 | Problème                              | Statut      | Note                                                      |
 |---------------------------------------|-------------|-----------------------------------------------------------|
 | `app.py` ne liste pas les jobs CLI    | Corrigé     | Les jobs `results/job_xxx/` sont visibles dans l'onglet Optimisation > Historique Runs |
+| `app.py` lance encore dans `optimization_history/` | Corrigé | Le lancement Streamlit passe par `job_launcher.py` et crée `results/job_xxx/` |
 | Python système sans packages          | Connu       | Toujours utiliser `.venv\Scripts\python.exe`              |
 | `history/` pas dans .gitignore        | Corrigé     | Ajouté dans .gitignore                                    |
 | `.streamlit/credentials.toml` suivi  | Corrigé     | Ajouté dans .gitignore + à retirer du suivi Git            |

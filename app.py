@@ -11,9 +11,7 @@ import numpy as np
 import importlib.util
 import glob
 import os
-import sys
 import subprocess
-import uuid
 import json
 import math
 import datetime
@@ -21,6 +19,7 @@ import urllib.parse
 import html
 import history_store as hs
 import optimization_store as opt_store
+from job_launcher import launch_optimizer_job
 from optimizer import (
     ParamRange, ScoreWeights, FilterConfig, TrainTestConfig,
     OptimizationConfig, count_combinations, benchmark_speed,
@@ -1288,31 +1287,13 @@ def render_new_strategy_tab():
 # ONGLET OPTIMISATION
 # ═══════════════════════════════════════════════════════════════════
 
-def _make_run_id() -> str:
-    from datetime import datetime
-    ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    uid = str(uuid.uuid4())[:4]
-    return f"opt_{ts}_{uid}"
-
-
-def _launch_optimizer(run_id: str, config_dict: dict) -> subprocess.Popen:
-    """Lance optimizer_process.py en subprocess et retourne le handle."""
-    base       = os.path.dirname(os.path.abspath(__file__))
-    opt_dir    = os.path.join(base, "optimization_history")
-    os.makedirs(opt_dir, exist_ok=True)
-
-    config_file = os.path.join(opt_dir, f"{run_id}.config.json")
-    opt_store.atomic_write_json(config_file, config_dict)
-
-    python_exe  = sys.executable
-    script_path = os.path.join(base, "optimizer_process.py")
-    proc = subprocess.Popen(
-        [python_exe, script_path, run_id, config_file],
-        cwd=base,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+def _launch_optimizer(config_dict: dict):
+    """Lance optimizer_process.py en mode job results/job_xxx/."""
+    return launch_optimizer_job(
+        config_dict,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-    return proc
 
 
 def _score_color(score: float) -> str:
@@ -1804,8 +1785,8 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
     current_run_id = st.session_state.get("opt_current_run_id")
     is_running     = False
     if current_run_id:
-        status = opt_store.get_run_status(current_run_id)
-        is_running = (status == "running")
+        status = _get_run_status(current_run_id)
+        is_running = (status in ("running", "benchmarking", "created"))
 
     if not enabled_ranges:
         st.button("▶  Lancer l'optimisation", disabled=True,
@@ -1815,7 +1796,7 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         st.button("▶  Optimisation en cours…", disabled=True,
                   use_container_width=True, key="opt_running_btn")
         if st.button("⏹  Arrêter proprement", use_container_width=True, key="opt_stop_btn"):
-            opt_store.write_stop_flag(current_run_id)
+            _write_stop_flag(current_run_id)
             st.toast("Signal d'arrêt envoyé…", icon="⏹")
     else:
         # ── Anti-overload : protection avant lancement (F5) ───
@@ -1864,8 +1845,7 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                       use_container_width=True, key="opt_launch_blocked")
         elif st.button("▶  Lancer l'optimisation", use_container_width=True, key="opt_launch"):
 
-            run_id = _make_run_id()
-            st.session_state["opt_current_run_id"] = run_id
+            requested_job_id = opt_store.make_job_id()
 
             # Sérialiser la config
             def _sw_to_dict(sw):
@@ -1889,7 +1869,7 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                 }
 
             config_dict = {
-                "run_id":          run_id,
+                "run_id":          requested_job_id,
                 "strategy_module": os.path.join(
                     os.path.dirname(os.path.abspath(__file__)),
                     "strategies",
@@ -1958,8 +1938,12 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                     except Exception:
                         pass
 
-            _launch_optimizer(run_id, config_dict)
-            st.success(f"✅ Optimisation lancée ! ID : `{run_id}`")
+            launched = _launch_optimizer(config_dict)
+            run_id = launched.job_id
+            st.session_state["opt_current_run_id"] = run_id
+            st.session_state["opt_view_run_id"] = run_id
+            st.session_state.setdefault("opt_job_dirs", {})[run_id] = launched.job_dir
+            st.success(f"✅ Optimisation lancée ! Job : `{run_id}`")
             st.toast("Passe sur l'onglet ⏳ Progression pour suivre l'avancement.", icon="🔬")
 
 
@@ -1982,9 +1966,13 @@ def _render_progress_tab():
         """, unsafe_allow_html=True)
         return
 
-    progress = opt_store.read_progress(run_id)
+    progress = _read_progress(run_id)
     if not progress:
         st.info(f"En attente des données pour `{run_id}`…")
+        if _is_job_id(run_id):
+            if st.button("🔄  Actualiser", use_container_width=False, key="prog_wait_refresh"):
+                st.rerun()
+            return
         st.rerun()
         return
 
@@ -1992,6 +1980,7 @@ def _render_progress_tab():
 
     # ── Header état ───────────────────────────────────────────
     status_colors = {
+        "created":     (TEXT_DIM,  "🕓 Créé"),
         "running":     ("#f59e0b", "⚙️ En cours"),
         "benchmarking": (ACCENT,   "📏 Benchmark…"),
         "completed":   (GREEN,     "✅ Terminé"),
@@ -2083,7 +2072,7 @@ def _render_progress_tab():
     with btn_c1:
         if status == "running":
             if st.button("⏹  Arrêter proprement", use_container_width=True, key="prog_stop"):
-                opt_store.write_stop_flag(run_id)
+                _write_stop_flag(run_id)
                 st.toast("Signal d'arrêt envoyé…", icon="⏹")
         elif status in ("completed", "stopped"):
             if st.button("📊  Voir les résultats", use_container_width=True, key="prog_results"):
@@ -2133,6 +2122,27 @@ def _find_job_summary(job_id: str) -> dict:
     except Exception:
         return {}
     return {}
+
+
+def _job_dir_for_run(run_id: str):
+    if not _is_job_id(run_id):
+        return None
+    session_job_dirs = st.session_state.get("opt_job_dirs", {})
+    if run_id in session_job_dirs and os.path.isdir(session_job_dirs[run_id]):
+        return session_job_dirs[run_id]
+    return _find_job_summary(run_id).get("job_dir")
+
+
+def _read_progress(run_id: str):
+    return opt_store.read_progress(run_id, job_dir=_job_dir_for_run(run_id))
+
+
+def _get_run_status(run_id: str) -> str:
+    return opt_store.get_run_status(run_id, job_dir=_job_dir_for_run(run_id))
+
+
+def _write_stop_flag(run_id: str) -> None:
+    opt_store.write_stop_flag(run_id, job_dir=_job_dir_for_run(run_id))
 
 
 def _read_json_file(path: str) -> dict:
@@ -2662,6 +2672,7 @@ def _render_jobs_history_section(jobs: list):
         ]
 
         status_colors = {
+            "created":      (TEXT_DIM, TEXT_DIM, "🕓"),
             "completed":    (GREEN, "#10b981", "✅"),
             "stopped":      (TEXT_DIM, TEXT_DIM, "⏹"),
             "running":      ("#f59e0b", "#f59e0b", "⚙️"),
