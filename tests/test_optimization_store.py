@@ -7,6 +7,7 @@ import sys
 import os
 import json
 import tempfile
+import time
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -57,6 +58,19 @@ class TestProgressFile:
         assert loaded is not None
         assert loaded["status"] == "running"
         assert loaded["progress_pct"] == 42.0
+        assert loaded["updated_at"]
+
+    def test_write_progress_preserves_existing_updated_at(self):
+        state = {
+            "run_id": TEST_RUN_ID,
+            "status": "benchmarking",
+            "progress_pct": 0.0,
+            "updated_at": "2026-05-24T16:46:00",
+        }
+        store.write_progress(TEST_RUN_ID, state)
+        loaded = store.read_progress(TEST_RUN_ID)
+        assert loaded is not None
+        assert loaded["updated_at"] == "2026-05-24T16:46:00"
 
     def test_job_progress_counts_failed_as_done(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -77,6 +91,122 @@ class TestProgressFile:
             assert loaded["combinations_done"] == 100
             assert loaded["combinations_total"] == 200
             assert loaded["progress_pct"] == 50.0
+
+    def test_list_active_jobs_detects_running_job(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BACKTEST_BASE_DIR", str(tmp_path))
+
+        job_id = "job_running_detection"
+        job_dir = store.get_job_dir(job_id)
+        store.write_progress(job_id, {
+            "run_id": job_id,
+            "status": "running",
+            "completed": 10,
+            "failed": 5,
+            "total_combinations": 100,
+            "progress_pct": 15.0,
+            "started_at": "2026-05-24T15:00:00",
+        }, job_dir=job_dir)
+
+        active_jobs = store.list_active_jobs()
+
+        assert len(active_jobs) == 1
+        assert active_jobs[0]["job_id"] == job_id
+        assert active_jobs[0]["status"] == "running"
+        assert active_jobs[0]["combinations_tested"] == 15
+
+    def test_list_active_jobs_detects_benchmarking_job(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BACKTEST_BASE_DIR", str(tmp_path))
+
+        job_id = "job_benchmarking_detection"
+        job_dir = store.get_job_dir(job_id)
+        store.write_progress(job_id, {
+            "run_id": job_id,
+            "status": "benchmarking",
+            "completed": 0,
+            "failed": 0,
+            "total_combinations": 100,
+            "progress_pct": 0.0,
+            "started_at": "2026-05-24T15:00:00",
+        }, job_dir=job_dir)
+
+        active_jobs = store.list_active_jobs()
+
+        assert len(active_jobs) == 1
+        assert active_jobs[0]["job_id"] == job_id
+        assert active_jobs[0]["status"] == "benchmarking"
+
+    def test_list_active_jobs_keeps_recent_created_job(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BACKTEST_BASE_DIR", str(tmp_path))
+
+        job_id = "job_recent_created_detection"
+        job_dir = store.get_job_dir(job_id)
+        store.save_config(job_id, {
+            "run_id": job_id,
+            "strategy_name": "Test Strategy",
+            "mode": "grid",
+            "total_combinations": 12,
+            "param_ranges": [],
+        }, job_dir=job_dir)
+
+        active_jobs = store.list_active_jobs()
+
+        assert len(active_jobs) == 1
+        assert active_jobs[0]["job_id"] == job_id
+        assert active_jobs[0]["status"] == "created"
+
+    def test_list_active_jobs_ignores_old_created_job(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BACKTEST_BASE_DIR", str(tmp_path))
+
+        job_id = "job_old_created_detection"
+        job_dir = store.get_job_dir(job_id)
+        store.save_config(job_id, {
+            "run_id": job_id,
+            "strategy_name": "Test Strategy",
+            "mode": "grid",
+            "total_combinations": 12,
+            "param_ranges": [],
+        }, job_dir=job_dir)
+        config_path = store._path(job_id, ".config.json", job_dir)
+        old_ts = time.time() - store.CREATED_JOB_ACTIVE_SECONDS - 60
+        os.utime(config_path, (old_ts, old_ts))
+
+        assert store.list_active_jobs() == []
+
+    def test_list_active_jobs_ignores_job_with_stop_flag(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BACKTEST_BASE_DIR", str(tmp_path))
+
+        job_id = "job_stop_flag_detection"
+        job_dir = store.get_job_dir(job_id)
+        store.write_progress(job_id, {
+            "run_id": job_id,
+            "status": "running",
+            "completed": 10,
+            "failed": 0,
+            "total_combinations": 100,
+            "progress_pct": 10.0,
+            "started_at": "2026-05-24T15:00:00",
+        }, job_dir=job_dir)
+        store.write_stop_flag(job_id, job_dir=job_dir)
+
+        assert store.list_active_jobs() == []
+
+    @pytest.mark.parametrize("status", ["completed", "error", "failed", "stopped"])
+    def test_list_active_jobs_ignores_terminal_jobs(self, monkeypatch, tmp_path, status):
+        monkeypatch.setenv("BACKTEST_BASE_DIR", str(tmp_path))
+
+        job_id = f"job_{status}_detection"
+        job_dir = store.get_job_dir(job_id)
+        store.write_progress(job_id, {
+            "run_id": job_id,
+            "status": status,
+            "completed": 100,
+            "failed": 0,
+            "total_combinations": 100,
+            "progress_pct": 100.0,
+            "started_at": "2026-05-24T15:00:00",
+        }, job_dir=job_dir)
+
+        assert store.list_active_jobs() == []
 
     def test_read_nonexistent_returns_none(self):
         result = store.read_progress("nonexistent_run_xyz")

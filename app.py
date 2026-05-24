@@ -1390,6 +1390,11 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
     schema       = getattr(mod, "PARAM_SCHEMA", {})
     default_params = dict(getattr(mod, "DEFAULT_PARAMS", params))
 
+    active_jobs = _list_active_jobs()
+    if active_jobs:
+        _render_active_jobs_reconnect_panel(active_jobs, key_prefix="cfg_reconnect")
+        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
     # ── Mode validation rapide (F2) ───────────────────────────
     quick_mode = st.toggle(
         "⚡ Mode validation rapide",
@@ -1940,9 +1945,7 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
 
             launched = _launch_optimizer(config_dict)
             run_id = launched.job_id
-            st.session_state["opt_current_run_id"] = run_id
-            st.session_state["opt_view_run_id"] = run_id
-            st.session_state.setdefault("opt_job_dirs", {})[run_id] = launched.job_dir
+            _remember_job_for_tracking({"job_id": run_id, "job_dir": launched.job_dir})
             st.success(f"✅ Optimisation lancée ! Job : `{run_id}`")
             st.toast("Passe sur l'onglet ⏳ Progression pour suivre l'avancement.", icon="🔬")
 
@@ -1953,6 +1956,11 @@ def _render_progress_tab():
     run_id = st.session_state.get("opt_current_run_id")
 
     if not run_id:
+        active_jobs = _list_active_jobs()
+        if active_jobs:
+            _render_active_jobs_reconnect_panel(active_jobs, key_prefix="prog_reconnect")
+            return
+
         st.markdown(f"""
         <div class="h-empty">
           <div style="font-size:48px;margin-bottom:14px;opacity:0.5">⏳</div>
@@ -2006,6 +2014,10 @@ def _render_progress_tab():
       <span style="font-size:12px;color:{TEXT_DIM};font-family:'JetBrains Mono',monospace">{run_id}</span>
     </div>
     """, unsafe_allow_html=True)
+
+    if status == "benchmarking":
+        _render_benchmarking_progress(run_id, progress, workers)
+        return
 
     # Barre de progression
     if status == "running":
@@ -2144,6 +2156,183 @@ def _get_run_status(run_id: str) -> str:
 
 def _write_stop_flag(run_id: str) -> None:
     opt_store.write_stop_flag(run_id, job_dir=_job_dir_for_run(run_id))
+
+
+def _progress_updated_at(run_id: str, progress: dict):
+    updated_at = progress.get("updated_at")
+    if updated_at:
+        try:
+            return datetime.datetime.fromisoformat(str(updated_at))
+        except ValueError:
+            pass
+
+    job_dir = _job_dir_for_run(run_id)
+    if not job_dir:
+        return None
+
+    path = os.path.join(job_dir, "progress.json")
+    if not os.path.exists(path):
+        return None
+
+    try:
+        return datetime.datetime.fromtimestamp(os.path.getmtime(path))
+    except OSError:
+        return None
+
+
+def _progress_age_seconds(run_id: str, progress: dict):
+    updated = _progress_updated_at(run_id, progress)
+    if not updated:
+        return None
+    return max(0.0, (datetime.datetime.now() - updated).total_seconds())
+
+
+def _fmt_update_label(run_id: str, progress: dict) -> str:
+    updated = _progress_updated_at(run_id, progress)
+    if not updated:
+        return "inconnue"
+    return updated.strftime("%H:%M:%S")
+
+
+def _render_benchmarking_progress(run_id: str, progress: dict, workers: int) -> None:
+    age_seconds = _progress_age_seconds(run_id, progress)
+    update_label = _fmt_update_label(run_id, progress)
+    stale = age_seconds is not None and age_seconds > 120
+
+    st.markdown(f"""
+    <div style="padding:16px;border:1px solid rgba({_hex_to_rgb(ACCENT)},0.32);
+                background:rgba({_hex_to_rgb(ACCENT)},0.08);border-radius:8px;margin-bottom:16px">
+      <div style="font-size:15px;font-weight:700;color:white;margin-bottom:6px">
+        Benchmark en cours
+      </div>
+      <div style="font-size:13px;color:{TEXT_DIM};line-height:1.55">
+        Le système mesure la vitesse avant de lancer l'optimisation.
+        La progression détaillée commencera après le benchmark.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(card("Phase", "Benchmark", "accent"), unsafe_allow_html=True)
+    with c2:
+        st.markdown(card("Workers", f"{workers}", "white"), unsafe_allow_html=True)
+    with c3:
+        st.markdown(card("Dernière maj", update_label, "white"), unsafe_allow_html=True)
+    with c4:
+        st.markdown(card("ETA", "après benchmark", "white"), unsafe_allow_html=True)
+
+    if stale:
+        st.warning(
+            "Benchmark potentiellement bloqué : aucune mise à jour récente du fichier progress.json. "
+            "Le process peut être simplement lent sur un gros historique."
+        )
+
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+    btn_c1, btn_c2, _ = st.columns([1, 1, 4])
+    with btn_c1:
+        if st.button("⏹  Arrêter proprement", use_container_width=True, key="prog_bench_stop"):
+            _write_stop_flag(run_id)
+            st.toast("Signal d'arrêt envoyé…", icon="⏹")
+    with btn_c2:
+        if st.button("🔄  Actualiser", use_container_width=True, key="prog_bench_refresh"):
+            st.rerun()
+
+    import time
+    time.sleep(0.5)
+    st.rerun()
+
+
+def _list_active_jobs() -> list:
+    try:
+        return opt_store.list_active_jobs()
+    except Exception:
+        return []
+
+
+def _remember_job_for_tracking(job: dict) -> None:
+    job_id = job.get("job_id") or job.get("run_id")
+    if not job_id:
+        return
+
+    st.session_state["opt_current_run_id"] = job_id
+    st.session_state["opt_view_run_id"] = job_id
+
+    job_dir = job.get("job_dir") or _job_dir_for_run(job_id)
+    if job_dir:
+        st.session_state.setdefault("opt_job_dirs", {})[job_id] = job_dir
+
+
+def _render_active_jobs_reconnect_panel(active_jobs: list = None, key_prefix: str = "active_jobs") -> bool:
+    jobs = active_jobs if active_jobs is not None else _list_active_jobs()
+    if not jobs:
+        return False
+
+    title = "Un job est en cours" if len(jobs) == 1 else f"{len(jobs)} jobs sont en cours"
+    st.markdown(f"""
+    <div style="padding:16px;border:1px solid rgba({_hex_to_rgb(ACCENT)},0.35);
+                background:rgba({_hex_to_rgb(ACCENT)},0.08);border-radius:8px;margin-bottom:14px">
+      <div style="font-size:15px;font-weight:700;color:white;margin-bottom:4px">{title}</div>
+      <div style="font-size:12px;color:{TEXT_DIM}">
+        Suivi retrouvé depuis <code>results/job_xxx/progress.json</code>.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    for idx, job in enumerate(jobs):
+        _render_active_job_card(job, key_prefix=f"{key_prefix}_{idx}")
+
+    return True
+
+
+def _render_active_job_card(job: dict, key_prefix: str) -> None:
+    job_id   = job.get("job_id", "")
+    job_dir  = job.get("job_dir", "")
+    status   = job.get("status", "unknown")
+    progress = float(job.get("progress_pct", 0) or 0)
+    elapsed  = job.get("duration_seconds", 0) or 0
+    tested   = job.get("combinations_tested", 0) or 0
+    total    = job.get("total_combinations", 0) or 0
+    config   = _load_job_config(job_dir)
+    asset, timeframe = _infer_asset_timeframe(config)
+
+    st.markdown(f"""
+    <div class="history-card" style="margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;position:relative">
+        <div>
+          <div class="h-name" style="font-family:'JetBrains Mono',monospace;font-size:13px">
+            {_safe_html(job_id)}
+          </div>
+          <div class="h-meta" style="margin-top:4px">
+            Statut {_safe_html(status)} · Progression {progress:.1f}% · Écoulé {format_duration(elapsed)}
+          </div>
+          <div class="h-meta" style="margin-top:2px">
+            Actif {_safe_html(asset)} · Timeframe {_safe_html(timeframe)} · {tested:,}/{total:,} combinaisons
+          </div>
+        </div>
+        <span style="color:#f59e0b;font-size:12px;font-weight:600">En cours</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.progress(max(0.0, min(1.0, progress / 100)))
+    c1, c2, c3, _ = st.columns([1.35, 1.25, 1.25, 4.15])
+    with c1:
+        if st.button("Reprendre le suivi", key=f"{key_prefix}_resume_{job_id}", use_container_width=True):
+            _remember_job_for_tracking(job)
+            st.toast(f"Suivi repris pour {job_id[-8:]}", icon="⏳")
+            st.rerun()
+    with c2:
+        if st.button("Voir dans Résultats", key=f"{key_prefix}_view_{job_id}", use_container_width=True):
+            _remember_job_for_tracking(job)
+            st.session_state["opt_view_run_id"] = job_id
+            st.toast("Job chargé — ouvre l'onglet Résultats.", icon="📊")
+    with c3:
+        if st.button("Arrêter proprement", key=f"{key_prefix}_stop_{job_id}", use_container_width=True):
+            opt_store.write_stop_flag(job_id, job_dir=job_dir or _job_dir_for_run(job_id))
+            st.toast("Signal d'arrêt envoyé…", icon="⏹")
+
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
 
 
 def _read_json_file(path: str) -> dict:

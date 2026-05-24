@@ -39,6 +39,11 @@ from pathlib import Path
 from typing import Optional, Union
 
 
+ACTIVE_JOB_STATUSES = {"benchmarking", "running"}
+CREATED_JOB_ACTIVE_SECONDS = 5 * 60
+TERMINAL_JOB_STATUSES = {"completed", "error", "failed", "stopped"}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # BASE DIRS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -173,7 +178,9 @@ def _enrich_progress_for_job(state: dict, job_dir: str) -> dict:
 
 def write_progress(run_id: str, state: dict, job_dir: Optional[str] = None) -> None:
     """Écrit l'état de progression en mode atomique."""
-    data = _enrich_progress_for_job(state, job_dir) if job_dir else state
+    state_with_update = dict(state)
+    state_with_update.setdefault("updated_at", datetime.now().isoformat())
+    data = _enrich_progress_for_job(state_with_update, job_dir) if job_dir else state_with_update
     atomic_write_json(_path(run_id, "_progress.json", job_dir), data)
 
 
@@ -536,6 +543,56 @@ def list_jobs() -> list:
 
     jobs.sort(key=lambda j: j["date"], reverse=True)
     return jobs
+
+
+def _job_timestamp_for_activity(job: dict) -> Optional[float]:
+    """Retourne le timestamp disque le plus fiable pour juger un job récent."""
+    job_id = job.get("job_id", "")
+    job_dir = job.get("job_dir", "")
+    if not job_id or not job_dir:
+        return None
+
+    for suffix in ("_progress.json", ".config.json"):
+        path = _path(job_id, suffix, job_dir)
+        if os.path.exists(path):
+            try:
+                return os.path.getmtime(path)
+            except OSError:
+                return None
+    return None
+
+
+def is_active_job(job: dict, now_ts: Optional[float] = None) -> bool:
+    """Détermine si un job doit être proposé comme réellement actif."""
+    job_id = job.get("job_id", "")
+    job_dir = job.get("job_dir", "")
+    status = job.get("status", "")
+
+    if status in TERMINAL_JOB_STATUSES:
+        return False
+
+    if job_id and job_dir and os.path.exists(_path(job_id, "_stop.flag", job_dir)):
+        return False
+
+    if status in ACTIVE_JOB_STATUSES:
+        return True
+
+    if status == "created":
+        ts = _job_timestamp_for_activity(job)
+        if ts is None:
+            return False
+        now = time.time() if now_ts is None else now_ts
+        return 0 <= (now - ts) <= CREATED_JOB_ACTIVE_SECONDS
+
+    return False
+
+
+def list_active_jobs(now_ts: Optional[float] = None) -> list:
+    """Liste les jobs encore actifs depuis results/job_xxx/."""
+    return [
+        job for job in list_jobs()
+        if is_active_job(job, now_ts=now_ts)
+    ]
 
 
 def load_job(job_id: str) -> Optional[dict]:
