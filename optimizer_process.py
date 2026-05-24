@@ -278,18 +278,22 @@ if __name__ == "__main__":
 
     def write_state(status="running"):
         elapsed   = time.perf_counter() - t_start
-        done      = state["completed"]
-        remaining = max(0, n_total - done - len(already_tested))
-        speed     = done / elapsed if elapsed > 0 else 0
+        completed = state["completed"]
+        failed    = state["failed"]
+        processed = completed + failed
+        remaining = max(0, n_total - processed)
+        speed     = processed / elapsed if elapsed > 0 else 0
         eta       = remaining / speed if speed > 0 else None
 
         write_progress(run_id, {
             "run_id":                    run_id,
             "status":                    status,
             "total_combinations":        n_total,
-            "completed":                 done,
-            "failed":                    state["failed"],
-            "progress_pct":              round(done / max(1, n_total) * 100, 1),
+            "completed":                 completed,
+            "failed":                    failed,
+            "combinations_done":         processed,
+            "combinations_total":        n_total,
+            "progress_pct":              round(processed / max(1, n_total) * 100, 1),
             "best_score":                round(state["best_score"], 2),
             "best_params":               state["best_params"],
             "best_stats":                state["best_stats"],
@@ -396,12 +400,18 @@ if __name__ == "__main__":
         tb = traceback.format_exc()
         _log(f"ERREUR : {e}\n{tb}")
         write_progress(run_id, {
-            "run_id":      run_id,
-            "status":      "error",
-            "error_message": str(e),
-            "completed":   state["completed"],
-            "failed":      state["failed"],
-            "started_at":  _run_started,
+            "run_id":             run_id,
+            "status":             "error",
+            "error_message":      str(e),
+            "total_combinations": n_total,
+            "completed":          state["completed"],
+            "failed":             state["failed"],
+            "combinations_done":  state["completed"] + state["failed"],
+            "combinations_total": n_total,
+            "progress_pct":       round(
+                (state["completed"] + state["failed"]) / max(1, n_total) * 100, 1
+            ),
+            "started_at":         _run_started,
         }, job_dir=job_dir)
         # On continue quand même pour sauvegarder les résultats partiels
 

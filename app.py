@@ -1993,6 +1993,7 @@ def _render_progress_tab():
     total      = progress.get("total_combinations", 1)
     pct        = progress.get("progress_pct", 0.0)
     failed     = progress.get("failed", 0)
+    processed  = progress.get("combinations_done", completed + failed)
     best_score = progress.get("best_score", 0.0)
     elapsed    = progress.get("elapsed_seconds", 0)
     eta        = progress.get("eta_seconds")
@@ -2013,7 +2014,7 @@ def _render_progress_tab():
     # Métriques temps réel
     m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
-        st.markdown(card("Terminés", f"{completed:,}", "white",
+        st.markdown(card("Traitées", f"{processed:,}", "white",
                          sub=f"/ {total:,} total"), unsafe_allow_html=True)
     with m2:
         st.markdown(card("Filtrés", f"{failed:,}", "accent"), unsafe_allow_html=True)

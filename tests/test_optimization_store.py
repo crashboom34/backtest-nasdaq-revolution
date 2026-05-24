@@ -58,6 +58,26 @@ class TestProgressFile:
         assert loaded["status"] == "running"
         assert loaded["progress_pct"] == 42.0
 
+    def test_job_progress_counts_failed_as_done(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            job_dir = os.path.join(tmp_dir, TEST_RUN_ID)
+            state = {
+                "run_id": TEST_RUN_ID,
+                "status": "running",
+                "completed": 0,
+                "failed": 100,
+                "total_combinations": 200,
+                "progress_pct": 50.0,
+            }
+
+            store.write_progress(TEST_RUN_ID, state, job_dir=job_dir)
+            loaded = store.read_progress(TEST_RUN_ID, job_dir=job_dir)
+
+            assert loaded is not None
+            assert loaded["combinations_done"] == 100
+            assert loaded["combinations_total"] == 200
+            assert loaded["progress_pct"] == 50.0
+
     def test_read_nonexistent_returns_none(self):
         result = store.read_progress("nonexistent_run_xyz")
         assert result is None

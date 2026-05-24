@@ -157,7 +157,10 @@ def _enrich_progress_for_job(state: dict, job_dir: str) -> dict:
 
     # Backward compat : dupliquer sous les anciens noms si absents
     if "combinations_done" not in enriched:
-        enriched["combinations_done"] = enriched.get("completed", 0)
+        enriched["combinations_done"] = (
+            (enriched.get("completed", 0) or 0)
+            + (enriched.get("failed", 0) or 0)
+        )
     if "combinations_total" not in enriched:
         enriched["combinations_total"] = enriched.get("total_combinations", 0)
 
@@ -462,6 +465,9 @@ def list_jobs() -> list:
             # Job en cours, juste créé, ou vide — essayer progress/config.
             prog = read_progress(run_id, job_dir)
             if prog:
+                processed = prog.get("combinations_done")
+                if processed is None:
+                    processed = (prog.get("completed", 0) or 0) + (prog.get("failed", 0) or 0)
                 jobs.append({
                     "job_id":              job_id,
                     "job_dir":             job_dir,
@@ -470,7 +476,7 @@ def list_jobs() -> list:
                     "mode":                prog.get("mode", ""),
                     "status":              prog.get("status", "running"),
                     "total_combinations":  prog.get("total_combinations", 0),
-                    "combinations_tested": prog.get("completed", 0),
+                    "combinations_tested": processed,
                     "duration_seconds":    prog.get("elapsed_seconds", 0),
                     "best_score":          prog.get("best_score", 0),
                     "workers_used":        prog.get("workers_used", 1),
