@@ -40,3 +40,13 @@ desktop.ini
 .idea/
 *.swp
 *.swo
+
+# === Streamlit ===
+.streamlit/credentials.toml
+
+# === Variables d'environnement ===
+.env
+.env.*
+
+# === Données générées / cache ===
+history/
