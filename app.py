@@ -18,6 +18,7 @@ import json
 import math
 import datetime
 import urllib.parse
+import html
 import history_store as hs
 import optimization_store as opt_store
 from optimizer import (
@@ -2105,6 +2106,170 @@ def _render_progress_tab():
 
 # ── Sous-onglet Résultats ───────────────────────────────────────────
 
+_JOB_DOWNLOAD_FILES = [
+    ("results.csv", "Résultats complets", "text/csv"),
+    ("best_strategies.csv", "Meilleures stratégies", "text/csv"),
+    ("metrics.json", "Métriques", "application/json"),
+    ("report.html", "Rapport HTML", "text/html"),
+    ("archive.zip", "Archive ZIP", "application/zip"),
+]
+
+
+def _safe_html(value) -> str:
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def _is_job_id(run_id: str) -> bool:
+    return str(run_id or "").startswith("job_")
+
+
+def _find_job_summary(job_id: str) -> dict:
+    if not _is_job_id(job_id):
+        return {}
+    try:
+        for job in opt_store.list_jobs():
+            if job.get("job_id") == job_id:
+                return job
+    except Exception:
+        return {}
+    return {}
+
+
+def _read_json_file(path: str) -> dict:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _load_job_config(job_dir: str) -> dict:
+    if not job_dir:
+        return {}
+    return _read_json_file(os.path.join(job_dir, "config_used.json"))
+
+
+def _infer_asset_timeframe(config: dict) -> tuple:
+    asset = (
+        config.get("asset")
+        or config.get("symbol")
+        or config.get("instrument")
+        or config.get("ticker")
+        or config.get("strategy_symbol")
+    )
+    timeframe = (
+        config.get("timeframe")
+        or config.get("time_frame")
+        or config.get("period")
+        or config.get("tf")
+    )
+
+    data_file = str(config.get("data_file", ""))
+    base_name = os.path.basename(data_file)
+    compact = base_name.lower().replace("_", "").replace("-", "")
+
+    if not asset and base_name:
+        if "nasdaq" in compact or "us100" in compact:
+            asset = "US100 / NASDAQ"
+        else:
+            asset = os.path.splitext(base_name)[0]
+
+    if not timeframe and base_name:
+        if "m3" in compact or "3m" in compact:
+            timeframe = "M3"
+
+    return asset or "—", timeframe or "—"
+
+
+def _load_result_context(run_id: str) -> tuple:
+    """
+    Retourne (meta, job_dir, config, job_summary).
+    job_dir vaut None pour l'ancien mode optimization_history/.
+    """
+    if not _is_job_id(run_id):
+        return opt_store.load_meta(run_id), None, {}, {}
+
+    job = _find_job_summary(run_id)
+    job_dir = job.get("job_dir", "")
+    meta = opt_store.load_job(run_id) if job_dir else None
+
+    if not meta and job:
+        meta = {
+            "run_id": run_id,
+            "job_id": run_id,
+            "job_dir": job_dir,
+            "date": job.get("date", ""),
+            "strategy_name": job.get("strategy_name", ""),
+            "mode": job.get("mode", ""),
+            "status": job.get("status", "unknown"),
+            "total_combinations": job.get("total_combinations", 0),
+            "combinations_tested": job.get("combinations_tested", 0),
+            "duration_seconds": job.get("duration_seconds", 0),
+            "best_score": job.get("best_score", 0),
+            "workers_used": job.get("workers_used", 1),
+            "progress_pct": job.get("progress_pct", 0),
+            "variables_tested": job.get("variables_tested", []),
+            "top_100": [],
+        }
+
+    if meta and job:
+        for key in (
+            "status", "progress_pct", "total_combinations", "combinations_tested",
+            "duration_seconds", "best_score", "workers_used", "variables_tested",
+        ):
+            if key in job:
+                meta[key] = job.get(key)
+        meta["job_dir"] = job_dir
+
+    config = _load_job_config(job_dir)
+    return meta, job_dir, config, job
+
+
+def _fmt_file_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} o"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} Ko"
+    return f"{size_bytes / (1024 * 1024):.1f} Mo"
+
+
+def _render_job_downloads(job_dir: str, job_id: str):
+    if not job_dir or not os.path.isdir(job_dir):
+        st.info("Dossier de job introuvable.")
+        return
+
+    for filename, label, mime in _JOB_DOWNLOAD_FILES:
+        path = os.path.join(job_dir, filename)
+        cols = st.columns([2.4, 1.1, 1.4])
+        exists = os.path.exists(path)
+
+        with cols[0]:
+            st.markdown(f"**{label}**  \n`{filename}`")
+        with cols[1]:
+            st.caption(_fmt_file_size(os.path.getsize(path)) if exists else "Absent")
+        with cols[2]:
+            if exists:
+                with open(path, "rb") as f:
+                    data = f.read()
+                st.download_button(
+                    "Télécharger",
+                    data,
+                    file_name=filename,
+                    mime=mime,
+                    key=f"job_download_{job_id}_{filename.replace('.', '_')}",
+                    use_container_width=True,
+                )
+            else:
+                st.button(
+                    "Indisponible",
+                    disabled=True,
+                    key=f"job_missing_{job_id}_{filename.replace('.', '_')}",
+                    use_container_width=True,
+                )
+
+
 def _render_results_tab():
     # Quel run afficher ?
     run_id = st.session_state.get("opt_view_run_id") or st.session_state.get("opt_current_run_id")
@@ -2124,35 +2289,50 @@ def _render_results_tab():
         """, unsafe_allow_html=True)
         return
 
-    meta = opt_store.load_meta(run_id)
+    meta, job_dir, job_config, job_summary = _load_result_context(run_id)
     if not meta:
-        st.info(f"Run `{run_id}` non encore terminé ou introuvable.")
+        st.info(f"Run ou job `{run_id}` introuvable.")
         return
 
     top_100 = meta.get("top_100", [])
-    if not top_100:
-        st.warning("Aucun résultat valide dans ce run.")
-        return
-
     report  = meta.get("report", {})
     sens    = meta.get("sensitivity", {})
+    asset, timeframe = _infer_asset_timeframe(job_config)
 
     # ── Résumé header ─────────────────────────────────────────
     status_str  = meta.get("status", "completed")
+    n_total     = meta.get("total_combinations", 0)
     n_tested    = meta.get("combinations_tested", 0)
     n_filtered  = meta.get("combinations_filtered_out", 0)
     duration    = meta.get("duration_seconds", 0)
     mode        = meta.get("mode", "")
-    best        = top_100[0]
+    progress    = meta.get("progress_pct", job_summary.get("progress_pct", 100 if status_str == "completed" else 0))
+    best        = top_100[0] if top_100 else {}
     best_score  = best.get("score", 0)
+    if not best_score:
+        best_score = meta.get("best_score", job_summary.get("best_score", 0))
     best_stats  = best.get("stats", {})
+    source_label = "Job" if job_dir else "Run"
+    details = [
+        f"Mode {mode}" if mode else "",
+        f"{n_tested:,}/{n_total:,} tests" if n_total else f"{n_tested:,} tests",
+        f"{n_filtered:,} filtrés" if n_filtered else "",
+        format_duration(duration),
+    ]
+    if job_dir:
+        details.extend([
+            f"Actif {asset}",
+            f"Timeframe {timeframe}",
+            f"Progression {float(progress or 0):.1f}%",
+        ])
+    details = " · ".join(d for d in details if d)
 
     st.markdown(f"""
     <div class="dash-header" style="margin-bottom:16px">
       <div>
-        <div class="dash-title">🔬 {meta.get('strategy_name', '')} — Run {run_id[-8:]}</div>
+        <div class="dash-title">🔬 {_safe_html(meta.get('strategy_name', ''))} — {source_label} {_safe_html(run_id[-8:])}</div>
         <div class="dash-subtitle">
-          Mode {mode} · {n_tested:,} tests · {n_filtered:,} filtrés · {format_duration(duration)}
+          {_safe_html(details)}
           &nbsp;·&nbsp; {len(top_100)} résultats valides
         </div>
       </div>
@@ -2165,15 +2345,24 @@ def _render_results_tab():
     </div>
     """, unsafe_allow_html=True)
 
-    res_top10, res_all, res_report = st.tabs(["🥇 Top 10", "📋 Tous les résultats", "📝 Rapport"])
+    tabs = st.tabs(
+        ["🥇 Top 10", "📋 Tous les résultats", "📝 Rapport", "📦 Fichiers job"]
+        if job_dir else
+        ["🥇 Top 10", "📋 Tous les résultats", "📝 Rapport"]
+    )
+    res_top10, res_all, res_report = tabs[:3]
+    res_files = tabs[3] if job_dir else None
 
     # ── Top 10 ────────────────────────────────────────────────
     with res_top10:
-        _render_top10(top_100[:10], sens, meta)
+        if top_100:
+            _render_top10(top_100[:10], sens, meta, key_prefix=run_id)
+        else:
+            st.info("Aucun top résultat disponible pour ce job.")
 
     # ── Tous les résultats ────────────────────────────────────
     with res_all:
-        df_results = opt_store.load_results_csv(run_id)
+        df_results = opt_store.load_results_csv(run_id, job_dir=job_dir)
         if df_results.empty:
             st.info("CSV de résultats non disponible.")
         else:
@@ -2182,6 +2371,7 @@ def _render_results_tab():
             st.download_button(
                 "⬇ Télécharger tous les résultats (.csv)",
                 csv_bytes, f"{run_id}_results.csv", "text/csv",
+                key=f"results_csv_{run_id}",
             )
 
     # ── Rapport ────────────────────────────────────────────────
@@ -2191,8 +2381,12 @@ def _render_results_tab():
         else:
             st.info("Rapport non disponible pour ce run.")
 
+    if res_files is not None:
+        with res_files:
+            _render_job_downloads(job_dir, run_id)
 
-def _render_top10(top10: list, sens: dict, meta: dict):
+
+def _render_top10(top10: list, sens: dict, meta: dict, key_prefix: str = ""):
     tt_enabled = meta.get("train_test", {}).get("enabled", False)
 
     for entry in top10:
@@ -2268,7 +2462,7 @@ def _render_top10(top10: list, sens: dict, meta: dict):
             # Bouton relancer backtest
             if st.button(
                 "🔁 Relancer ce backtest",
-                key=f"rerun_top_{rank}",
+                key=f"rerun_top_{key_prefix}_{rank}",
                 use_container_width=False,
             ):
                 st.session_state["opt_rerun_params"] = params
@@ -2423,16 +2617,140 @@ def _render_report(report: dict, sens: dict):
 
 # ── Sous-onglet Historique Runs ────────────────────────────────────
 
+def _render_jobs_history_section(jobs: list):
+    st.markdown(f"""
+    <div style="margin-bottom:20px">
+      <div style="font-size:18px;font-weight:700;color:white;margin-bottom:4px">
+        📦 Jobs serveur
+      </div>
+      <div style="font-size:13px;color:{TEXT_DIM}">
+        {len(jobs)} job{'s' if len(jobs) != 1 else ''} dans <code>results/job_xxx/</code>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if not jobs:
+        st.markdown(f"""
+        <div class="h-empty" style="margin-bottom:22px">
+          <div style="font-size:40px;margin-bottom:12px;opacity:0.5">📦</div>
+          <div style="font-size:14px;font-weight:600;color:{TEXT};margin-bottom:4px">
+            Aucun job serveur trouvé
+          </div>
+          <div style="font-size:12px;color:{TEXT_DIM}">
+            Les jobs lancés en CLI apparaîtront ici après création dans results/job_xxx/.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    for job in jobs:
+        job_id     = job.get("job_id", "")
+        job_dir    = job.get("job_dir", "")
+        status     = job.get("status", "unknown")
+        best_score = job.get("best_score", 0) or 0
+        n_tested   = job.get("combinations_tested", 0) or 0
+        n_total    = job.get("total_combinations", 0) or 0
+        duration   = job.get("duration_seconds", 0) or 0
+        progress   = float(job.get("progress_pct", 0) or 0)
+        mode       = job.get("mode", "")
+        variables  = job.get("variables_tested", []) or []
+        config     = _load_job_config(job_dir)
+        asset, timeframe = _infer_asset_timeframe(config)
+        files_ok = [
+            filename for filename, _, _ in _JOB_DOWNLOAD_FILES
+            if job_dir and os.path.exists(os.path.join(job_dir, filename))
+        ]
+
+        status_colors = {
+            "completed":    (GREEN, "#10b981", "✅"),
+            "stopped":      (TEXT_DIM, TEXT_DIM, "⏹"),
+            "running":      ("#f59e0b", "#f59e0b", "⚙️"),
+            "benchmarking": (ACCENT, ACCENT, "📏"),
+            "error":        (RED, RED, "❌"),
+        }
+        sc, _, si = status_colors.get(status, (TEXT_DIM, TEXT_DIM, "?"))
+
+        with st.container():
+            st.markdown(f"""
+            <div class="history-card">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;position:relative">
+                <div>
+                  <div class="h-name" style="font-family:'JetBrains Mono',monospace;font-size:13px">{_safe_html(job_id)}</div>
+                  <div class="h-meta">{_safe_html(job.get('strategy_name',''))} · {_safe_html(_fmt_date(job.get('date','')))}</div>
+                  <div class="h-meta" style="margin-top:2px">
+                    Actif {_safe_html(asset)} · Timeframe {_safe_html(timeframe)} · Mode {_safe_html(mode)}
+                  </div>
+                  <div class="h-meta" style="margin-top:2px">
+                    Variables : {_safe_html(', '.join(variables[:4]) if variables else '—')}{'…' if len(variables)>4 else ''}
+                    · Fichiers : {len(files_ok)}/{len(_JOB_DOWNLOAD_FILES)}
+                  </div>
+                </div>
+                <span style="color:{sc};font-size:12px;font-weight:600">{si} {_safe_html(status)}</span>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px;position:relative">
+                <div class="h-stat">
+                  <div class="h-stat-label">Meilleur score</div>
+                  <div class="h-stat-value" style="color:{_score_color(float(best_score))}">{float(best_score):.1f}</div>
+                </div>
+                <div class="h-stat">
+                  <div class="h-stat-label">Combinaisons</div>
+                  <div class="h-stat-value">{n_tested:,}/{n_total:,}</div>
+                </div>
+                <div class="h-stat">
+                  <div class="h-stat-label">Progression</div>
+                  <div class="h-stat-value">{progress:.1f}%</div>
+                </div>
+                <div class="h-stat">
+                  <div class="h-stat-label">Durée</div>
+                  <div class="h-stat-value">{format_duration(duration)}</div>
+                </div>
+                <div class="h-stat">
+                  <div class="h-stat-label">Workers</div>
+                  <div class="h-stat-value">{job.get('workers_used', 1)}</div>
+                </div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.progress(max(0.0, min(1.0, progress / 100)))
+            bc1, bc2, _ = st.columns([1, 1.4, 5.6])
+            with bc1:
+                if st.button("📊 Voir", key=f"job_view_{job_id}", use_container_width=True, type="secondary"):
+                    st.session_state["opt_view_run_id"] = job_id
+                    st.toast(f"Job {job_id[-8:]} chargé — passe sur l'onglet 📊 Résultats", icon="📊")
+            with bc2:
+                if job_dir and os.path.exists(os.path.join(job_dir, "archive.zip")):
+                    with open(os.path.join(job_dir, "archive.zip"), "rb") as f:
+                        archive_bytes = f.read()
+                    st.download_button(
+                        "⬇ archive.zip",
+                        archive_bytes,
+                        file_name="archive.zip",
+                        mime="application/zip",
+                        key=f"job_archive_{job_id}",
+                        use_container_width=True,
+                    )
+                else:
+                    st.button("Archive absente", disabled=True, key=f"job_archive_missing_{job_id}", use_container_width=True)
+
+            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+
 def _render_opt_history_tab():
+    jobs = opt_store.list_jobs()
     runs = opt_store.list_runs()
+
+    _render_jobs_history_section(jobs)
+
+    st.markdown("<hr style='border-color:var(--border);margin:18px 0 22px'>", unsafe_allow_html=True)
 
     st.markdown(f"""
     <div style="margin-bottom:20px">
       <div style="font-size:18px;font-weight:700;color:white;margin-bottom:4px">
-        📂 Historique des Optimisations
+        📂 Ancien historique des optimisations
       </div>
       <div style="font-size:13px;color:{TEXT_DIM}">
-        {len(runs)} run{'s' if len(runs) != 1 else ''} sauvegardé{'s' if len(runs) != 1 else ''}
+        {len(runs)} run{'s' if len(runs) != 1 else ''} dans <code>optimization_history/</code>
       </div>
     </div>
     """, unsafe_allow_html=True)
