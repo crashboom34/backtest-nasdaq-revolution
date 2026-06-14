@@ -48,6 +48,41 @@ class TestAtomicWrite:
         assert os.path.exists(path)
         os.remove(path)
 
+    def test_atomic_write_retries_temporary_permission_error(self, monkeypatch, tmp_path):
+        """Un verrou Windows temporaire sur os.replace doit être absorbé."""
+        path = tmp_path / "progress.json"
+        calls = {"count": 0}
+        real_replace = store.os.replace
+
+        def flaky_replace(src, dst):
+            calls["count"] += 1
+            if calls["count"] <= 2:
+                raise PermissionError("temporary Windows lock")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(store.os, "replace", flaky_replace)
+        monkeypatch.setattr(store.time, "sleep", lambda _delay: None)
+
+        store.atomic_write_json(str(path), {"status": "running"})
+
+        assert calls["count"] == 3
+        assert json.loads(path.read_text(encoding="utf-8")) == {"status": "running"}
+
+    def test_atomic_write_raises_after_persistent_permission_error(self, monkeypatch, tmp_path):
+        """Une erreur persistante doit rester visible et nettoyer le temporaire."""
+        path = tmp_path / "progress.json"
+
+        def locked_replace(_src, _dst):
+            raise PermissionError("persistent Windows lock")
+
+        monkeypatch.setattr(store.os, "replace", locked_replace)
+        monkeypatch.setattr(store.time, "sleep", lambda _delay: None)
+
+        with pytest.raises(PermissionError, match="Impossible de remplacer"):
+            store.atomic_write_json(str(path), {"status": "running"})
+
+        assert list(tmp_path.glob("*.tmp")) == []
+
 
 class TestProgressFile:
 

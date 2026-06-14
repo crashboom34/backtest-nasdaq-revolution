@@ -53,7 +53,8 @@ if __name__ == "__main__":
         OptimizationConfig, ParamRange, TrainTestConfig,
         ScoreWeights, FilterConfig,
         Optimizer, benchmark_speed, count_combinations,
-        estimate_duration, format_duration,
+        effective_combinations_total, estimate_duration, format_duration,
+        normalize_max_combinations,
     )
     from report_generator import generate_report
     from engine import load_data
@@ -118,6 +119,19 @@ if __name__ == "__main__":
     param_ranges = [
         ParamRange(**pr) for pr in cfg_dict["param_ranges"]
     ]
+    raw_total_combinations = count_combinations([pr for pr in param_ranges if pr.enabled])
+    max_combinations = normalize_max_combinations(cfg_dict.get("max_combinations"))
+    if cfg_dict.get("quick_validation_mode") and max_combinations is None:
+        max_combinations = normalize_max_combinations(cfg_dict.get("total_combinations"))
+    effective_total_combinations = effective_combinations_total(
+        raw_total_combinations,
+        max_combinations,
+    )
+    cfg_dict["raw_total_combinations"] = raw_total_combinations
+    cfg_dict["total_combinations"] = effective_total_combinations
+    if max_combinations is not None:
+        cfg_dict["max_combinations"] = max_combinations
+        cfg_dict["max_combinations_applied"] = effective_total_combinations
 
     sw_dict = cfg_dict.get("score_weights", {})
     score_weights = ScoreWeights(
@@ -164,6 +178,7 @@ if __name__ == "__main__":
         global_params=cfg_dict.get("global_params", {}),
         n_workers=cfg_dict.get("n_workers", 1),
         max_combinations_warning=cfg_dict.get("max_combinations_warning", 100_000),
+        max_combinations=max_combinations,
         top_k_save=cfg_dict.get("top_k_save", 100),
         top_k_display=cfg_dict.get("top_k_display", 10),
         resume_run_id=cfg_dict.get("resume_run_id", None),
@@ -252,7 +267,9 @@ if __name__ == "__main__":
         already_tested = load_tested_hashes(config.resume_run_id)
         _log(f"Reprise : {len(already_tested)} combinaisons déjà testées")
 
-    n_total = count_combinations([pr for pr in param_ranges if pr.enabled])
+    n_total = effective_total_combinations
+    if max_combinations is not None and raw_total_combinations != n_total:
+        _log(f"Limite max_combinations appliquée : {n_total}/{raw_total_combinations}")
     eta_init = estimate_duration(
         max(0, n_total - len(already_tested)),
         benchmark_ms,

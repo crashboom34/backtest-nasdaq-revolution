@@ -1189,7 +1189,7 @@ def render_new_strategy_tab():
     with col_left:
         st.markdown(f"<div class='section-title'>Code ProRealCode à traduire</div>", unsafe_allow_html=True)
         prc_code = st.text_area(
-            label="",
+            label="Code ProRealCode",
             placeholder="// Colle ton code ProRealCode ici...\nDEFPARAM CumulateOrders = False\n...",
             height=380,
             key="prc_input",
@@ -1305,6 +1305,179 @@ def _score_color(score: float) -> str:
         return RED
 
 
+def _score_class(score: float) -> str:
+    if score >= 70:
+        return "green"
+    if score >= 50:
+        return "accent"
+    return "red"
+
+
+_ACTIVE_REFRESH_STATUSES = {"created", "benchmarking", "running"}
+_TERMINAL_STATUSES = {"completed", "stopped", "failed", "error"}
+
+
+_STATUS_UI = {
+    "created": {
+        "label": "Préparation",
+        "icon": "🕓",
+        "color": TEXT_DIM,
+        "description": "Le job est créé et attend le démarrage du process.",
+    },
+    "benchmarking": {
+        "label": "Benchmark en cours",
+        "icon": "📏",
+        "color": ACCENT,
+        "description": "Le système mesure la vitesse avant l'optimisation.",
+    },
+    "running": {
+        "label": "Optimisation en cours",
+        "icon": "⚙️",
+        "color": "#f59e0b",
+        "description": "Les combinaisons sont en cours de test.",
+    },
+    "completed": {
+        "label": "Terminé",
+        "icon": "✅",
+        "color": GREEN,
+        "description": "Le job est terminé et les fichiers peuvent être consultés.",
+    },
+    "stopped": {
+        "label": "Arrêté",
+        "icon": "⏹",
+        "color": TEXT_DIM,
+        "description": "Le job a reçu un signal d'arrêt propre.",
+    },
+    "failed": {
+        "label": "Erreur",
+        "icon": "❌",
+        "color": RED,
+        "description": "Le job s'est terminé avec une erreur.",
+    },
+    "error": {
+        "label": "Erreur",
+        "icon": "❌",
+        "color": RED,
+        "description": "Le job s'est terminé avec une erreur.",
+    },
+}
+
+
+def _status_ui(status: str) -> dict:
+    return _STATUS_UI.get(str(status or "").lower(), {
+        "label": str(status or "Inconnu"),
+        "icon": "•",
+        "color": TEXT_DIM,
+        "description": "Statut non reconnu.",
+    })
+
+
+def _status_badge(status: str) -> str:
+    info = _status_ui(status)
+    color = info["color"]
+    return (
+        f'<span style="display:inline-flex;align-items:center;gap:6px;'
+        f'color:{color};font-size:12px;font-weight:700">'
+        f'{info["icon"]} {_safe_html(info["label"])}</span>'
+    )
+
+
+def _is_active_status(status: str) -> bool:
+    return str(status or "").lower() in _ACTIVE_REFRESH_STATUSES
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "oui", "on")
+    return False
+
+
+def _is_quick_validation(config: dict = None, meta: dict = None) -> bool:
+    for source in (config or {}, meta or {}):
+        if not isinstance(source, dict):
+            continue
+        if _as_bool(source.get("quick_validation_mode")):
+            return True
+        nested = source.get("config")
+        if isinstance(nested, dict) and _as_bool(nested.get("quick_validation_mode")):
+            return True
+    return False
+
+
+def _score_verdict(score: float, status: str = "completed", valid_count: int = 0,
+                   quick_validation: bool = False) -> str:
+    if _is_active_status(status):
+        return "En cours"
+    if quick_validation:
+        return "Pipeline validé" if str(status or "").lower() == "completed" else "Test technique"
+    if valid_count <= 0:
+        return "Aucun champion"
+    if score >= 70:
+        return "Prometteur"
+    if score >= 50:
+        return "À étudier"
+    return "Faible"
+
+
+def _format_processed_total(processed, total) -> tuple[str, str]:
+    processed = int(processed or 0)
+    total = int(total or 0)
+    if total <= 0:
+        return f"{processed:,}", ""
+    if processed > total:
+        return f"{processed:,}", ""
+    return f"{processed:,}", f"sur {total:,} prévus"
+
+
+def _count_filtered_rows(df: pd.DataFrame) -> int:
+    if df is None or df.empty:
+        return 0
+    for col in ("filtered_out", "is_filtered", "filtered"):
+        if col in df.columns:
+            return int(df[col].fillna(False).astype(bool).sum())
+    for col in ("filter_reason", "rejection_reason", "reason"):
+        if col in df.columns:
+            return int(df[col].fillna("").astype(str).str.len().gt(0).sum())
+    return 0
+
+
+def _reason_count(df: pd.DataFrame, patterns: tuple[str, ...]) -> int:
+    if df is None or df.empty:
+        return 0
+    cols = [c for c in ("filter_reason", "rejection_reason", "reason", "status") if c in df.columns]
+    if not cols:
+        return 0
+    text = df[cols].fillna("").astype(str).agg(" ".join, axis=1).str.lower()
+    mask = False
+    for pattern in patterns:
+        mask = mask | text.str.contains(pattern, regex=False)
+    return int(mask.sum())
+
+
+def _diagnostic_card(title: str, body: str, tone: str = "warning") -> None:
+    color = {
+        "info": ACCENT,
+        "warning": "#f59e0b",
+        "error": RED,
+        "success": GREEN,
+    }.get(tone, "#f59e0b")
+    st.markdown(f"""
+    <div style="padding:16px 18px;border:1px solid rgba({_hex_to_rgb(color)},0.35);
+                background:rgba({_hex_to_rgb(color)},0.09);border-radius:8px;margin:10px 0 16px">
+      <div style="font-size:15px;font-weight:750;color:white;margin-bottom:6px">
+        {_safe_html(title)}
+      </div>
+      <div style="font-size:13px;color:{TEXT_DIM};line-height:1.55">
+        {_safe_html(body)}
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def _category_badge(categorie: str) -> str:
     colors = {
         "Réglage recommandé": (GREEN,  "#10b981"),
@@ -1349,37 +1522,52 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
     data_file = os.path.join(base, "nasdaq_3m.csv")
 
     # ── Sous-onglets internes ──────────────────────────────────
-    sub_config, sub_progress, sub_results, sub_history = st.tabs([
+    subtab_labels = [
         "⚙️ Configuration",
         "⏳ Progression",
         "📊 Résultats",
         "📂 Historique Runs",
-    ])
+    ]
+    if st.session_state.pop("opt_focus_results_tab", False):
+        st.session_state["opt_subtabs"] = "📊 Résultats"
+    elif st.session_state.get("opt_subtabs") not in subtab_labels:
+        st.session_state["opt_subtabs"] = "⚙️ Configuration"
+
+    sub_config, sub_progress, sub_results, sub_history = st.tabs(
+        subtab_labels,
+        default=st.session_state.get("opt_subtabs", "⚙️ Configuration"),
+        key="opt_subtabs",
+        on_change="rerun",
+    )
 
     # ════════════════════════════════════════════════════════════
     # SOUS-ONGLET A : CONFIGURATION
     # ════════════════════════════════════════════════════════════
     with sub_config:
-        _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
-                           data_file, strategies)
+        if getattr(sub_config, "open", True):
+            _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
+                               data_file, strategies)
 
     # ════════════════════════════════════════════════════════════
     # SOUS-ONGLET B : PROGRESSION
     # ════════════════════════════════════════════════════════════
     with sub_progress:
-        _render_progress_tab()
+        if getattr(sub_progress, "open", False):
+            _render_progress_tab()
 
     # ════════════════════════════════════════════════════════════
     # SOUS-ONGLET C : RÉSULTATS
     # ════════════════════════════════════════════════════════════
     with sub_results:
-        _render_results_tab()
+        if getattr(sub_results, "open", False):
+            _render_results_tab()
 
     # ════════════════════════════════════════════════════════════
     # SOUS-ONGLET D : HISTORIQUE
     # ════════════════════════════════════════════════════════════
     with sub_history:
-        _render_opt_history_tab()
+        if getattr(sub_history, "open", False):
+            _render_opt_history_tab()
 
 
 # ── Sous-onglet Configuration ──────────────────────────────────────
@@ -1396,13 +1584,18 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
 
     # ── Mode validation rapide (F2) ───────────────────────────
+    st.info(
+        "Pour un premier test sur PC lent, active **Mode validation rapide**. "
+        "Il sert à vérifier le pipeline complet sans lancer un calcul trop long.",
+        icon=None,
+    )
     quick_mode = st.toggle(
-        "⚡ Mode validation rapide",
+        "⚡ Mode validation rapide (PC lent)",
         value=False,
         key="opt_quick_mode",
         help=(
-            "Presets automatiques : 100 000 lignes max · 16 combinaisons max · "
-            "1 worker · 3 échantillons benchmark · train/test désactivé. "
+            "Presets automatiques : 20 000 lignes max · 12 combinaisons max · "
+            "1 worker · 1 échantillon benchmark · train/test désactivé. "
             "Idéal pour vérifier que le pipeline fonctionne avant un long run."
         ),
     )
@@ -1410,7 +1603,7 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         st.warning(
             "⚡ **Mode validation rapide activé** — Ce mode sert à valider "
             "techniquement l'optimisateur, **pas à trouver le meilleur réglage final**. "
-            "Les presets (100k lignes, 16 combos max, 1 worker, benchmark×3) sont appliqués automatiquement.",
+            "Les presets (20 000 lignes, 12 combos max, 1 worker, benchmark×1) sont appliqués automatiquement.",
             icon=None,
         )
 
@@ -1467,13 +1660,23 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
             typ  = meta["type"]
             lbl  = meta["label"]
             dval = default_params.get(k, 0)
-            mn   = float(meta.get("min", 0))
-            mx   = float(meta.get("max", dval * 3 or 10))
-            stp  = float(meta.get("step", 1.0 if typ == "int" else 0.1))
+            if typ == "int":
+                mn = int(meta.get("min", 0))
+                mx = int(meta.get("max", int(dval) * 3 or 10))
+                stp = int(meta.get("step", 1)) or 1
+            else:
+                mn = float(meta.get("min", 0))
+                mx = float(meta.get("max", dval * 3 or 10))
+                stp = float(meta.get("step", 0.1))
 
             c0, c1, c2, c3, c4, c5 = st.columns([0.3, 2, 1, 1, 1, 1])
             with c0:
-                enabled = st.checkbox("", value=False, key=f"opt_en_{k}")
+                enabled = st.checkbox(
+                    f"Optimiser {lbl}",
+                    value=False,
+                    key=f"opt_en_{k}",
+                    label_visibility="collapsed",
+                )
             with c1:
                 st.markdown(
                     f"<div style='padding-top:8px;font-size:12px;color:{TEXT}'>{lbl}</div>",
@@ -1481,17 +1684,17 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                 )
             with c2:
                 min_v = st.number_input(
-                    "", value=mn, key=f"opt_min_{k}", label_visibility="collapsed",
+                    f"Minimum {lbl}", value=mn, key=f"opt_min_{k}", label_visibility="collapsed",
                     format="%.2f" if typ == "float" else "%d",
                 )
             with c3:
                 max_v = st.number_input(
-                    "", value=mx, key=f"opt_max_{k}", label_visibility="collapsed",
+                    f"Maximum {lbl}", value=mx, key=f"opt_max_{k}", label_visibility="collapsed",
                     format="%.2f" if typ == "float" else "%d",
                 )
             with c4:
                 step_v = st.number_input(
-                    "", value=stp, key=f"opt_step_{k}", label_visibility="collapsed",
+                    f"Pas {lbl}", value=stp, key=f"opt_step_{k}", label_visibility="collapsed",
                     format="%.3f" if typ == "float" else "%d",
                 )
             with c5:
@@ -1607,16 +1810,19 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         if _filter_parts:
             st.info("📅 Filtrage actif : " + " · ".join(_filter_parts))
         else:
-            st.markdown(
-                f"<div style='font-size:11px;color:{TEXT_MUTED};font-style:italic'>"
-                "Aucun filtre actif — jeu de données complet utilisé.</div>",
-                unsafe_allow_html=True,
-            )
+            if quick_mode:
+                st.info("⚡ Mode rapide actif : une limite de 20 000 lignes sera appliquée automatiquement.")
+            else:
+                st.warning(
+                    "Aucun filtre actif : l'optimisation utilisera tout l'historique. "
+                    "Sur un PC lent, active le mode validation rapide ou limite le nombre de lignes.",
+                    icon=None,
+                )
 
     # ── Override mode validation rapide ──────────────────────
-    _QUICK_MAX_COMBOS   = 16
-    _QUICK_MAX_ROWS     = 100_000
-    _QUICK_BENCHMARK    = 3
+    _QUICK_MAX_COMBOS   = 12
+    _QUICK_MAX_ROWS     = 20_000
+    _QUICK_BENCHMARK    = 1
     _QUICK_N_WORKERS    = 1
     if quick_mode:
         # Remplacer les valeurs par les presets
@@ -1626,6 +1832,8 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
             opt_max_rows  = _QUICK_MAX_ROWS
 
     enabled_ranges = [pr for pr in param_ranges if pr.enabled]
+    raw_total_combos = total_combos
+    max_combinations_limit = _QUICK_MAX_COMBOS if quick_mode else None
 
     # Limiter le nb de combinaisons en mode validation rapide
     if quick_mode and total_combos > _QUICK_MAX_COMBOS:
@@ -1918,6 +2126,8 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                 "top_k_save":      100,
                 "top_k_display":   10,
                 "total_combinations": total_combos,
+                "raw_total_combinations": raw_total_combos,
+                "max_combinations": max_combinations_limit,
                 # Période réduite (F1)
                 "opt_start_date":       opt_start_date_str,
                 "opt_end_date":         opt_end_date_str,
@@ -1985,20 +2195,38 @@ def _render_progress_tab():
         return
 
     status = progress.get("status", "unknown")
+    if _is_active_status(status):
+        _render_progress_auto_fragment(run_id)
+        return
+
+    _render_progress_content(run_id, progress)
+
+
+@st.fragment(run_every=2.5)
+def _render_progress_auto_fragment(run_id: str) -> None:
+    progress = _read_progress(run_id)
+    if not progress:
+        st.info(f"En attente des données pour `{run_id}`…")
+        if st.button("🔄  Actualiser", use_container_width=False, key="prog_auto_wait_refresh"):
+            st.rerun()
+        return
+
+    status = progress.get("status", "unknown")
+    _render_progress_content(run_id, progress)
+    if not _is_active_status(status):
+        st.rerun()
+
+
+def _render_progress_content(run_id: str, progress: dict) -> None:
+    status = progress.get("status", "unknown")
 
     # ── Header état ───────────────────────────────────────────
-    status_colors = {
-        "created":     (TEXT_DIM,  "🕓 Créé"),
-        "running":     ("#f59e0b", "⚙️ En cours"),
-        "benchmarking": (ACCENT,   "📏 Benchmark…"),
-        "completed":   (GREEN,     "✅ Terminé"),
-        "stopped":     (TEXT_DIM,  "⏹ Arrêté"),
-        "error":       (RED,       "❌ Erreur"),
-    }
-    sc, sl = status_colors.get(status, (TEXT_DIM, status))
+    status_info = _status_ui(status)
+    sc = status_info["color"]
+    sl = f'{status_info["icon"]} {status_info["label"]}'
 
     completed  = progress.get("completed", 0)
-    total      = progress.get("total_combinations", 1)
+    total      = progress.get("total_combinations", 0)
     pct        = progress.get("progress_pct", 0.0)
     failed     = progress.get("failed", 0)
     processed  = progress.get("combinations_done", completed + failed)
@@ -2007,13 +2235,24 @@ def _render_progress_tab():
     eta        = progress.get("eta_seconds")
     workers    = progress.get("workers_used", 1)
     bms        = progress.get("benchmark_ms_per_backtest", 0)
+    update_label = _fmt_update_label(run_id, progress)
+    processed_label, total_sub = _format_processed_total(processed, total)
+    quick_validation = _is_quick_validation(_load_job_config(_job_dir_for_run(run_id)), progress)
 
     st.markdown(f"""
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
       <span style="font-size:14px;font-weight:700;color:{sc}">{sl}</span>
       <span style="font-size:12px;color:{TEXT_DIM};font-family:'JetBrains Mono',monospace">{run_id}</span>
+      <span style="font-size:11px;color:{TEXT_MUTED}">Dernière mise à jour {update_label}</span>
     </div>
     """, unsafe_allow_html=True)
+
+    if status == "created":
+        _diagnostic_card(
+            "Préparation du job",
+            "Le dossier du job existe. Le process doit passer au benchmark ou à l'optimisation dans quelques instants.",
+            tone="info",
+        )
 
     if status == "benchmarking":
         _render_benchmarking_progress(run_id, progress, workers)
@@ -2024,22 +2263,30 @@ def _render_progress_tab():
         st.progress(max(0.0, min(1.0, pct / 100)))
 
     # Métriques temps réel
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     with m1:
-        st.markdown(card("Traitées", f"{processed:,}", "white",
-                         sub=f"/ {total:,} total"), unsafe_allow_html=True)
+        st.markdown(card("Tests traités", processed_label, "white", sub=total_sub), unsafe_allow_html=True)
     with m2:
-        st.markdown(card("Filtrés", f"{failed:,}", "accent"), unsafe_allow_html=True)
+        st.markdown(card("Tests filtrés", f"{failed:,}", "accent"), unsafe_allow_html=True)
     with m3:
-        st.markdown(card("Meilleur score", f"{best_score:.1f}", _score_color(best_score)[:7]),
-                    unsafe_allow_html=True)
+        st.markdown(card("Meilleur score", f"{best_score:.1f}", _score_class(best_score)), unsafe_allow_html=True)
     with m4:
         st.markdown(card("Écoulé", format_duration(elapsed), "white"), unsafe_allow_html=True)
     with m5:
         eta_str = format_duration(eta) if eta else "—"
-        st.markdown(card("ETA", eta_str, "white",
-                         sub=f"{workers} worker{'s' if workers > 1 else ''} · {bms:.0f} ms/bt"),
-                    unsafe_allow_html=True)
+        eta_sub = f"{workers} worker{'s' if workers > 1 else ''}"
+        if bms:
+            eta_sub += f" · {bms:.0f} ms/bt"
+        st.markdown(card("ETA", eta_str, "white", sub=eta_sub), unsafe_allow_html=True)
+    with m6:
+        st.markdown(
+            card(
+                "Verdict",
+                _score_verdict(float(best_score), status, int(completed or 0), quick_validation),
+                "white",
+            ),
+            unsafe_allow_html=True,
+        )
 
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
@@ -2083,22 +2330,17 @@ def _render_progress_tab():
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
     btn_c1, btn_c2, _ = st.columns([1, 1, 4])
     with btn_c1:
-        if status == "running":
+        if status in ("created", "running"):
             if st.button("⏹  Arrêter proprement", use_container_width=True, key="prog_stop"):
                 _write_stop_flag(run_id)
                 st.toast("Signal d'arrêt envoyé…", icon="⏹")
-        elif status in ("completed", "stopped"):
+        elif status in ("completed", "stopped", "failed", "error"):
             if st.button("📊  Voir les résultats", use_container_width=True, key="prog_results"):
-                st.session_state["opt_view_run_id"] = run_id
+                _show_results_for_run(run_id, _job_dir_for_run(run_id))
+                st.rerun()
     with btn_c2:
         if st.button("🔄  Actualiser", use_container_width=True, key="prog_refresh"):
             st.rerun()
-
-    # Auto-refresh si en cours
-    if status in ("running", "benchmarking"):
-        import time
-        time.sleep(0.1)
-        st.rerun()
 
     # Erreur éventuelle
     err = progress.get("error_message")
@@ -2238,10 +2480,6 @@ def _render_benchmarking_progress(run_id: str, progress: dict, workers: int) -> 
         if st.button("🔄  Actualiser", use_container_width=True, key="prog_bench_refresh"):
             st.rerun()
 
-    import time
-    time.sleep(0.5)
-    st.rerun()
-
 
 def _list_active_jobs() -> list:
     try:
@@ -2261,6 +2499,15 @@ def _remember_job_for_tracking(job: dict) -> None:
     job_dir = job.get("job_dir") or _job_dir_for_run(job_id)
     if job_dir:
         st.session_state.setdefault("opt_job_dirs", {})[job_id] = job_dir
+
+
+def _show_results_for_run(run_id: str, job_dir: str = None) -> None:
+    if not run_id:
+        return
+    st.session_state["opt_view_run_id"] = run_id
+    if job_dir:
+        st.session_state.setdefault("opt_job_dirs", {})[run_id] = job_dir
+    st.session_state["opt_focus_results_tab"] = True
 
 
 def _render_active_jobs_reconnect_panel(active_jobs: list = None, key_prefix: str = "active_jobs") -> bool:
@@ -2295,6 +2542,10 @@ def _render_active_job_card(job: dict, key_prefix: str) -> None:
     total    = job.get("total_combinations", 0) or 0
     config   = _load_job_config(job_dir)
     asset, timeframe = _infer_asset_timeframe(config)
+    tested_label, tested_sub = _format_processed_total(tested, total)
+    tested_text = f"{tested_label} tests traités"
+    if tested_sub:
+        tested_text += f" ({tested_sub})"
 
     st.markdown(f"""
     <div class="history-card" style="margin-bottom:10px">
@@ -2304,13 +2555,13 @@ def _render_active_job_card(job: dict, key_prefix: str) -> None:
             {_safe_html(job_id)}
           </div>
           <div class="h-meta" style="margin-top:4px">
-            Statut {_safe_html(status)} · Progression {progress:.1f}% · Écoulé {format_duration(elapsed)}
+            {_safe_html(_status_ui(status)["label"])} · Progression {progress:.1f}% · Écoulé {format_duration(elapsed)}
           </div>
           <div class="h-meta" style="margin-top:2px">
-            Actif {_safe_html(asset)} · Timeframe {_safe_html(timeframe)} · {tested:,}/{total:,} combinaisons
+            Actif {_safe_html(asset)} · Timeframe {_safe_html(timeframe)} · {_safe_html(tested_text)}
           </div>
         </div>
-        <span style="color:#f59e0b;font-size:12px;font-weight:600">En cours</span>
+        {_status_badge(status)}
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -2325,8 +2576,9 @@ def _render_active_job_card(job: dict, key_prefix: str) -> None:
     with c2:
         if st.button("Voir dans Résultats", key=f"{key_prefix}_view_{job_id}", use_container_width=True):
             _remember_job_for_tracking(job)
-            st.session_state["opt_view_run_id"] = job_id
+            _show_results_for_run(job_id, job_dir or _job_dir_for_run(job_id))
             st.toast("Job chargé — ouvre l'onglet Résultats.", icon="📊")
+            st.rerun()
     with c3:
         if st.button("Arrêter proprement", key=f"{key_prefix}_stop_{job_id}", use_container_width=True):
             opt_store.write_stop_flag(job_id, job_dir=job_dir or _job_dir_for_run(job_id))
@@ -2470,6 +2722,68 @@ def _render_job_downloads(job_dir: str, job_id: str):
                 )
 
 
+def _render_results_diagnostic(status: str, df_results: pd.DataFrame, valid_count: int,
+                               n_filtered: int, best_score: float, n_tested: int,
+                               quick_validation: bool = False) -> None:
+    status = str(status or "").lower()
+    if status in ("created", "benchmarking", "running"):
+        _diagnostic_card(
+            "Job encore en cours",
+            "Les résultats peuvent être incomplets. La synthèse se mettra à jour quand de nouvelles combinaisons seront traitées.",
+            tone="info",
+        )
+        return
+
+    no_trade_count = _reason_count(df_results, ("no trade", "aucun trade", "0 trade"))
+
+    if quick_validation:
+        if no_trade_count or valid_count <= 0:
+            _diagnostic_card(
+                "Aucun signal exploitable",
+                "Aucun signal exploitable n'a été détecté sur cet échantillon réduit. "
+                "Ce n'est pas une erreur technique : le test rapide valide surtout que le pipeline fonctionne.",
+                tone="info",
+            )
+        else:
+            st.caption(
+                "Mode validation rapide : les fichiers ont été générés correctement, "
+                "mais les résultats ne sont pas représentatifs d'une vraie optimisation."
+            )
+        return
+
+    if valid_count > 0 and best_score > 0:
+        if n_filtered:
+            st.caption(
+                f"{n_filtered:,} test{'s' if n_filtered > 1 else ''} ont été filtrés. "
+                "C'est normal si certains réglages ne génèrent pas assez de trades ou ne passent pas les critères."
+            )
+        return
+
+    if no_trade_count:
+        body = (
+            "Les paramètres testés n'ont généré aucun trade exploitable. "
+            "Ce n'est pas une erreur technique : la stratégie n'a simplement pas trouvé de signal dans ces conditions. "
+            "Essaie ensuite d'élargir les paramètres ou de choisir une période différente."
+        )
+    elif n_filtered:
+        body = (
+            "Les tests ont été filtrés car ils n'ont pas passé les critères de robustesse. "
+            "Ce n'est pas une erreur technique. Essaie ensuite d'élargir les paramètres ou d'assouplir les filtres."
+        )
+    elif n_tested and best_score <= 0:
+        body = (
+            "Des tests ont bien été effectués, mais aucun réglage n'a obtenu un score utile. "
+            "Essaie ensuite une plage de paramètres plus large ou des filtres moins stricts."
+        )
+    else:
+        body = (
+            "Aucun résultat exploitable n'est disponible pour ce job. "
+            "Vérifie le statut du job, puis ouvre les logs si le job est terminé ou en erreur."
+        )
+
+    _diagnostic_card("Aucun champion trouvé", body, tone="warning")
+
+
 def _render_results_tab():
     # Quel run afficher ?
     run_id = st.session_state.get("opt_view_run_id") or st.session_state.get("opt_current_run_id")
@@ -2498,12 +2812,17 @@ def _render_results_tab():
     report  = meta.get("report", {})
     sens    = meta.get("sensitivity", {})
     asset, timeframe = _infer_asset_timeframe(job_config)
+    df_results = opt_store.load_results_csv(run_id, job_dir=job_dir)
+    if df_results is None:
+        df_results = pd.DataFrame()
 
     # ── Résumé header ─────────────────────────────────────────
     status_str  = meta.get("status", "completed")
     n_total     = meta.get("total_combinations", 0)
     n_tested    = meta.get("combinations_tested", 0)
-    n_filtered  = meta.get("combinations_filtered_out", 0)
+    if not n_tested and df_results is not None and not df_results.empty:
+        n_tested = len(df_results)
+    n_filtered  = meta.get("combinations_filtered_out", 0) or _count_filtered_rows(df_results)
     duration    = meta.get("duration_seconds", 0)
     mode        = meta.get("mode", "")
     progress    = meta.get("progress_pct", job_summary.get("progress_pct", 100 if status_str == "completed" else 0))
@@ -2511,14 +2830,24 @@ def _render_results_tab():
     best_score  = best.get("score", 0)
     if not best_score:
         best_score = meta.get("best_score", job_summary.get("best_score", 0))
+    best_score = float(best_score or 0)
     best_stats  = best.get("stats", {})
+    valid_count = len(top_100)
+    if not valid_count and df_results is not None and not df_results.empty and "score" in df_results.columns:
+        valid_count = int(pd.to_numeric(df_results["score"], errors="coerce").fillna(0).gt(0).sum())
+    quick_validation = _is_quick_validation(job_config, meta)
+    processed_label, processed_sub = _format_processed_total(n_tested, n_total)
+    verdict = _score_verdict(float(best_score or 0), status_str, valid_count, quick_validation)
+    status_info = _status_ui(status_str)
     source_label = "Job" if job_dir else "Run"
     details = [
         f"Mode {mode}" if mode else "",
-        f"{n_tested:,}/{n_total:,} tests" if n_total else f"{n_tested:,} tests",
+        f"{processed_label} tests traités",
         f"{n_filtered:,} filtrés" if n_filtered else "",
         format_duration(duration),
     ]
+    if processed_sub:
+        details.insert(2, processed_sub)
     if job_dir:
         details.extend([
             f"Actif {asset}",
@@ -2526,53 +2855,120 @@ def _render_results_tab():
             f"Progression {float(progress or 0):.1f}%",
         ])
     details = " · ".join(d for d in details if d)
+    is_quick_completed = quick_validation and str(status_str or "").lower() == "completed"
+    if is_quick_completed:
+        title_text = "Test technique terminé"
+        subtitle_text = (
+            "Le pipeline fonctionne correctement. Les résultats ne sont pas représentatifs "
+            "car le mode validation rapide était activé."
+        )
+    else:
+        title_text = f"🔬 {_safe_html(meta.get('strategy_name', ''))} — {source_label} {_safe_html(run_id[-8:])}"
+        subtitle_text = f"{_safe_html(details)} &nbsp;·&nbsp; {valid_count} résultats valides"
 
     st.markdown(f"""
     <div class="dash-header" style="margin-bottom:16px">
       <div>
-        <div class="dash-title">🔬 {_safe_html(meta.get('strategy_name', ''))} — {source_label} {_safe_html(run_id[-8:])}</div>
+        <div class="dash-title">{title_text}</div>
         <div class="dash-subtitle">
-          {_safe_html(details)}
-          &nbsp;·&nbsp; {len(top_100)} résultats valides
+          {subtitle_text}
         </div>
       </div>
       <div style="text-align:right">
         <div style="font-size:34px;font-weight:800;color:{_score_color(best_score)};letter-spacing:-1px">
           {best_score:.1f}
         </div>
-        <div style="font-size:11px;color:{TEXT_DIM}">Score meilleur réglage</div>
+        <div style="font-size:11px;color:{TEXT_DIM}">Score meilleur réglage · {_safe_html(verdict)}</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
+    s1, s2, s3, s4, s5, s6 = st.columns(6)
+    with s1:
+        st.markdown(card("Statut", status_info["label"], "white"), unsafe_allow_html=True)
+    with s2:
+        st.markdown(card("Meilleur score", f"{float(best_score or 0):.1f}", _score_class(float(best_score or 0))),
+                    unsafe_allow_html=True)
+    with s3:
+        st.markdown(card("Tests traités", processed_label, "white", sub=processed_sub), unsafe_allow_html=True)
+    with s4:
+        st.markdown(card("Résultats valides", f"{valid_count:,}", "green" if valid_count else "red"),
+                    unsafe_allow_html=True)
+    with s5:
+        st.markdown(card("Tests filtrés", f"{int(n_filtered or 0):,}", "accent" if n_filtered else "white"),
+                    unsafe_allow_html=True)
+    with s6:
+        st.markdown(card("Verdict", verdict, "white"), unsafe_allow_html=True)
+
+    _render_results_diagnostic(status_str, df_results, valid_count, int(n_filtered or 0),
+                               float(best_score or 0), int(n_tested or 0), quick_validation)
+
     tabs = st.tabs(
-        ["🥇 Top 10", "📋 Tous les résultats", "📝 Rapport", "📦 Fichiers job"]
+        ["🥇 Top résultats", "📋 Données avancées", "📝 Rapport", "📦 Fichiers job"]
         if job_dir else
-        ["🥇 Top 10", "📋 Tous les résultats", "📝 Rapport"]
+        ["🥇 Top résultats", "📋 Données avancées", "📝 Rapport"]
     )
     res_top10, res_all, res_report = tabs[:3]
     res_files = tabs[3] if job_dir else None
 
     # ── Top 10 ────────────────────────────────────────────────
     with res_top10:
-        if top_100:
-            _render_top10(top_100[:10], sens, meta, key_prefix=run_id)
+        if valid_count <= 0:
+            _diagnostic_card(
+                "Aucun résultat valide sur ce run",
+                "Consulte Données avancées pour voir les tests filtrés et les raisons de rejet.",
+                tone="info",
+            )
+        elif top_100:
+            simple_rows = []
+            for entry in top_100[:10]:
+                stats = entry.get("stats", {})
+                simple_rows.append({
+                    "Rang": entry.get("rank", ""),
+                    "Score": round(float(entry.get("score", 0) or 0), 1),
+                    "Trades": stats.get("total_trades", stats.get("n_trades", "—")),
+                    "Win rate": f"{float(stats.get('win_rate', 0) or 0):.1f}%",
+                    "Profit factor": (
+                        "∞" if isinstance(stats.get("profit_factor", 0), float)
+                        and math.isinf(stats.get("profit_factor", 0))
+                        else f"{float(stats.get('profit_factor', 0) or 0):.2f}"
+                    ),
+                    "Max DD": f"{float(stats.get('max_dd_pct', 0) or 0):.1f}%",
+                    "Gain": f"{float(stats.get('net_ret_pct', 0) or 0):+.1f}%",
+                })
+            st.dataframe(pd.DataFrame(simple_rows), use_container_width=True, hide_index=True)
+            with st.expander("Détail technique du top", expanded=False):
+                _render_top10(top_100[:10], sens, meta, key_prefix=run_id)
+        elif df_results is not None and not df_results.empty:
+            df_simple = df_results.copy()
+            if "score" in df_simple.columns:
+                df_simple["score"] = pd.to_numeric(df_simple["score"], errors="coerce").fillna(0)
+                df_simple = df_simple.sort_values("score", ascending=False)
+            wanted = [
+                c for c in (
+                    "score", "total_trades", "n_trades", "win_rate", "profit_factor",
+                    "max_dd_pct", "net_ret_pct", "filter_reason", "rejection_reason"
+                )
+                if c in df_simple.columns
+            ]
+            st.dataframe(df_simple[wanted].head(10) if wanted else df_simple.head(10),
+                         use_container_width=True, hide_index=True)
         else:
             st.info("Aucun top résultat disponible pour ce job.")
 
-    # ── Tous les résultats ────────────────────────────────────
+    # ── Données avancées ──────────────────────────────────────
     with res_all:
-        df_results = opt_store.load_results_csv(run_id, job_dir=job_dir)
         if df_results.empty:
             st.info("CSV de résultats non disponible.")
         else:
-            st.dataframe(df_results, use_container_width=True, height=400, hide_index=True)
-            csv_bytes = df_results.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "⬇ Télécharger tous les résultats (.csv)",
-                csv_bytes, f"{run_id}_results.csv", "text/csv",
-                key=f"results_csv_{run_id}",
-            )
+            with st.expander("Tableau brut complet", expanded=False):
+                st.dataframe(df_results, use_container_width=True, height=430, hide_index=True)
+                csv_bytes = df_results.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "⬇ Télécharger tous les résultats (.csv)",
+                    csv_bytes, f"{run_id}_results.csv", "text/csv",
+                    key=f"results_csv_{run_id}",
+                )
 
     # ── Rapport ────────────────────────────────────────────────
     with res_report:
@@ -2818,16 +3214,8 @@ def _render_report(report: dict, sens: dict):
 # ── Sous-onglet Historique Runs ────────────────────────────────────
 
 def _render_jobs_history_section(jobs: list):
-    st.markdown(f"""
-    <div style="margin-bottom:20px">
-      <div style="font-size:18px;font-weight:700;color:white;margin-bottom:4px">
-        📦 Jobs serveur
-      </div>
-      <div style="font-size:13px;color:{TEXT_DIM}">
-        {len(jobs)} job{'s' if len(jobs) != 1 else ''} dans <code>results/job_xxx/</code>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("### 📦 Jobs serveur")
+    st.caption(f"{len(jobs)} job{'s' if len(jobs) != 1 else ''} dans `results/job_xxx/`")
 
     if not jobs:
         st.markdown(f"""
@@ -2856,75 +3244,74 @@ def _render_jobs_history_section(jobs: list):
         variables  = job.get("variables_tested", []) or []
         config     = _load_job_config(job_dir)
         asset, timeframe = _infer_asset_timeframe(config)
+        quick_validation = _is_quick_validation(config, job)
         files_ok = [
             filename for filename, _, _ in _JOB_DOWNLOAD_FILES
             if job_dir and os.path.exists(os.path.join(job_dir, filename))
         ]
+        try:
+            is_active = opt_store.is_active_job(job)
+        except Exception:
+            is_active = False
+        tested_label, tested_sub = _format_processed_total(n_tested, n_total)
+        status_info = _status_ui(status)
+        valid_hint = 1 if float(best_score or 0) > 0 else 0
+        verdict = _score_verdict(float(best_score or 0), status, valid_hint, quick_validation)
+        run_type = "Test local rapide" if quick_validation else "Optimisation complète"
+        variables_label = ", ".join(variables[:4]) if variables else "—"
+        if len(variables) > 4:
+            variables_label += "…"
 
-        status_colors = {
-            "created":      (TEXT_DIM, TEXT_DIM, "🕓"),
-            "completed":    (GREEN, "#10b981", "✅"),
-            "stopped":      (TEXT_DIM, TEXT_DIM, "⏹"),
-            "running":      ("#f59e0b", "#f59e0b", "⚙️"),
-            "benchmarking": (ACCENT, ACCENT, "📏"),
-            "error":        (RED, RED, "❌"),
-        }
-        sc, _, si = status_colors.get(status, (TEXT_DIM, TEXT_DIM, "?"))
+        with st.container(border=True):
+            head_left, head_right = st.columns([5, 1.7], vertical_alignment="top")
+            with head_left:
+                st.markdown(f"**`{job_id}`**")
+                st.caption(
+                    f"{job.get('strategy_name', '') or 'Stratégie inconnue'} · "
+                    f"{_fmt_date(job.get('date', ''))} · {run_type}"
+                )
+                st.caption(
+                    f"Actif {asset} · Timeframe {timeframe} · Mode {mode or '—'} · "
+                    f"Variables : {variables_label} · Fichiers : {len(files_ok)}/{len(_JOB_DOWNLOAD_FILES)}"
+                )
+            with head_right:
+                st.markdown(f"{status_info['icon']} **{status_info['label']}**")
 
-        with st.container():
-            st.markdown(f"""
-            <div class="history-card">
-              <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;position:relative">
-                <div>
-                  <div class="h-name" style="font-family:'JetBrains Mono',monospace;font-size:13px">{_safe_html(job_id)}</div>
-                  <div class="h-meta">{_safe_html(job.get('strategy_name',''))} · {_safe_html(_fmt_date(job.get('date','')))}</div>
-                  <div class="h-meta" style="margin-top:2px">
-                    Actif {_safe_html(asset)} · Timeframe {_safe_html(timeframe)} · Mode {_safe_html(mode)}
-                  </div>
-                  <div class="h-meta" style="margin-top:2px">
-                    Variables : {_safe_html(', '.join(variables[:4]) if variables else '—')}{'…' if len(variables)>4 else ''}
-                    · Fichiers : {len(files_ok)}/{len(_JOB_DOWNLOAD_FILES)}
-                  </div>
-                </div>
-                <span style="color:{sc};font-size:12px;font-weight:600">{si} {_safe_html(status)}</span>
-              </div>
-              <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px;position:relative">
-                <div class="h-stat">
-                  <div class="h-stat-label">Meilleur score</div>
-                  <div class="h-stat-value" style="color:{_score_color(float(best_score))}">{float(best_score):.1f}</div>
-                </div>
-                <div class="h-stat">
-                  <div class="h-stat-label">Combinaisons</div>
-                  <div class="h-stat-value">{n_tested:,}/{n_total:,}</div>
-                </div>
-                <div class="h-stat">
-                  <div class="h-stat-label">Progression</div>
-                  <div class="h-stat-value">{progress:.1f}%</div>
-                </div>
-                <div class="h-stat">
-                  <div class="h-stat-label">Durée</div>
-                  <div class="h-stat-value">{format_duration(duration)}</div>
-                </div>
-                <div class="h-stat">
-                  <div class="h-stat-label">Workers</div>
-                  <div class="h-stat-value">{job.get('workers_used', 1)}</div>
-                </div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            with m1:
+                st.metric("Type", run_type)
+            with m2:
+                st.metric("Verdict", verdict)
+            with m3:
+                st.metric("Meilleur score", f"{float(best_score):.1f}")
+            with m4:
+                st.metric("Tests traités", tested_label)
+                if tested_sub:
+                    st.caption(tested_sub)
+            with m5:
+                st.metric("Durée", format_duration(duration))
+            with m6:
+                st.metric("Workers", job.get("workers_used", 1))
 
-            st.progress(max(0.0, min(1.0, progress / 100)))
-            bc1, bc2, _ = st.columns([1, 1.4, 5.6])
+            st.progress(max(0.0, min(1.0, progress / 100)), text=f"Progression {progress:.1f}%")
+
+            if is_active:
+                bc1, bc2, bc3, _ = st.columns([1, 1.35, 1.5, 4.15])
+            else:
+                bc1, bc2, _ = st.columns([1, 1.35, 5.65])
+
             with bc1:
-                if st.button("📊 Voir", key=f"job_view_{job_id}", use_container_width=True, type="secondary"):
-                    st.session_state["opt_view_run_id"] = job_id
-                    st.toast(f"Job {job_id[-8:]} chargé — passe sur l'onglet 📊 Résultats", icon="📊")
+                if st.button("Voir", key=f"job_view_{job_id}", use_container_width=True, type="secondary"):
+                    _show_results_for_run(job_id, job_dir)
+                    st.toast(f"Job {job_id[-8:]} chargé — passe sur l'onglet Résultats", icon="📊")
+                    st.rerun()
             with bc2:
-                if job_dir and os.path.exists(os.path.join(job_dir, "archive.zip")):
-                    with open(os.path.join(job_dir, "archive.zip"), "rb") as f:
+                archive_path = os.path.join(job_dir, "archive.zip") if job_dir else ""
+                if archive_path and os.path.exists(archive_path):
+                    with open(archive_path, "rb") as f:
                         archive_bytes = f.read()
                     st.download_button(
-                        "⬇ archive.zip",
+                        "Télécharger archive",
                         archive_bytes,
                         file_name="archive.zip",
                         mime="application/zip",
@@ -2932,9 +3319,20 @@ def _render_jobs_history_section(jobs: list):
                         use_container_width=True,
                     )
                 else:
-                    st.button("Archive absente", disabled=True, key=f"job_archive_missing_{job_id}", use_container_width=True)
+                    st.button(
+                        "Archive absente",
+                        disabled=True,
+                        key=f"job_archive_missing_{job_id}",
+                        use_container_width=True,
+                    )
+            if is_active:
+                with bc3:
+                    if st.button("Reprendre le suivi", key=f"job_resume_{job_id}", use_container_width=True):
+                        _remember_job_for_tracking(job)
+                        st.toast(f"Suivi repris pour {job_id[-8:]}", icon="⏳")
+                        st.rerun()
 
-            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
 
 def _render_opt_history_tab():
@@ -3024,8 +3422,9 @@ def _render_opt_history_tab():
             bc1, bc2, bc3 = st.columns([1, 1, 6])
             with bc1:
                 if st.button("📊 Voir", key=f"opt_view_{run_id}", use_container_width=True, type="secondary"):
-                    st.session_state["opt_view_run_id"] = run_id
+                    _show_results_for_run(run_id)
                     st.toast(f"Run {run_id[-8:]} chargé — passe sur l'onglet 📊 Résultats", icon="📊")
+                    st.rerun()
             with bc2:
                 if st.button("🗑 Supprimer", key=f"opt_del_{run_id}", use_container_width=True, type="secondary"):
                     st.session_state[f"opt_confirm_del_{run_id}"] = True

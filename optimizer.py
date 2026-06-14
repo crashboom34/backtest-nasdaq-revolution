@@ -89,6 +89,7 @@ class OptimizationConfig:
     global_params:   dict           # initial_capital, spread, slip_in, slip_out
     n_workers:       int
     max_combinations_warning: int  = 100_000
+    max_combinations: Optional[int] = None
     top_k_save:      int            = 100
     top_k_display:   int            = 10
     resume_run_id:   str            = None
@@ -120,6 +121,24 @@ def count_combinations(param_ranges: list) -> int:
             vals = pr.generate_values()
             total *= max(1, len(vals))
     return total
+
+
+def normalize_max_combinations(max_combinations) -> Optional[int]:
+    """Retourne une limite exploitable, ou None si aucune limite n'est demandée."""
+    if max_combinations is None:
+        return None
+    try:
+        value = int(max_combinations)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def effective_combinations_total(total_combinations: int, max_combinations=None) -> int:
+    """Nombre de combinaisons réellement planifiées après limite optionnelle."""
+    total = max(0, int(total_combinations or 0))
+    limit = normalize_max_combinations(max_combinations)
+    return min(total, limit) if limit is not None else total
 
 
 def _load_strategy(module_path: str):
@@ -270,6 +289,25 @@ class Optimizer:
         self.config = config
         self.df     = df
         self._active_ranges = [pr for pr in config.param_ranges if pr.enabled]
+        self._max_combinations = normalize_max_combinations(config.max_combinations)
+        self._scheduled_combinations = 0
+
+    def _remaining_combination_slots(self) -> Optional[int]:
+        if self._max_combinations is None:
+            return None
+        return max(0, self._max_combinations - self._scheduled_combinations)
+
+    def _apply_max_combinations(self, combos: list) -> list:
+        """Applique un plafond global de combinaisons planifiées pour ce run."""
+        combos = list(combos)
+        remaining = self._remaining_combination_slots()
+        if remaining is None:
+            return combos
+        if remaining <= 0:
+            return []
+        limited = combos[:remaining]
+        self._scheduled_combinations += len(limited)
+        return limited
 
     # ── Exécution séquentielle (un backtest à la fois) ─────────────────────
     def _run_batch_sequential(self, combos: list,
@@ -366,6 +404,9 @@ class Optimizer:
     def _run_batch(self, combos, progress_cb=None, stop_flag_fn=None,
                    already_tested=None, start_date=None, end_date=None):
         """Dispatche vers séquentiel ou parallèle selon n_workers."""
+        combos = self._apply_max_combinations(combos)
+        if not combos:
+            return []
         if self.config.n_workers <= 1:
             return self._run_batch_sequential(
                 combos, progress_cb, stop_flag_fn, already_tested, start_date, end_date)
@@ -462,6 +503,7 @@ class Optimizer:
         """Teste toutes les combinaisons possibles."""
         names  = [pr.name for pr in self._active_ranges]
         values = [pr.generate_values() for pr in self._active_ranges]
+        remaining = self._remaining_combination_slots()
 
         combos = []
         for combo_vals in itertools.product(*values):
@@ -469,6 +511,8 @@ class Optimizer:
             for name, val in zip(names, combo_vals):
                 p[name] = val
             combos.append(p)
+            if remaining is not None and len(combos) >= remaining:
+                break
 
         return self._run_batch(
             combos, progress_cb, stop_flag_fn, already_tested, train_start, train_end)
@@ -483,6 +527,9 @@ class Optimizer:
         - N > 500 000 : grille progressive 3 passes
         """
         n_total = count_combinations(self._active_ranges)
+
+        if self._max_combinations is not None:
+            return self.run_mode3(progress_cb, stop_flag_fn, already_tested, train_start, train_end)
 
         if n_total <= 50_000:
             return self.run_mode3(progress_cb, stop_flag_fn, already_tested, train_start, train_end)

@@ -132,7 +132,32 @@ def atomic_write_json(path: str, data: dict) -> None:
     ) as f:
         json.dump(data, f, ensure_ascii=False, indent=2, default=_json_default)
         tmp_path = f.name
-    os.replace(tmp_path, path)
+
+    delays = (0.05, 0.10, 0.20, 0.40, 0.80)
+    last_error = None
+    for attempt in range(len(delays) + 1):
+        try:
+            os.replace(tmp_path, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != 5:
+                raise
+            last_error = exc
+
+        if attempt < len(delays):
+            time.sleep(delays[attempt])
+
+    try:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    except OSError:
+        pass
+
+    raise PermissionError(
+        f"Impossible de remplacer {path} après {len(delays) + 1} tentatives."
+    ) from last_error
 
 
 def _json_default(obj):
