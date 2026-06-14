@@ -1,5 +1,6 @@
 # === Données volumineuses (ne pas versionner) ===
 nasdaq_3m.csv
+data/**/*.csv
 equity_curve.csv
 trades.csv
 

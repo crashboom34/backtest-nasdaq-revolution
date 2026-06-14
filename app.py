@@ -26,7 +26,11 @@ from optimizer import (
     estimate_duration, format_duration,
 )
 from report_generator import generate_report
-from path_resolver import to_relative_path
+from path_resolver import (
+    DEFAULT_ASSET, DEFAULT_TIMEFRAME,
+    list_available_assets, list_available_timeframes,
+    resolve_data_csv, to_relative_path,
+)
 
 # ── Config page ───────────────────────────────────────────────────
 st.set_page_config(
@@ -749,7 +753,7 @@ def build_sidebar(strategies):
                     )
 
         st.markdown("<br>", unsafe_allow_html=True)
-        run_btn = st.button("▶  LANCER LE BACKTEST", use_container_width=True)
+        run_btn = st.button("▶  LANCER LE BACKTEST", width="stretch")
 
     return mod, params, initial_capital, spread, slip_in, slip_out, run_btn
 
@@ -797,7 +801,7 @@ def render_dashboard(trades_df, equity_df, stats, strategy_name, initial_capital
             f"{s['win_rate']:.1f}%",
             "% Trades gagnants",
         )
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
     with c2:
         pf = min(s["profit_factor"], 10)
@@ -807,7 +811,7 @@ def render_dashboard(trades_df, equity_df, stats, strategy_name, initial_capital
             f"{s['profit_factor']:.2f}",
             "Ratio Gains / Pertes",
         )
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
     with c3:
         st.markdown(card(
@@ -833,7 +837,7 @@ def render_dashboard(trades_df, equity_df, stats, strategy_name, initial_capital
 
     with c5:
         fig = make_dow_chart(s["dow_pnl"])
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
@@ -880,7 +884,7 @@ def render_dashboard(trades_df, equity_df, stats, strategy_name, initial_capital
 
     with c3:
         fig = make_yearly_chart(s["yearly_pnl"])
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
@@ -890,10 +894,10 @@ def render_dashboard(trades_df, equity_df, stats, strategy_name, initial_capital
     with c1:
         st.markdown("<div class='section-title'>Performance brute — Transactions (equity)</div>", unsafe_allow_html=True)
         fig = make_equity_curve(equity_df, initial_capital)
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
         st.markdown("<div class='section-title' style='margin-top:8px'>Drawdown historique</div>", unsafe_allow_html=True)
         fig = make_dd_chart(equity_df)
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
     with c2:
         st.markdown("<div class='section-title'>Détail des trades</div>", unsafe_allow_html=True)
@@ -909,7 +913,7 @@ def render_dashboard(trades_df, equity_df, stats, strategy_name, initial_capital
 
         st.dataframe(
             disp,
-            use_container_width=True,
+            width="stretch",
             height=340,
             hide_index=True,
         )
@@ -1048,7 +1052,7 @@ def render_history_tab():
             # Actions (Streamlit buttons en colonnes serrées)
             cols = st.columns([1.2, 1.2, 1.2, 5])
             with cols[0]:
-                if st.button("👁  Voir", key=f"view_{run['id']}", use_container_width=True, type="secondary"):
+                if st.button("👁  Voir", key=f"view_{run['id']}", width="stretch", type="secondary"):
                     full = hs.load_run(run["id"])
                     st.session_state["results"] = {
                         "trades_df":   full["trades_df"],
@@ -1061,10 +1065,10 @@ def render_history_tab():
                     st.session_state["jump_to_backtest"] = True
                     st.rerun()
             with cols[1]:
-                if st.button("✏️  Renommer", key=f"rn_{run['id']}", use_container_width=True, type="secondary"):
+                if st.button("✏️  Renommer", key=f"rn_{run['id']}", width="stretch", type="secondary"):
                     st.session_state[f"renaming_{run['id']}"] = True
             with cols[2]:
-                if st.button("🗑  Supprimer", key=f"del_{run['id']}", use_container_width=True, type="secondary"):
+                if st.button("🗑  Supprimer", key=f"del_{run['id']}", width="stretch", type="secondary"):
                     st.session_state[f"confirm_del_{run['id']}"] = True
 
             # Inline rename form
@@ -1076,12 +1080,12 @@ def render_history_tab():
                         key=f"rn_input_{run['id']}", label_visibility="collapsed",
                     )
                 with rc2:
-                    if st.button("OK", key=f"rn_ok_{run['id']}", use_container_width=True):
+                    if st.button("OK", key=f"rn_ok_{run['id']}", width="stretch"):
                         hs.rename_run(run["id"], new_name)
                         st.session_state.pop(f"renaming_{run['id']}", None)
                         st.rerun()
                 with rc3:
-                    if st.button("Annuler", key=f"rn_cancel_{run['id']}", use_container_width=True, type="secondary"):
+                    if st.button("Annuler", key=f"rn_cancel_{run['id']}", width="stretch", type="secondary"):
                         st.session_state.pop(f"renaming_{run['id']}", None)
                         st.rerun()
 
@@ -1090,12 +1094,12 @@ def render_history_tab():
                 st.warning(f"Supprimer définitivement **{run['name']}** ?")
                 dc1, dc2, _ = st.columns([1.4, 1.4, 5])
                 with dc1:
-                    if st.button("Confirmer", key=f"del_ok_{run['id']}", use_container_width=True):
+                    if st.button("Confirmer", key=f"del_ok_{run['id']}", width="stretch"):
                         hs.delete_run(run["id"])
                         st.session_state.pop(f"confirm_del_{run['id']}", None)
                         st.rerun()
                 with dc2:
-                    if st.button("Annuler", key=f"del_cancel_{run['id']}", use_container_width=True, type="secondary"):
+                    if st.button("Annuler", key=f"del_cancel_{run['id']}", width="stretch", type="secondary"):
                         st.session_state.pop(f"confirm_del_{run['id']}", None)
                         st.rerun()
 
@@ -1212,7 +1216,7 @@ def render_new_strategy_tab():
 
     with btn_col1:
         # Copier dans le presse-papier via JavaScript
-        if st.button("📋  Copier le prompt", use_container_width=True, key="copy_prompt"):
+        if st.button("📋  Copier le prompt", width="stretch", key="copy_prompt"):
             escaped = full_prompt.replace("`", "\\`").replace("$", "\\$")
             components.html(f"""
             <script>
@@ -1518,9 +1522,6 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
     </div>
     """, unsafe_allow_html=True)
 
-    base      = os.path.dirname(os.path.abspath(__file__))
-    data_file = os.path.join(base, "nasdaq_3m.csv")
-
     # ── Sous-onglets internes ──────────────────────────────────
     subtab_labels = [
         "⚙️ Configuration",
@@ -1546,7 +1547,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
     with sub_config:
         if getattr(sub_config, "open", True):
             _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
-                               data_file, strategies)
+                               strategies)
 
     # ════════════════════════════════════════════════════════════
     # SOUS-ONGLET B : PROGRESSION
@@ -1573,7 +1574,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
 # ── Sous-onglet Configuration ──────────────────────────────────────
 
 def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
-                       data_file, strategies):
+                       strategies):
 
     schema       = getattr(mod, "PARAM_SCHEMA", {})
     default_params = dict(getattr(mod, "DEFAULT_PARAMS", params))
@@ -1582,6 +1583,58 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
     if active_jobs:
         _render_active_jobs_reconnect_panel(active_jobs, key_prefix="cfg_reconnect")
         st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+    # ── Données de marché ─────────────────────────────────────
+    st.markdown("<div class='section-title'>Données de marché</div>", unsafe_allow_html=True)
+    st.caption(
+        "Préparation multi-actifs : les CSV peuvent être placés dans "
+        "`data/ACTIF/TIMEFRAME/`. L'ancien `nasdaq_3m.csv` reste compatible."
+    )
+
+    available_assets = list_available_assets()
+    if st.session_state.get("opt_asset") not in available_assets:
+        st.session_state["opt_asset"] = (
+            DEFAULT_ASSET if DEFAULT_ASSET in available_assets else available_assets[0]
+        )
+
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        selected_asset = st.selectbox(
+            "Actif",
+            options=available_assets,
+            key="opt_asset",
+            help="Exemple futur : NASDAQ, SP500, DAX.",
+        )
+
+    available_timeframes = list_available_timeframes(selected_asset)
+    if st.session_state.get("opt_timeframe") not in available_timeframes:
+        st.session_state["opt_timeframe"] = (
+            DEFAULT_TIMEFRAME if DEFAULT_TIMEFRAME in available_timeframes else available_timeframes[0]
+        )
+
+    with dc2:
+        selected_timeframe = st.selectbox(
+            "Timeframe",
+            options=available_timeframes,
+            key="opt_timeframe",
+            help="Exemple futur : M3, M15, H1.",
+        )
+
+    data_resolution = resolve_data_csv(selected_asset, selected_timeframe)
+    data_ready = data_resolution.exists
+    if data_ready:
+        st.success(
+            f"CSV sélectionné : `{data_resolution.relative_path}` "
+            f"({data_resolution.asset}/{data_resolution.timeframe})",
+            icon=None,
+        )
+        if data_resolution.source == "legacy":
+            st.caption(
+                "Compatibilité legacy : le fichier racine `nasdaq_3m.csv` est utilisé. "
+                f"Plus tard, tu pourras copier ce CSV dans `data/{data_resolution.asset}/{data_resolution.timeframe}/`."
+            )
+    else:
+        st.error(data_resolution.message, icon=None)
 
     # ── Mode validation rapide (F2) ───────────────────────────
     st.info(
@@ -2001,14 +2054,18 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         status = _get_run_status(current_run_id)
         is_running = (status in ("running", "benchmarking", "created"))
 
-    if not enabled_ranges:
+    if not data_ready:
         st.button("▶  Lancer l'optimisation", disabled=True,
-                  use_container_width=True, key="opt_launch_disabled")
+                  width="stretch", key="opt_launch_no_data")
+        st.info("Ajoute d'abord un CSV pour l'actif et le timeframe sélectionnés.")
+    elif not enabled_ranges:
+        st.button("▶  Lancer l'optimisation", disabled=True,
+                  width="stretch", key="opt_launch_disabled")
         st.info("Sélectionnez au moins un paramètre à optimiser.")
     elif is_running:
         st.button("▶  Optimisation en cours…", disabled=True,
-                  use_container_width=True, key="opt_running_btn")
-        if st.button("⏹  Arrêter proprement", use_container_width=True, key="opt_stop_btn"):
+                  width="stretch", key="opt_running_btn")
+        if st.button("⏹  Arrêter proprement", width="stretch", key="opt_stop_btn"):
             _write_stop_flag(current_run_id)
             st.toast("Signal d'arrêt envoyé…", icon="⏹")
     else:
@@ -2055,8 +2112,8 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
 
         if not _can_launch:
             st.button("▶  Lancer l'optimisation", disabled=True,
-                      use_container_width=True, key="opt_launch_blocked")
-        elif st.button("▶  Lancer l'optimisation", use_container_width=True, key="opt_launch"):
+                      width="stretch", key="opt_launch_blocked")
+        elif st.button("▶  Lancer l'optimisation", width="stretch", key="opt_launch"):
 
             requested_job_id = opt_store.make_job_id()
 
@@ -2101,8 +2158,12 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                     )
                 ),
                 "strategy_name":   mod.STRATEGY_NAME,
-                "data_file":       to_relative_path(os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)), "nasdaq_3m.csv")),
+                "data_file":       data_resolution.relative_path,
+                "data_path":       data_resolution.relative_path,
+                "data_source":     data_resolution.source,
+                "data_legacy_fallback": data_resolution.source == "legacy",
+                "asset":           data_resolution.asset,
+                "timeframe":       data_resolution.timeframe,
                 "base_params":     dict(params),
                 "param_ranges":    [_pr_to_dict(pr) for pr in param_ranges],
                 "mode":            mode_idx,
@@ -2188,7 +2249,7 @@ def _render_progress_tab():
     if not progress:
         st.info(f"En attente des données pour `{run_id}`…")
         if _is_job_id(run_id):
-            if st.button("🔄  Actualiser", use_container_width=False, key="prog_wait_refresh"):
+            if st.button("🔄  Actualiser", width="content", key="prog_wait_refresh"):
                 st.rerun()
             return
         st.rerun()
@@ -2207,7 +2268,7 @@ def _render_progress_auto_fragment(run_id: str) -> None:
     progress = _read_progress(run_id)
     if not progress:
         st.info(f"En attente des données pour `{run_id}`…")
-        if st.button("🔄  Actualiser", use_container_width=False, key="prog_auto_wait_refresh"):
+        if st.button("🔄  Actualiser", width="content", key="prog_auto_wait_refresh"):
             st.rerun()
         return
 
@@ -2331,15 +2392,15 @@ def _render_progress_content(run_id: str, progress: dict) -> None:
     btn_c1, btn_c2, _ = st.columns([1, 1, 4])
     with btn_c1:
         if status in ("created", "running"):
-            if st.button("⏹  Arrêter proprement", use_container_width=True, key="prog_stop"):
+            if st.button("⏹  Arrêter proprement", width="stretch", key="prog_stop"):
                 _write_stop_flag(run_id)
                 st.toast("Signal d'arrêt envoyé…", icon="⏹")
         elif status in ("completed", "stopped", "failed", "error"):
-            if st.button("📊  Voir les résultats", use_container_width=True, key="prog_results"):
+            if st.button("📊  Voir les résultats", width="stretch", key="prog_results"):
                 _show_results_for_run(run_id, _job_dir_for_run(run_id))
                 st.rerun()
     with btn_c2:
-        if st.button("🔄  Actualiser", use_container_width=True, key="prog_refresh"):
+        if st.button("🔄  Actualiser", width="stretch", key="prog_refresh"):
             st.rerun()
 
     # Erreur éventuelle
@@ -2473,11 +2534,11 @@ def _render_benchmarking_progress(run_id: str, progress: dict, workers: int) -> 
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
     btn_c1, btn_c2, _ = st.columns([1, 1, 4])
     with btn_c1:
-        if st.button("⏹  Arrêter proprement", use_container_width=True, key="prog_bench_stop"):
+        if st.button("⏹  Arrêter proprement", width="stretch", key="prog_bench_stop"):
             _write_stop_flag(run_id)
             st.toast("Signal d'arrêt envoyé…", icon="⏹")
     with btn_c2:
-        if st.button("🔄  Actualiser", use_container_width=True, key="prog_bench_refresh"):
+        if st.button("🔄  Actualiser", width="stretch", key="prog_bench_refresh"):
             st.rerun()
 
 
@@ -2569,18 +2630,18 @@ def _render_active_job_card(job: dict, key_prefix: str) -> None:
     st.progress(max(0.0, min(1.0, progress / 100)))
     c1, c2, c3, _ = st.columns([1.35, 1.25, 1.25, 4.15])
     with c1:
-        if st.button("Reprendre le suivi", key=f"{key_prefix}_resume_{job_id}", use_container_width=True):
+        if st.button("Reprendre le suivi", key=f"{key_prefix}_resume_{job_id}", width="stretch"):
             _remember_job_for_tracking(job)
             st.toast(f"Suivi repris pour {job_id[-8:]}", icon="⏳")
             st.rerun()
     with c2:
-        if st.button("Voir dans Résultats", key=f"{key_prefix}_view_{job_id}", use_container_width=True):
+        if st.button("Voir dans Résultats", key=f"{key_prefix}_view_{job_id}", width="stretch"):
             _remember_job_for_tracking(job)
             _show_results_for_run(job_id, job_dir or _job_dir_for_run(job_id))
             st.toast("Job chargé — ouvre l'onglet Résultats.", icon="📊")
             st.rerun()
     with c3:
-        if st.button("Arrêter proprement", key=f"{key_prefix}_stop_{job_id}", use_container_width=True):
+        if st.button("Arrêter proprement", key=f"{key_prefix}_stop_{job_id}", width="stretch"):
             opt_store.write_stop_flag(job_id, job_dir=job_dir or _job_dir_for_run(job_id))
             st.toast("Signal d'arrêt envoyé…", icon="⏹")
 
@@ -2711,14 +2772,14 @@ def _render_job_downloads(job_dir: str, job_id: str):
                     file_name=filename,
                     mime=mime,
                     key=f"job_download_{job_id}_{filename.replace('.', '_')}",
-                    use_container_width=True,
+                    width="stretch",
                 )
             else:
                 st.button(
                     "Indisponible",
                     disabled=True,
                     key=f"job_missing_{job_id}_{filename.replace('.', '_')}",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
 
@@ -2936,7 +2997,7 @@ def _render_results_tab():
                     "Max DD": f"{float(stats.get('max_dd_pct', 0) or 0):.1f}%",
                     "Gain": f"{float(stats.get('net_ret_pct', 0) or 0):+.1f}%",
                 })
-            st.dataframe(pd.DataFrame(simple_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(simple_rows), width="stretch", hide_index=True)
             with st.expander("Détail technique du top", expanded=False):
                 _render_top10(top_100[:10], sens, meta, key_prefix=run_id)
         elif df_results is not None and not df_results.empty:
@@ -2952,7 +3013,7 @@ def _render_results_tab():
                 if c in df_simple.columns
             ]
             st.dataframe(df_simple[wanted].head(10) if wanted else df_simple.head(10),
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
         else:
             st.info("Aucun top résultat disponible pour ce job.")
 
@@ -2962,7 +3023,7 @@ def _render_results_tab():
             st.info("CSV de résultats non disponible.")
         else:
             with st.expander("Tableau brut complet", expanded=False):
-                st.dataframe(df_results, use_container_width=True, height=430, hide_index=True)
+                st.dataframe(df_results, width="stretch", height=430, hide_index=True)
                 csv_bytes = df_results.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     "⬇ Télécharger tous les résultats (.csv)",
@@ -3059,7 +3120,7 @@ def _render_top10(top10: list, sens: dict, meta: dict, key_prefix: str = ""):
             if st.button(
                 "🔁 Relancer ce backtest",
                 key=f"rerun_top_{key_prefix}_{rank}",
-                use_container_width=False,
+                width="content",
             ):
                 st.session_state["opt_rerun_params"] = params
                 st.toast(f"Paramètres #{rank} chargés. Lance le backtest depuis la barre latérale.",
@@ -3093,7 +3154,7 @@ def _render_top10(top10: list, sens: dict, meta: dict, key_prefix: str = ""):
             xaxis=dict(showgrid=False),
         )
         fig.update_layout(cfg)
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
         st.markdown(
             f"<div style='font-size:11px;color:{TEXT_DIM}'>"
             "Score ≥ 0.15 = paramètre sensible (influence forte sur le score)"
@@ -3301,7 +3362,7 @@ def _render_jobs_history_section(jobs: list):
                 bc1, bc2, _ = st.columns([1, 1.35, 5.65])
 
             with bc1:
-                if st.button("Voir", key=f"job_view_{job_id}", use_container_width=True, type="secondary"):
+                if st.button("Voir", key=f"job_view_{job_id}", width="stretch", type="secondary"):
                     _show_results_for_run(job_id, job_dir)
                     st.toast(f"Job {job_id[-8:]} chargé — passe sur l'onglet Résultats", icon="📊")
                     st.rerun()
@@ -3316,18 +3377,18 @@ def _render_jobs_history_section(jobs: list):
                         file_name="archive.zip",
                         mime="application/zip",
                         key=f"job_archive_{job_id}",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 else:
                     st.button(
                         "Archive absente",
                         disabled=True,
                         key=f"job_archive_missing_{job_id}",
-                        use_container_width=True,
+                        width="stretch",
                     )
             if is_active:
                 with bc3:
-                    if st.button("Reprendre le suivi", key=f"job_resume_{job_id}", use_container_width=True):
+                    if st.button("Reprendre le suivi", key=f"job_resume_{job_id}", width="stretch"):
                         _remember_job_for_tracking(job)
                         st.toast(f"Suivi repris pour {job_id[-8:]}", icon="⏳")
                         st.rerun()
@@ -3421,25 +3482,25 @@ def _render_opt_history_tab():
 
             bc1, bc2, bc3 = st.columns([1, 1, 6])
             with bc1:
-                if st.button("📊 Voir", key=f"opt_view_{run_id}", use_container_width=True, type="secondary"):
+                if st.button("📊 Voir", key=f"opt_view_{run_id}", width="stretch", type="secondary"):
                     _show_results_for_run(run_id)
                     st.toast(f"Run {run_id[-8:]} chargé — passe sur l'onglet 📊 Résultats", icon="📊")
                     st.rerun()
             with bc2:
-                if st.button("🗑 Supprimer", key=f"opt_del_{run_id}", use_container_width=True, type="secondary"):
+                if st.button("🗑 Supprimer", key=f"opt_del_{run_id}", width="stretch", type="secondary"):
                     st.session_state[f"opt_confirm_del_{run_id}"] = True
 
             if st.session_state.get(f"opt_confirm_del_{run_id}"):
                 st.warning(f"Supprimer définitivement `{run_id}` ?")
                 dc1, dc2, _ = st.columns([1, 1, 5])
                 with dc1:
-                    if st.button("Confirmer", key=f"opt_del_ok_{run_id}", use_container_width=True):
+                    if st.button("Confirmer", key=f"opt_del_ok_{run_id}", width="stretch"):
                         opt_store.delete_run(run_id)
                         st.session_state.pop(f"opt_confirm_del_{run_id}", None)
                         st.rerun()
                 with dc2:
                     if st.button("Annuler", key=f"opt_del_cancel_{run_id}",
-                                  use_container_width=True, type="secondary"):
+                                  width="stretch", type="secondary"):
                         st.session_state.pop(f"opt_confirm_del_{run_id}", None)
                         st.rerun()
 
