@@ -32,6 +32,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `optimization_store.py`  | Lit/écrit tous les fichiers de run (progress, config, meta, etc.)    |
 | `job_store.py`           | Génère les artefacts de fin de job : metrics, HTML, CSV, zip         |
 | `path_resolver.py`       | Résout `BASE_DIR` (local vs serveur via `BACKTEST_BASE_DIR`)         |
+| `data_validator.py`      | Valide et normalise les CSV importés avant sauvegarde dans `data/`   |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
 
 ### Organisation des données de marché
@@ -53,6 +54,8 @@ data/
 - `path_resolver.py` sait lister les actifs/timeframes préparés dans `data/`.
 - `path_resolver.py` sait résoudre `data/{ASSET}/{TIMEFRAME}/*.csv`.
 - Compatibilité legacy conservée : `NASDAQ/M3` retombe sur `nasdaq_3m.csv` à la racine si aucun CSV n'est encore dans `data/NASDAQ/M3/`.
+- Onglet Streamlit `Données` : importe un CSV, valide sa qualité, puis sauvegarde dans `data/{ASSET}/{TIMEFRAME}/{asset}_{timeframe}.csv`.
+- Validation CSV actuelle : fichier lisible, colonne date/temps, colonnes `open/high/low/close`, dates convertibles, ordre chronologique, doublons, valeurs manquantes, prix <= 0, cohérence `high >= low`, nombre de lignes, dates début/fin.
 - Aucun gros CSV n'a été déplacé automatiquement.
 - `.gitignore` ignore `data/**/*.csv`; seul le squelette vide avec `.gitkeep` peut être versionné.
 - MT5 n'est pas encore branché.
@@ -115,6 +118,7 @@ Ou en terminal :
 - **`archive.zip` contient exactement 7 fichiers** : exclut `tested.json`, `meta.json`, `stop.flag`.
 - **`BACKTEST_BASE_DIR`** : variable d'environnement pour déploiement serveur (Linux). La fonction `_base_dir()` dans `optimization_store.py` la gère.
 - **Données multi-actifs** : préférer `data/{ASSET}/{TIMEFRAME}/*.csv`; garder `nasdaq_3m.csv` comme fallback legacy pour `NASDAQ/M3`.
+- **Import CSV Streamlit** : sauvegarde uniquement si `data_validator.py` ne remonte pas d'erreur bloquante. Les avertissements n'empêchent pas la sauvegarde.
 
 ---
 
@@ -174,6 +178,7 @@ pip install -r requirements-server.txt
 - [x] Historique Runs : le bouton `Voir` charge le job, force l'onglet `Résultats` et ne nécessite plus de second clic
 - [x] Validation Playwright Edge : job rapide `job_20260614_190837_032a` terminé, 12/12 combinaisons, pas de `WinError`, téléchargements visibles
 - [x] Données multi-actifs/timeframes : squelette `data/NASDAQ/M3/`, résolution CSV via `path_resolver.py`, fallback legacy `nasdaq_3m.csv`
+- [x] Import CSV Streamlit : onglet `Données`, validation qualité via `data_validator.py`, sauvegarde dans `data/{ASSET}/{TIMEFRAME}/`
 - [x] Tests validés : 12 combos / 1 worker et 42 combos / 2 workers → 7/7 fichiers présents
 - [x] Dépôt GitHub créé (privé) : https://github.com/crashboom34/backtest-nasdaq-revolution
 
@@ -182,6 +187,7 @@ pip install -r requirements-server.txt
 - [ ] Tester manuellement le lancement complet depuis Streamlit avec le nouveau système de jobs
 - [ ] Documenter la source / format exact de `nasdaq_3m.csv`
 - [ ] Brancher plus tard MT5 ou une autre source d'import vers `data/{ASSET}/{TIMEFRAME}/`
+- [ ] Ajouter plus tard une gestion avancée des formats CSV exotiques si nécessaire (fuseaux horaires spécifiques, colonnes renommées non standards)
 - [ ] Éventuellement : déploiement serveur Linux avec `BACKTEST_BASE_DIR`
 
 ---

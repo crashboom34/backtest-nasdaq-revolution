@@ -28,6 +28,7 @@ Fonctions publiques
     list_available_assets   : liste les actifs détectés dans data/
     list_available_timeframes : liste les timeframes d'un actif
     resolve_data_csv        : trouve le CSV data/{asset}/{timeframe}/ ou le legacy nasdaq_3m.csv
+    data_csv_target_path    : construit le chemin de sauvegarde standard d'un CSV importe
 """
 
 import os
@@ -137,6 +138,16 @@ def _normalize_timeframe(timeframe: str) -> str:
     return str(timeframe or DEFAULT_TIMEFRAME).strip().upper().replace(" ", "")
 
 
+def normalize_asset(asset: str) -> str:
+    """Normalise un libelle d'actif pour les dossiers data/."""
+    return _normalize_asset(asset)
+
+
+def normalize_timeframe(timeframe: str) -> str:
+    """Normalise un libelle de timeframe pour les dossiers data/."""
+    return _normalize_timeframe(timeframe)
+
+
 def _data_root() -> Path:
     return (BASE_DIR / DATA_DIR_NAME).resolve()
 
@@ -153,6 +164,31 @@ def _csv_files(directory: Path) -> list[Path]:
     if not directory.is_dir():
         return []
     return sorted(p for p in directory.iterdir() if p.is_file() and p.suffix.lower() == ".csv")
+
+
+def _safe_filename_part(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    safe = "".join(ch if ch.isalnum() else "_" for ch in normalized)
+    while "__" in safe:
+        safe = safe.replace("__", "_")
+    return safe.strip("_") or "data"
+
+
+def data_csv_target_path(asset: str, timeframe: str, filename: Optional[str] = None) -> Path:
+    """
+    Construit le chemin standard de sauvegarde d'un CSV importe.
+
+    Exemple : data/NASDAQ/M3/nasdaq_m3.csv
+    """
+    asset_key = _normalize_asset(asset)
+    timeframe_key = _normalize_timeframe(timeframe)
+    if filename is None:
+        filename = f"{_safe_filename_part(asset_key)}_{_safe_filename_part(timeframe_key)}.csv"
+    else:
+        filename = Path(filename).name
+        if not filename.lower().endswith(".csv"):
+            filename = f"{filename}.csv"
+    return (_timeframe_dir(asset_key, timeframe_key) / filename).resolve()
 
 
 def list_available_assets(include_legacy: bool = True) -> list[str]:

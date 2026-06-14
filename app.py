@@ -26,9 +26,12 @@ from optimizer import (
     estimate_duration, format_duration,
 )
 from report_generator import generate_report
+from data_validator import validate_market_csv_bytes
 from path_resolver import (
     DEFAULT_ASSET, DEFAULT_TIMEFRAME,
+    data_csv_target_path,
     list_available_assets, list_available_timeframes,
+    normalize_asset, normalize_timeframe,
     resolve_data_csv, to_relative_path,
 )
 
@@ -3507,6 +3510,143 @@ def _render_opt_history_tab():
             st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
 
+def render_data_tab():
+    """Onglet d'import et validation des CSV de marche."""
+    st.markdown("## Données")
+    st.caption(
+        "Importe un petit ou grand CSV, vérifie sa qualité, puis sauvegarde-le dans "
+        "`data/ACTIF/TIMEFRAME/` pour les prochains backtests."
+    )
+
+    existing_assets = list_available_assets()
+    selected_existing_asset = existing_assets[0] if existing_assets else DEFAULT_ASSET
+
+    with st.container(border=True):
+        st.markdown("### 1. Choisir la destination")
+        c1, c2 = st.columns(2)
+        with c1:
+            selected_existing_asset = st.selectbox(
+                "Actif existant",
+                options=existing_assets or [DEFAULT_ASSET],
+                key="data_existing_asset",
+                help="Choisis un actif déjà préparé, ou saisis-en un nouveau juste dessous.",
+            )
+            custom_asset = st.text_input(
+                "Ou nouvel actif",
+                value="",
+                placeholder="Exemple : SP500, DAX",
+                key="data_custom_asset",
+            )
+
+        effective_asset = normalize_asset(custom_asset or selected_existing_asset)
+        existing_timeframes = list_available_timeframes(effective_asset) or [DEFAULT_TIMEFRAME]
+
+        with c2:
+            selected_existing_timeframe = st.selectbox(
+                "Timeframe existant",
+                options=existing_timeframes,
+                key="data_existing_timeframe",
+                help="Choisis un timeframe déjà préparé, ou saisis-en un nouveau juste dessous.",
+            )
+            custom_timeframe = st.text_input(
+                "Ou nouveau timeframe",
+                value="",
+                placeholder="Exemple : M3, M15, H1, D1",
+                key="data_custom_timeframe",
+            )
+
+        effective_timeframe = normalize_timeframe(custom_timeframe or selected_existing_timeframe)
+        target_path = data_csv_target_path(effective_asset, effective_timeframe)
+        st.info(
+            f"Destination prévue : `{to_relative_path(target_path)}`",
+            icon=None,
+        )
+
+    uploaded_file = st.file_uploader(
+        "2. Importer un fichier CSV",
+        type=["csv"],
+        key="data_csv_upload",
+        help="Le fichier doit contenir une date/heure et les colonnes open, high, low, close.",
+    )
+
+    if uploaded_file is None:
+        st.info("Aucun fichier sélectionné pour l'instant.", icon=None)
+        return
+
+    result = validate_market_csv_bytes(uploaded_file.getvalue())
+
+    with st.container(border=True):
+        st.markdown("### 3. Résumé qualité")
+        if result.errors:
+            st.error("Erreurs bloquantes : sauvegarde désactivée.", icon=None)
+        elif result.warnings:
+            st.warning("CSV utilisable avec avertissements.", icon=None)
+        else:
+            st.success("CSV OK : il peut être sauvegardé.", icon=None)
+
+        summary = result.summary
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Lignes", f"{int(summary.get('row_count') or 0):,}")
+        m2.metric("Début", summary.get("start") or "—")
+        m3.metric("Fin", summary.get("end") or "—")
+        m4.metric("Doublons dates", f"{int(summary.get('duplicate_dates') or 0):,}")
+
+        m5, m6, m7, m8 = st.columns(4)
+        m5.metric("Valeurs manquantes", f"{int(summary.get('missing_values') or 0):,}")
+        m6.metric("Prix <= 0", f"{int(summary.get('non_positive_prices') or 0):,}")
+        m7.metric("High < Low", f"{int(summary.get('high_below_low') or 0):,}")
+        m8.metric("Volume", "Détecté" if summary.get("has_volume") else "Optionnel absent")
+
+        if result.column_map:
+            with st.expander("Colonnes détectées", expanded=False):
+                st.json(result.column_map)
+
+        if result.errors:
+            st.markdown("**À corriger avant sauvegarde :**")
+            for err in result.errors:
+                st.write(f"- {err}")
+
+        if result.warnings:
+            st.markdown("**Avertissements :**")
+            for warn in result.warnings:
+                st.write(f"- {warn}")
+
+        if result.dataframe is not None:
+            st.markdown("**Aperçu normalisé**")
+            st.dataframe(result.dataframe.head(20), width="stretch", hide_index=True)
+
+    with st.container(border=True):
+        st.markdown("### 4. Sauvegarder")
+        target_exists = target_path.exists()
+        overwrite = False
+        if target_exists:
+            st.warning(
+                f"Un fichier existe déjà : `{to_relative_path(target_path)}`. "
+                "Coche la case ci-dessous pour le remplacer.",
+                icon=None,
+            )
+            overwrite = st.checkbox("Remplacer le fichier existant", key="data_overwrite_existing")
+
+        can_save = result.can_save and (not target_exists or overwrite)
+        if st.button("Sauvegarder dans data/", disabled=not can_save, width="stretch", key="data_save_csv"):
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            result.dataframe.to_csv(target_path, index=False)
+            resolved = resolve_data_csv(effective_asset, effective_timeframe)
+            if resolved.exists:
+                st.session_state["opt_asset"] = resolved.asset
+                st.session_state["opt_timeframe"] = resolved.timeframe
+                st.success(
+                    f"CSV sauvegardé et retrouvé : `{resolved.relative_path}`",
+                    icon=None,
+                )
+                st.caption(
+                    "Les fichiers CSV sous `data/` sont ignorés par Git. "
+                    "Ils restent locaux tant que tu ne les copies pas ailleurs."
+                )
+            else:
+                st.error("Le fichier a été écrit, mais la résolution ne le retrouve pas encore.", icon=None)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════
@@ -3520,10 +3660,11 @@ def main():
     mod, params, initial_capital, spread, slip_in, slip_out, run_btn = build_sidebar(strategies)
 
     # ── Onglets ───────────────────────────────────────────────
-    tab_backtest, tab_history, tab_new, tab_opt = st.tabs([
+    tab_backtest, tab_history, tab_new, tab_data, tab_opt = st.tabs([
         "📊  Backtest",
         "📂  Historique",
         "➕  Nouvelle Stratégie",
+        "🗄️  Données",
         "🔬  Optimisation",
     ])
 
@@ -3630,6 +3771,12 @@ def main():
     # ════════════════════════════════════════════════════════════
     with tab_new:
         render_new_strategy_tab()
+
+    # ════════════════════════════════════════════════════════════
+    # ONGLET DONNÉES
+    # ════════════════════════════════════════════════════════════
+    with tab_data:
+        render_data_tab()
 
     # ════════════════════════════════════════════════════════════
     # ONGLET OPTIMISATION
