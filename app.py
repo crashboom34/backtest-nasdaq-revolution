@@ -27,6 +27,14 @@ from job_artifacts import (
     read_job_file_bytes,
 )
 from job_launcher import launch_optimizer_job
+from maintenance import (
+    build_cleanup_plan,
+    delete_items,
+    disk_usage_for_base,
+    list_job_items,
+    list_pwcsv_data_items,
+    select_cleanup_jobs,
+)
 from optimizer import (
     ParamRange, ScoreWeights, FilterConfig, TrainTestConfig,
     OptimizationConfig, count_combinations, benchmark_speed,
@@ -3692,6 +3700,186 @@ def render_data_tab():
                 st.error("Le fichier a été écrit, mais la résolution ne le retrouve pas encore.", icon=None)
 
 
+def _maintenance_items_dataframe(items):
+    rows = []
+    for item in items:
+        rows.append({
+            "Type": item.kind,
+            "ID": item.identifier,
+            "Statut": item.status or "—",
+            "Date": item.date or "—",
+            "Actif": item.asset or "—",
+            "Timeframe": item.timeframe or "—",
+            "Taille": _fmt_file_size(item.size_bytes),
+            "Fichiers": item.file_count,
+            "Archive": "oui" if item.archive_exists else "non",
+            "Supprimable": "oui" if item.deletable and not item.active else "non",
+            "Raison": item.reason,
+            "Chemin": item.relative_path,
+        })
+    return pd.DataFrame(rows)
+
+
+def render_maintenance_tab():
+    """Onglet de maintenance locale, avec simulation obligatoire."""
+    st.markdown("## Maintenance locale")
+    st.caption(
+        "Cette page aide à nettoyer les fichiers générés localement. "
+        "Rien n'est supprimé automatiquement : la simulation est toujours affichée avant toute action réelle."
+    )
+
+    try:
+        usage = disk_usage_for_base()
+        total = usage["total"]
+        free = usage["free"]
+        used = usage["used"]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Disque total", _fmt_file_size(total))
+        c2.metric("Utilisé", _fmt_file_size(used))
+        c3.metric("Libre", _fmt_file_size(free))
+    except OSError as exc:
+        st.warning(f"Espace disque impossible à lire : {exc}", icon=None)
+
+    jobs = list_job_items()
+    active_jobs = [job for job in jobs if job.active]
+
+    st.markdown("### Jobs `results/job_xxx/`")
+    if active_jobs:
+        st.info(f"{len(active_jobs)} job(s) actif(s) protégés : ils ne seront jamais supprimés ici.", icon=None)
+    if jobs:
+        st.dataframe(_maintenance_items_dataframe(jobs), width="stretch", hide_index=True)
+    else:
+        st.info("Aucun dossier job trouvé dans `results/`.", icon=None)
+
+    st.markdown("#### Simulation de nettoyage jobs")
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        include_completed = st.checkbox("Jobs terminés", value=True, key="maint_jobs_completed")
+    with f2:
+        include_errors = st.checkbox("Jobs erreur/arrêtés", value=True, key="maint_jobs_errors")
+    with f3:
+        older_than_days = st.number_input(
+            "Plus vieux que X jours",
+            min_value=0,
+            max_value=3650,
+            value=0,
+            step=1,
+            key="maint_jobs_age",
+        )
+    with f4:
+        heaviest_limit = st.number_input(
+            "Limiter aux plus lourds",
+            min_value=0,
+            max_value=500,
+            value=0,
+            step=1,
+            help="0 = aucun plafond.",
+            key="maint_jobs_heavy",
+        )
+
+    selected_jobs = select_cleanup_jobs(
+        jobs,
+        include_completed=include_completed,
+        include_errors=include_errors,
+        older_than_days=int(older_than_days),
+        heaviest_limit=int(heaviest_limit),
+    )
+    job_plan = build_cleanup_plan(selected_jobs)
+    dry_result = delete_items(selected_jobs, dry_run=True)
+
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Jobs simulés", len(job_plan.items))
+    p2.metric("Fichiers concernés", job_plan.total_file_count)
+    p3.metric("Espace récupérable estimé", _fmt_file_size(job_plan.total_size_bytes))
+
+    if selected_jobs:
+        st.dataframe(_maintenance_items_dataframe(selected_jobs), width="stretch", hide_index=True)
+        st.caption("Simulation : " + "; ".join(dry_result.skipped[:6]))
+    else:
+        st.info("Aucun job ne correspond aux filtres de nettoyage.", icon=None)
+
+    with st.expander("Suppression réelle des jobs sélectionnés", expanded=False):
+        st.warning(
+            "Action irréversible. Les jobs actifs, chemins non autorisés et fichiers protégés restent bloqués.",
+            icon=None,
+        )
+        confirm_jobs = st.text_input(
+            "Pour confirmer, tape exactement SUPPRIMER",
+            value="",
+            key="maint_confirm_jobs",
+        )
+        if st.button(
+            "Supprimer les jobs sélectionnés",
+            disabled=(confirm_jobs != "SUPPRIMER" or not selected_jobs),
+            key="maint_delete_jobs",
+            width="stretch",
+        ):
+            result = delete_items(selected_jobs, dry_run=False)
+            if result.errors:
+                st.error("Certaines suppressions ont échoué : " + " | ".join(result.errors), icon=None)
+            if result.deleted:
+                st.success(
+                    f"{len(result.deleted)} dossier(s) supprimé(s), environ {_fmt_file_size(result.reclaimed_bytes)} récupérés.",
+                    icon=None,
+                )
+            if result.skipped:
+                st.warning("Éléments ignorés : " + " | ".join(result.skipped[:6]), icon=None)
+            st.rerun()
+
+    st.caption("Pour confirmer, tape exactement `SUPPRIMER` dans la section dédiée aux jobs.")
+
+    st.markdown("### Dossiers de test `data/PWCSV.../`")
+    pwcsv_items = list_pwcsv_data_items()
+    pwcsv_plan = build_cleanup_plan(pwcsv_items)
+    if pwcsv_items:
+        st.info(
+            "Ces dossiers ressemblent aux CSV synthétiques créés par les tests Playwright.",
+            icon=None,
+        )
+        st.caption("Dossiers détectés : " + ", ".join(f"`{item.identifier}`" for item in pwcsv_items))
+        st.dataframe(_maintenance_items_dataframe(pwcsv_items), width="stretch", hide_index=True)
+        c1, c2 = st.columns(2)
+        c1.metric("Dossiers PWCSV", len(pwcsv_items))
+        c2.metric("Espace récupérable estimé", _fmt_file_size(pwcsv_plan.total_size_bytes))
+    else:
+        st.success("Aucun dossier `data/PWCSV.../` détecté.", icon=None)
+
+    with st.expander("Suppression réelle des dossiers PWCSV", expanded=False):
+        st.warning("Cette action ne concerne que les dossiers `data/PWCSV.../`, jamais les CSV utilisateur.", icon=None)
+        confirm_pwcsv = st.text_input(
+            "Pour confirmer, tape exactement SUPPRIMER PWCSV",
+            value="",
+            key="maint_confirm_pwcsv",
+        )
+        if st.button(
+            "Supprimer les dossiers PWCSV",
+            disabled=(confirm_pwcsv != "SUPPRIMER PWCSV" or not pwcsv_items),
+            key="maint_delete_pwcsv",
+            width="stretch",
+        ):
+            result = delete_items(pwcsv_items, dry_run=False)
+            if result.errors:
+                st.error("Certaines suppressions ont échoué : " + " | ".join(result.errors), icon=None)
+            if result.deleted:
+                st.success(
+                    f"{len(result.deleted)} dossier(s) PWCSV supprimé(s), environ {_fmt_file_size(result.reclaimed_bytes)} récupérés.",
+                    icon=None,
+                )
+            if result.skipped:
+                st.warning("Éléments ignorés : " + " | ".join(result.skipped[:6]), icon=None)
+            st.rerun()
+
+    st.caption("Pour confirmer, tape exactement `SUPPRIMER PWCSV` dans la section dédiée aux dossiers PWCSV.")
+
+    with st.expander("Zone danger CSV utilisateur", expanded=False):
+        st.warning(
+            "Par sécurité, cette version ne supprime aucun vrai CSV utilisateur. "
+            "`nasdaq_3m.csv`, `.env`, `.venv`, `.git`, `.streamlit/credentials.toml` et `app_corrupted_backup.py` sont protégés.",
+            icon=None,
+        )
+        st.button("Suppression CSV utilisateur désactivée", disabled=True, width="stretch")
+
+
 # ═══════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════
@@ -3705,11 +3893,12 @@ def main():
     mod, params, initial_capital, spread, slip_in, slip_out, run_btn = build_sidebar(strategies)
 
     # ── Onglets ───────────────────────────────────────────────
-    tab_backtest, tab_history, tab_new, tab_data, tab_opt = st.tabs([
+    tab_backtest, tab_history, tab_new, tab_data, tab_maintenance, tab_opt = st.tabs([
         "📊  Backtest",
         "📂  Historique",
         "➕  Nouvelle Stratégie",
         "🗄️  Données",
+        "🧹  Maintenance",
         "🔬  Optimisation",
     ])
 
@@ -3822,6 +4011,12 @@ def main():
     # ════════════════════════════════════════════════════════════
     with tab_data:
         render_data_tab()
+
+    # ════════════════════════════════════════════════════════════
+    # ONGLET MAINTENANCE
+    # ════════════════════════════════════════════════════════════
+    with tab_maintenance:
+        render_maintenance_tab()
 
     # ════════════════════════════════════════════════════════════
     # ONGLET OPTIMISATION

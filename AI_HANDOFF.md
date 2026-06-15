@@ -34,6 +34,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `job_artifacts.py`       | Vérifie les fichiers de job, lit les bytes de téléchargement, régénère `archive.zip` |
 | `path_resolver.py`       | Résout `BASE_DIR` (local vs serveur via `BACKTEST_BASE_DIR`)         |
 | `data_validator.py`      | Valide et normalise les CSV importés avant sauvegarde dans `data/`   |
+| `maintenance.py`         | Analyse les fichiers locaux générés et prépare des nettoyages sécurisés |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
 
 ### Organisation des données de marché
@@ -122,6 +123,8 @@ Ou en terminal :
 - **`BACKTEST_BASE_DIR`** : variable d'environnement pour déploiement serveur (Linux). La fonction `_base_dir()` dans `optimization_store.py` la gère.
 - **Données multi-actifs** : préférer `data/{ASSET}/{TIMEFRAME}/*.csv`; garder `nasdaq_3m.csv` comme fallback legacy pour `NASDAQ/M3`.
 - **Import CSV Streamlit** : sauvegarde uniquement si `data_validator.py` ne remonte pas d'erreur bloquante. Les avertissements n'empêchent pas la sauvegarde.
+- **Maintenance locale** : simulation obligatoire avant suppression. Ne supprime jamais un job actif, ni `nasdaq_3m.csv`, `.env`, `.venv`, `.git`, `.streamlit/credentials.toml`, `app_corrupted_backup.py`.
+- **Chemins nettoyables** : uniquement `results/job_xxx/` terminés ou en erreur, et dossiers de test `data/PWCSV.../`. Les vrais CSV utilisateur sont dans une zone danger désactivée.
 
 ---
 
@@ -183,6 +186,7 @@ pip install -r requirements-server.txt
 - [x] Données multi-actifs/timeframes : squelette `data/NASDAQ/M3/`, résolution CSV via `path_resolver.py`, fallback legacy `nasdaq_3m.csv`
 - [x] Import CSV Streamlit : onglet `Données`, validation qualité via `data_validator.py`, sauvegarde dans `data/{ASSET}/{TIMEFRAME}/`
 - [x] Téléchargements jobs : fichiers vérifiés avant bouton, `archive.zip` régénérée si nécessaire, `download_button` configuré sans rerun
+- [x] Maintenance locale : onglet `Maintenance`, simulation de nettoyage, protection jobs actifs, nettoyage séparé des dossiers `data/PWCSV.../`
 - [x] Tests validés : 12 combos / 1 worker et 42 combos / 2 workers → 7/7 fichiers présents
 - [x] Dépôt GitHub créé (privé) : https://github.com/crashboom34/backtest-nasdaq-revolution
 
