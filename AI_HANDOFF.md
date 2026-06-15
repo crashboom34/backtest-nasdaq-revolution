@@ -35,6 +35,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `path_resolver.py`       | Résout `BASE_DIR` (local vs serveur via `BACKTEST_BASE_DIR`)         |
 | `data_validator.py`      | Valide et normalise les CSV importés avant sauvegarde dans `data/`   |
 | `maintenance.py`         | Analyse les fichiers locaux générés et prépare des nettoyages sécurisés |
+| `dashboard.py`           | Agrège les KPIs d'accueil : disque, jobs, données disponibles, alertes |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
 
 ### Organisation des données de marché
@@ -125,6 +126,7 @@ Ou en terminal :
 - **Import CSV Streamlit** : sauvegarde uniquement si `data_validator.py` ne remonte pas d'erreur bloquante. Les avertissements n'empêchent pas la sauvegarde.
 - **Maintenance locale** : simulation obligatoire avant suppression. Ne supprime jamais un job actif, ni `nasdaq_3m.csv`, `.env`, `.venv`, `.git`, `.streamlit/credentials.toml`, `app_corrupted_backup.py`.
 - **Chemins nettoyables** : uniquement `results/job_xxx/` terminés ou en erreur, et dossiers de test `data/PWCSV.../`. Les vrais CSV utilisateur sont dans une zone danger désactivée.
+- **Accueil Streamlit** : `dashboard.py` calcule le résumé global sans dépendre de Streamlit. L'onglet `Accueil` affiche disque, jobs, données, alertes et actions rapides.
 
 ---
 
@@ -187,6 +189,7 @@ pip install -r requirements-server.txt
 - [x] Import CSV Streamlit : onglet `Données`, validation qualité via `data_validator.py`, sauvegarde dans `data/{ASSET}/{TIMEFRAME}/`
 - [x] Téléchargements jobs : fichiers vérifiés avant bouton, `archive.zip` régénérée si nécessaire, `download_button` configuré sans rerun
 - [x] Maintenance locale : onglet `Maintenance`, simulation de nettoyage, protection jobs actifs, nettoyage séparé des dossiers `data/PWCSV.../`
+- [x] Tableau de bord d'accueil : KPIs disque/jobs, données disponibles, alertes simples et actions rapides vers Données/Optimisation/Historique/Maintenance
 - [x] Tests validés : 12 combos / 1 worker et 42 combos / 2 workers → 7/7 fichiers présents
 - [x] Dépôt GitHub créé (privé) : https://github.com/crashboom34/backtest-nasdaq-revolution
 
@@ -215,6 +218,7 @@ pip install -r requirements-server.txt
 | `history/` pas dans .gitignore        | Corrigé     | Ajouté dans .gitignore                                    |
 | `.streamlit/credentials.toml` suivi  | Corrigé     | Ajouté dans .gitignore + à retirer du suivi Git            |
 | Benchmark très lent sur PC local (110 s/bt avec historique complet) | Corrigé | Mode validation rapide reconfiguré : `max_rows=20 000`, `benchmark_n_sample=1` |
+| Aucun aperçu global au lancement | Corrigé | Onglet `Accueil` ajouté, calculs isolés dans `dashboard.py` et testés |
 
 ---
 

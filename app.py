@@ -42,6 +42,7 @@ from optimizer import (
 )
 from report_generator import generate_report
 from data_validator import validate_market_csv_bytes
+from dashboard import build_dashboard_summary
 from path_resolver import (
     DEFAULT_ASSET, DEFAULT_TIMEFRAME,
     data_csv_target_path,
@@ -2757,7 +2758,9 @@ def _fmt_file_size(size_bytes: int) -> str:
         return f"{size_bytes} o"
     if size_bytes < 1024 * 1024:
         return f"{size_bytes / 1024:.1f} Ko"
-    return f"{size_bytes / (1024 * 1024):.1f} Mo"
+    if size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} Mo"
+    return f"{size_bytes / (1024 * 1024 * 1024):.2f} Go"
 
 
 def _render_job_downloads(job_dir: str, job_id: str):
@@ -3563,6 +3566,141 @@ def _render_opt_history_tab():
             st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
 
+MAIN_TAB_HOME = "🏠  Accueil"
+MAIN_TAB_BACKTEST = "📊  Backtest"
+MAIN_TAB_HISTORY = "📂  Historique"
+MAIN_TAB_NEW = "➕  Nouvelle Stratégie"
+MAIN_TAB_DATA = "🗄️  Données"
+MAIN_TAB_MAINTENANCE = "🧹  Maintenance"
+MAIN_TAB_OPTIMIZATION = "🔬  Optimisation"
+OPT_SUBTAB_CONFIG = "⚙️ Configuration"
+OPT_SUBTAB_HISTORY = "📂 Historique Runs"
+
+
+def _switch_main_tab(tab_label: str, opt_subtab: str = None) -> None:
+    st.session_state["pending_main_tabs"] = tab_label
+    if opt_subtab:
+        st.session_state["pending_opt_subtabs"] = opt_subtab
+    st.rerun()
+
+
+def _fmt_dashboard_date(value: str) -> str:
+    if not value:
+        return "Aucun"
+    return str(value).replace("T", " ")[:19]
+
+
+def _fmt_dashboard_score(value) -> str:
+    if value is None:
+        return "Aucun"
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "Aucun"
+
+
+def _render_home_alert(alert) -> None:
+    message = f"**{alert.title}**  \n{alert.message}"
+    if alert.level == "error":
+        st.error(message, icon=None)
+    elif alert.level == "warning":
+        st.warning(message, icon=None)
+    elif alert.level == "success":
+        st.success(message, icon=None)
+    else:
+        st.info(message, icon=None)
+
+
+def render_home_tab():
+    """Tableau de bord d'accueil : etat local, donnees, jobs et alertes."""
+    summary = build_dashboard_summary()
+
+    st.markdown("## Accueil")
+    st.caption(
+        "Vue rapide de l'état local : données disponibles, jobs, espace disque "
+        "et alertes importantes."
+    )
+
+    disk_free_pct = (
+        summary.disk_free_bytes / summary.disk_total_bytes * 100
+        if summary.disk_total_bytes else 0
+    )
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Espace libre", _fmt_file_size(summary.disk_free_bytes), f"{disk_free_pct:.0f}% libre")
+    k2.metric("Jobs", summary.total_jobs, f"{summary.completed_jobs} terminés")
+    k3.metric("Jobs en erreur", summary.error_jobs)
+    k4.metric("Meilleur score récent", _fmt_dashboard_score(summary.best_recent_score))
+
+    with st.container(border=True):
+        st.markdown("### Derniers jobs")
+        if summary.latest_job_id:
+            j1, j2, j3 = st.columns(3)
+            with j1:
+                st.caption("Dernier job lancé")
+                st.write(f"`{summary.latest_job_id}`")
+                st.caption(_fmt_dashboard_date(summary.latest_job_date))
+            with j2:
+                st.caption("Statut")
+                info = _status_ui(summary.latest_job_status)
+                st.write(f"{info['icon']} {info['label']}")
+            with j3:
+                st.caption("Dernier job terminé")
+                if summary.latest_completed_job_id:
+                    st.write(f"`{summary.latest_completed_job_id}`")
+                    st.caption(_fmt_dashboard_date(summary.latest_completed_job_date))
+                else:
+                    st.write("Aucun")
+        else:
+            st.info("Aucun job détecté pour le moment.", icon=None)
+
+    with st.container(border=True):
+        st.markdown("### Données disponibles")
+        if summary.data_sources:
+            rows = []
+            for source in summary.data_sources:
+                if source.source == "data":
+                    source_label = "data/"
+                elif source.source == "legacy":
+                    source_label = "fallback legacy"
+                else:
+                    source_label = "manquant"
+                rows.append({
+                    "Actif": source.asset,
+                    "Timeframe": source.timeframe,
+                    "Source": source_label,
+                    "Fichier": source.relative_path,
+                    "Etat": "OK" if source.exists else "Aucun CSV",
+                })
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        else:
+            st.warning("Aucun actif ou timeframe détecté.", icon=None)
+
+    with st.container(border=True):
+        st.markdown("### Alertes")
+        if summary.alerts:
+            for alert in summary.alerts:
+                _render_home_alert(alert)
+        else:
+            st.success("Aucune alerte importante détectée.", icon=None)
+
+    with st.container(border=True):
+        st.markdown("### Actions rapides")
+        a1, a2, a3, a4 = st.columns(4)
+        with a1:
+            if st.button("Aller aux Données", width="stretch"):
+                _switch_main_tab(MAIN_TAB_DATA)
+        with a2:
+            if st.button("Configurer une optimisation", width="stretch"):
+                _switch_main_tab(MAIN_TAB_OPTIMIZATION, opt_subtab=OPT_SUBTAB_CONFIG)
+        with a3:
+            if st.button("Voir l'historique runs", width="stretch"):
+                _switch_main_tab(MAIN_TAB_OPTIMIZATION, opt_subtab=OPT_SUBTAB_HISTORY)
+        with a4:
+            if st.button("Ouvrir Maintenance", width="stretch"):
+                _switch_main_tab(MAIN_TAB_MAINTENANCE)
+
+
 def render_data_tab():
     """Onglet d'import et validation des CSV de marche."""
     st.markdown("## Données")
@@ -3893,14 +4031,39 @@ def main():
     mod, params, initial_capital, spread, slip_in, slip_out, run_btn = build_sidebar(strategies)
 
     # ── Onglets ───────────────────────────────────────────────
-    tab_backtest, tab_history, tab_new, tab_data, tab_maintenance, tab_opt = st.tabs([
-        "📊  Backtest",
-        "📂  Historique",
-        "➕  Nouvelle Stratégie",
-        "🗄️  Données",
-        "🧹  Maintenance",
-        "🔬  Optimisation",
-    ])
+    main_tab_labels = [
+        MAIN_TAB_HOME,
+        MAIN_TAB_BACKTEST,
+        MAIN_TAB_HISTORY,
+        MAIN_TAB_NEW,
+        MAIN_TAB_DATA,
+        MAIN_TAB_MAINTENANCE,
+        MAIN_TAB_OPTIMIZATION,
+    ]
+
+    pending_main_tab = st.session_state.pop("pending_main_tabs", None)
+    if pending_main_tab in main_tab_labels:
+        st.session_state["main_tabs"] = pending_main_tab
+
+    pending_opt_subtab = st.session_state.pop("pending_opt_subtabs", None)
+    if pending_opt_subtab:
+        st.session_state["opt_subtabs"] = pending_opt_subtab
+
+    if st.session_state.get("main_tabs") not in main_tab_labels:
+        st.session_state["main_tabs"] = MAIN_TAB_HOME
+
+    tab_home, tab_backtest, tab_history, tab_new, tab_data, tab_maintenance, tab_opt = st.tabs(
+        main_tab_labels,
+        default=st.session_state.get("main_tabs", MAIN_TAB_HOME),
+        key="main_tabs",
+        on_change="rerun",
+    )
+
+    # ════════════════════════════════════════════════════════════
+    # ONGLET ACCUEIL
+    # ════════════════════════════════════════════════════════════
+    with tab_home:
+        render_home_tab()
 
     # ════════════════════════════════════════════════════════════
     # ONGLET BACKTEST
