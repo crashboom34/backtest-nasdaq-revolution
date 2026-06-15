@@ -19,6 +19,13 @@ import urllib.parse
 import html
 import history_store as hs
 import optimization_store as opt_store
+from job_artifacts import (
+    JOB_DOWNLOAD_SPECS,
+    ensure_job_archive,
+    list_archive_contents,
+    list_job_download_files,
+    read_job_file_bytes,
+)
 from job_launcher import launch_optimizer_job
 from optimizer import (
     ParamRange, ScoreWeights, FilterConfig, TrainTestConfig,
@@ -2414,13 +2421,7 @@ def _render_progress_content(run_id: str, progress: dict) -> None:
 
 # ── Sous-onglet Résultats ───────────────────────────────────────────
 
-_JOB_DOWNLOAD_FILES = [
-    ("results.csv", "Résultats complets", "text/csv"),
-    ("best_strategies.csv", "Meilleures stratégies", "text/csv"),
-    ("metrics.json", "Métriques", "application/json"),
-    ("report.html", "Rapport HTML", "text/html"),
-    ("archive.zip", "Archive ZIP", "application/zip"),
-]
+_JOB_DOWNLOAD_FILES = JOB_DOWNLOAD_SPECS
 
 
 def _safe_html(value) -> str:
@@ -2756,34 +2757,65 @@ def _render_job_downloads(job_dir: str, job_id: str):
         st.info("Dossier de job introuvable.")
         return
 
-    for filename, label, mime in _JOB_DOWNLOAD_FILES:
-        path = os.path.join(job_dir, filename)
+    try:
+        ensure_job_archive(job_dir)
+    except OSError as exc:
+        st.warning(f"Archive ZIP non régénérée : {exc}", icon=None)
+
+    files = list_job_download_files(job_dir)
+    available = [info for info in files if info.can_download]
+    st.caption(f"{len(available)}/{len(files)} fichiers téléchargeables.")
+
+    for info in files:
         cols = st.columns([2.4, 1.1, 1.4])
-        exists = os.path.exists(path)
 
         with cols[0]:
-            st.markdown(f"**{label}**  \n`{filename}`")
+            st.markdown(f"**{info.label}**  \n`{info.filename}`")
         with cols[1]:
-            st.caption(_fmt_file_size(os.path.getsize(path)) if exists else "Absent")
+            if info.can_download:
+                st.caption(f"Présent · {_fmt_file_size(info.size)}")
+            elif info.exists and info.error:
+                st.caption("Erreur lecture")
+            else:
+                st.caption("Absent")
         with cols[2]:
-            if exists:
-                with open(path, "rb") as f:
-                    data = f.read()
-                st.download_button(
-                    "Télécharger",
-                    data,
-                    file_name=filename,
-                    mime=mime,
-                    key=f"job_download_{job_id}_{filename.replace('.', '_')}",
-                    width="stretch",
-                )
+            if info.can_download:
+                try:
+                    data = read_job_file_bytes(info.path)
+                    st.download_button(
+                        "Télécharger",
+                        data,
+                        file_name=info.filename,
+                        mime=info.mime,
+                        key=f"job_download_{job_id}_{info.filename.replace('.', '_')}",
+                        width="stretch",
+                        on_click="ignore",
+                    )
+                except OSError as exc:
+                    st.button(
+                        "Erreur lecture",
+                        disabled=True,
+                        key=f"job_read_error_{job_id}_{info.filename.replace('.', '_')}",
+                        width="stretch",
+                    )
+                    st.caption(str(exc))
             else:
                 st.button(
                     "Indisponible",
                     disabled=True,
-                    key=f"job_missing_{job_id}_{filename.replace('.', '_')}",
+                    key=f"job_missing_{job_id}_{info.filename.replace('.', '_')}",
                     width="stretch",
                 )
+                if info.exists and info.error:
+                    st.caption(info.error)
+
+    archive_info = next((info for info in files if info.filename == "archive.zip" and info.can_download), None)
+    if archive_info:
+        try:
+            contents = list_archive_contents(archive_info.path)
+            st.caption("Archive ZIP : " + ", ".join(contents))
+        except OSError as exc:
+            st.caption(f"Archive ZIP lisible mais contenu non inspecté : {exc}")
 
 
 def _render_results_diagnostic(status: str, df_results: pd.DataFrame, valid_count: int,
@@ -3370,18 +3402,31 @@ def _render_jobs_history_section(jobs: list):
                     st.toast(f"Job {job_id[-8:]} chargé — passe sur l'onglet Résultats", icon="📊")
                     st.rerun()
             with bc2:
-                archive_path = os.path.join(job_dir, "archive.zip") if job_dir else ""
+                archive_path = None
+                if job_dir:
+                    try:
+                        archive_path = ensure_job_archive(job_dir)
+                    except OSError:
+                        archive_path = None
                 if archive_path and os.path.exists(archive_path):
-                    with open(archive_path, "rb") as f:
-                        archive_bytes = f.read()
-                    st.download_button(
-                        "Télécharger archive",
-                        archive_bytes,
-                        file_name="archive.zip",
-                        mime="application/zip",
-                        key=f"job_archive_{job_id}",
-                        width="stretch",
-                    )
+                    try:
+                        archive_bytes = read_job_file_bytes(archive_path)
+                        st.download_button(
+                            "Télécharger archive",
+                            archive_bytes,
+                            file_name="archive.zip",
+                            mime="application/zip",
+                            key=f"job_archive_{job_id}",
+                            width="stretch",
+                            on_click="ignore",
+                        )
+                    except OSError:
+                        st.button(
+                            "Archive illisible",
+                            disabled=True,
+                            key=f"job_archive_unreadable_{job_id}",
+                            width="stretch",
+                        )
                 else:
                     st.button(
                         "Archive absente",

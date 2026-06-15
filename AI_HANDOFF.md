@@ -31,6 +31,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `scoring.py`             | Calcule le score composite (Sharpe, winrate, drawdown, etc.)         |
 | `optimization_store.py`  | Lit/écrit tous les fichiers de run (progress, config, meta, etc.)    |
 | `job_store.py`           | Génère les artefacts de fin de job : metrics, HTML, CSV, zip         |
+| `job_artifacts.py`       | Vérifie les fichiers de job, lit les bytes de téléchargement, régénère `archive.zip` |
 | `path_resolver.py`       | Résout `BASE_DIR` (local vs serveur via `BACKTEST_BASE_DIR`)         |
 | `data_validator.py`      | Valide et normalise les CSV importés avant sauvegarde dans `data/`   |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
@@ -116,6 +117,8 @@ Ou en terminal :
 - **`run_id == job_id`** en V1 pour la simplicité.
 - **Pas de dépendances CDN dans `report.html`** — le rapport doit fonctionner hors ligne (CSS inline).
 - **`archive.zip` contient exactement 7 fichiers** : exclut `tested.json`, `meta.json`, `stop.flag`.
+- **Téléchargements job** : un bouton n'est affiché que si le fichier existe, est non vide et lisible. Les fichiers absents restent visibles comme `Indisponible`, sans bouton cassé.
+- **Régénération archive** : `job_artifacts.ensure_job_archive()` recrée `archive.zip` si elle est absente, vide, invalide ou plus ancienne que les fichiers source.
 - **`BACKTEST_BASE_DIR`** : variable d'environnement pour déploiement serveur (Linux). La fonction `_base_dir()` dans `optimization_store.py` la gère.
 - **Données multi-actifs** : préférer `data/{ASSET}/{TIMEFRAME}/*.csv`; garder `nasdaq_3m.csv` comme fallback legacy pour `NASDAQ/M3`.
 - **Import CSV Streamlit** : sauvegarde uniquement si `data_validator.py` ne remonte pas d'erreur bloquante. Les avertissements n'empêchent pas la sauvegarde.
@@ -179,6 +182,7 @@ pip install -r requirements-server.txt
 - [x] Validation Playwright Edge : job rapide `job_20260614_190837_032a` terminé, 12/12 combinaisons, pas de `WinError`, téléchargements visibles
 - [x] Données multi-actifs/timeframes : squelette `data/NASDAQ/M3/`, résolution CSV via `path_resolver.py`, fallback legacy `nasdaq_3m.csv`
 - [x] Import CSV Streamlit : onglet `Données`, validation qualité via `data_validator.py`, sauvegarde dans `data/{ASSET}/{TIMEFRAME}/`
+- [x] Téléchargements jobs : fichiers vérifiés avant bouton, `archive.zip` régénérée si nécessaire, `download_button` configuré sans rerun
 - [x] Tests validés : 12 combos / 1 worker et 42 combos / 2 workers → 7/7 fichiers présents
 - [x] Dépôt GitHub créé (privé) : https://github.com/crashboom34/backtest-nasdaq-revolution
 

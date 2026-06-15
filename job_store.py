@@ -14,9 +14,10 @@ Fichiers générés dans job_dir/ :
 import csv
 import json
 import os
-import zipfile
 from datetime import datetime
 from typing import List, Optional
+
+from job_artifacts import ARCHIVE_SOURCE_FILES, build_job_archive
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -400,15 +401,7 @@ def write_logs(job_dir: str, log_lines: List[str]) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Fichiers inclus dans l'archive (les 7 principaux, hors tested.json/meta.json/stop.flag)
-_ARCHIVE_FILES = [
-    "progress.json",
-    "config_used.json",
-    "results.csv",
-    "metrics.json",
-    "best_strategies.csv",
-    "report.html",
-    "logs.txt",
-]
+_ARCHIVE_FILES = ARCHIVE_SOURCE_FILES
 
 
 def write_archive(job_dir: str) -> Optional[str]:
@@ -416,22 +409,8 @@ def write_archive(job_dir: str) -> Optional[str]:
     Crée archive.zip contenant les 7 fichiers principaux du job.
     Retourne le chemin de l'archive, ou None si aucun fichier trouvé.
     """
-    archive_path = os.path.join(job_dir, "archive.zip")
-    found = []
-
-    for filename in _ARCHIVE_FILES:
-        fp = os.path.join(job_dir, filename)
-        if os.path.exists(fp):
-            found.append((filename, fp))
-
-    if not found:
-        return None
-
-    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for filename, fp in found:
-            zf.write(fp, arcname=filename)
-
-    return archive_path
+    archive_path = build_job_archive(job_dir)
+    return str(archive_path) if archive_path else None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
