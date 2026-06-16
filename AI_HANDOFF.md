@@ -36,6 +36,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `data_validator.py`      | Valide et normalise les CSV importés avant sauvegarde dans `data/`   |
 | `maintenance.py`         | Analyse les fichiers locaux générés et prépare des nettoyages sécurisés |
 | `dashboard.py`           | Agrège les KPIs d'accueil : disque, jobs, données disponibles, alertes |
+| `ui_components.py`       | Petits helpers d'affichage Streamlit : en-têtes, panneaux d'aide, étapes |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
 
 ### Organisation des données de marché
@@ -127,6 +128,8 @@ Ou en terminal :
 - **Maintenance locale** : simulation obligatoire avant suppression. Ne supprime jamais un job actif, ni `nasdaq_3m.csv`, `.env`, `.venv`, `.git`, `.streamlit/credentials.toml`, `app_corrupted_backup.py`.
 - **Chemins nettoyables** : uniquement `results/job_xxx/` terminés ou en erreur, et dossiers de test `data/PWCSV.../`. Les vrais CSV utilisateur sont dans une zone danger désactivée.
 - **Accueil Streamlit** : `dashboard.py` calcule le résumé global sans dépendre de Streamlit. L'onglet `Accueil` affiche disque, jobs, données, alertes et actions rapides.
+- **UX Streamlit** : préférer les composants Streamlit natifs. Les nouveaux helpers d'affichage restent dans `ui_components.py` et ne doivent pas contenir de logique métier.
+- **Téléchargements UX** : l'historique n'affiche plus de `download_button` pour chaque job afin d'éviter les sources Streamlit invalidées. Le bouton `Fichiers job` ouvre le job, et les vrais téléchargements restent dans l'onglet `Fichiers job`.
 
 ---
 
@@ -190,6 +193,8 @@ pip install -r requirements-server.txt
 - [x] Téléchargements jobs : fichiers vérifiés avant bouton, `archive.zip` régénérée si nécessaire, `download_button` configuré sans rerun
 - [x] Maintenance locale : onglet `Maintenance`, simulation de nettoyage, protection jobs actifs, nettoyage séparé des dossiers `data/PWCSV.../`
 - [x] Tableau de bord d'accueil : KPIs disque/jobs, données disponibles, alertes simples et actions rapides vers Données/Optimisation/Historique/Maintenance
+- [x] Nettoyage UX ciblé : onglets manuels clarifiés, Accueil guidé, Données en parcours étape par étape, Optimisation avec récapitulatif avant lancement, Maintenance avec zones danger plus explicites
+- [x] Validation Playwright UX Edge : actions rapides testées, job rapide `job_20260615_184659_a272` terminé, 12/12 combinaisons, téléchargements OK, aucune erreur console
 - [x] Tests validés : 12 combos / 1 worker et 42 combos / 2 workers → 7/7 fichiers présents
 - [x] Dépôt GitHub créé (privé) : https://github.com/crashboom34/backtest-nasdaq-revolution
 
@@ -219,6 +224,7 @@ pip install -r requirements-server.txt
 | `.streamlit/credentials.toml` suivi  | Corrigé     | Ajouté dans .gitignore + à retirer du suivi Git            |
 | Benchmark très lent sur PC local (110 s/bt avec historique complet) | Corrigé | Mode validation rapide reconfiguré : `max_rows=20 000`, `benchmark_n_sample=1` |
 | Aucun aperçu global au lancement | Corrigé | Onglet `Accueil` ajouté, calculs isolés dans `dashboard.py` et testés |
+| Interface encore trop peu guidée pour débutant | En amélioration | Helpers `ui_components.py`, messages plus pédagogiques et parcours principaux clarifiés |
 
 ---
 

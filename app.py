@@ -43,6 +43,7 @@ from optimizer import (
 from report_generator import generate_report
 from data_validator import validate_market_csv_bytes
 from dashboard import build_dashboard_summary
+from ui_components import help_panel, page_header, return_home_button, step_title
 from path_resolver import (
     DEFAULT_ASSET, DEFAULT_TIMEFRAME,
     data_csv_target_path,
@@ -1529,17 +1530,12 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
                              initial_capital, spread, slip_in, slip_out):
     """Onglet complet d'optimisation."""
 
-    st.markdown(f"""
-    <div style="margin-bottom:20px">
-      <div style="font-size:22px;font-weight:700;color:white;letter-spacing:-0.4px;margin-bottom:6px">
-        🔬 Optimisateur de Stratégie
-      </div>
-      <div style="font-size:13px;color:{TEXT_DIM}">
-        Teste automatiquement des centaines de combinaisons de paramètres et classe les meilleurs
-        réglages par score de robustesse.
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    page_header(
+        "Optimisation",
+        "Lance des jobs dans results/job_xxx/, suis la progression, puis télécharge les résultats.",
+        "Moteur serveur local",
+    )
+    return_home_button(lambda: _switch_main_tab(MAIN_TAB_HOME), key="opt_return_home")
 
     # ── Sous-onglets internes ──────────────────────────────────
     subtab_labels = [
@@ -1656,13 +1652,14 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         st.error(data_resolution.message, icon=None)
 
     # ── Mode validation rapide (F2) ───────────────────────────
-    st.info(
-        "Pour un premier test sur PC lent, active **Mode validation rapide**. "
-        "Il sert à vérifier le pipeline complet sans lancer un calcul trop long.",
-        icon=None,
+    help_panel(
+        "Mode recommandé pour tester",
+        "Pour un premier essai sur PC lent, active le mode validation rapide. "
+        "Il vérifie le pipeline complet sans lancer un calcul long.",
+        "info",
     )
     quick_mode = st.toggle(
-        "⚡ Mode validation rapide (PC lent)",
+        "⚡ Mode validation rapide - test technique PC lent",
         value=False,
         key="opt_quick_mode",
         help=(
@@ -1672,11 +1669,11 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         ),
     )
     if quick_mode:
-        st.warning(
-            "⚡ **Mode validation rapide activé** — Ce mode sert à valider "
-            "techniquement l'optimisateur, **pas à trouver le meilleur réglage final**. "
+        help_panel(
+            "Test technique activé",
+            "Ce mode sert à valider techniquement l'optimisateur, pas à trouver le meilleur réglage final. "
             "Les presets (20 000 lignes, 12 combos max, 1 worker, benchmark×1) sont appliqués automatiquement.",
-            icon=None,
+            "warning",
         )
 
     # ── Mode d'optimisation ───────────────────────────────────
@@ -2063,6 +2060,26 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         split_date=tt_date if tt_enabled else None,
         alert_degradation_pct=float(tt_alert) if tt_enabled else 30.0,
     )
+
+    # ── Recapitulatif avant lancement ─────────────────────────
+    with st.container(border=True):
+        st.markdown("### Avant de lancer")
+        st.caption("Vérifie ces points avant de créer un nouveau dossier dans `results/job_xxx/`.")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Mode", "Test rapide" if quick_mode else "Optimisation complète")
+        r2.metric("Combinaisons", f"{int(total_combos or 0):,}")
+        r3.metric("Workers", int(n_workers or 1))
+        r4.metric("Benchmark", f"{int(benchmark_n_sample or 1)}×")
+        st.write(f"Fichier de données : `{data_resolution.relative_path}`")
+        if quick_mode:
+            st.caption(
+                f"Mode rapide : max {_QUICK_MAX_ROWS:,} lignes, {_QUICK_MAX_COMBOS} combinaisons, "
+                f"{_QUICK_N_WORKERS} worker. Résultats non représentatifs."
+            )
+        elif raw_total_combos > total_combos:
+            st.caption(f"Combinaisons initiales : {raw_total_combos:,}; exécutées : {total_combos:,}.")
+        else:
+            st.caption("Mode complet : aucune limite rapide forcée.")
 
     # ── Bouton LANCER ─────────────────────────────────────────
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
@@ -2575,12 +2592,14 @@ def _remember_job_for_tracking(job: dict) -> None:
         st.session_state.setdefault("opt_job_dirs", {})[job_id] = job_dir
 
 
-def _show_results_for_run(run_id: str, job_dir: str = None) -> None:
+def _show_results_for_run(run_id: str, job_dir: str = None, focus_files: bool = False) -> None:
     if not run_id:
         return
     st.session_state["opt_view_run_id"] = run_id
     if job_dir:
         st.session_state.setdefault("opt_job_dirs", {})[run_id] = job_dir
+    if focus_files:
+        st.session_state["opt_focus_files_tab"] = True
     st.session_state["opt_focus_results_tab"] = True
 
 
@@ -2775,7 +2794,12 @@ def _render_job_downloads(job_dir: str, job_id: str):
 
     files = list_job_download_files(job_dir)
     available = [info for info in files if info.can_download]
-    st.caption(f"{len(available)}/{len(files)} fichiers téléchargeables.")
+    help_panel(
+        "Fichiers du job",
+        f"{len(available)}/{len(files)} fichiers sont prêts à être téléchargés. "
+        "Les fichiers absents restent affichés sans bouton cassé.",
+        "info",
+    )
 
     for info in files:
         cols = st.columns([2.4, 1.1, 1.4])
@@ -2784,11 +2808,11 @@ def _render_job_downloads(job_dir: str, job_id: str):
             st.markdown(f"**{info.label}**  \n`{info.filename}`")
         with cols[1]:
             if info.can_download:
-                st.caption(f"Présent · {_fmt_file_size(info.size)}")
+                st.caption(f"Prêt · {_fmt_file_size(info.size)}")
             elif info.exists and info.error:
-                st.caption("Erreur lecture")
+                st.caption("Erreur de lecture")
             else:
-                st.caption("Absent")
+                st.caption("Indisponible")
         with cols[2]:
             if info.can_download:
                 try:
@@ -3010,10 +3034,21 @@ def _render_results_tab():
     _render_results_diagnostic(status_str, df_results, valid_count, int(n_filtered or 0),
                                float(best_score or 0), int(n_tested or 0), quick_validation)
 
-    tabs = st.tabs(
+    result_tab_labels = (
         ["🥇 Top résultats", "📋 Données avancées", "📝 Rapport", "📦 Fichiers job"]
         if job_dir else
         ["🥇 Top résultats", "📋 Données avancées", "📝 Rapport"]
+    )
+    if st.session_state.pop("opt_focus_files_tab", False) and job_dir:
+        st.session_state["result_subtabs"] = "📦 Fichiers job"
+    elif st.session_state.get("result_subtabs") not in result_tab_labels:
+        st.session_state["result_subtabs"] = "🥇 Top résultats"
+
+    tabs = st.tabs(
+        result_tab_labels,
+        default=st.session_state.get("result_subtabs", "🥇 Top résultats"),
+        key="result_subtabs",
+        on_change="rerun",
     )
     res_top10, res_all, res_report = tabs[:3]
     res_files = tabs[3] if job_dir else None
@@ -3321,8 +3356,14 @@ def _render_report(report: dict, sens: dict):
 # ── Sous-onglet Historique Runs ────────────────────────────────────
 
 def _render_jobs_history_section(jobs: list):
-    st.markdown("### 📦 Jobs serveur")
+    st.markdown("### Jobs d'optimisation")
     st.caption(f"{len(jobs)} job{'s' if len(jobs) != 1 else ''} dans `results/job_xxx/`")
+    help_panel(
+        "Lecture depuis le disque",
+        "Cette liste reflète les dossiers déjà créés dans `results/job_xxx/`. "
+        "Un job terminé peut être ouvert avec Voir ou téléchargé via son archive.",
+        "info",
+    )
 
     if not jobs:
         st.markdown(f"""
@@ -3413,38 +3454,10 @@ def _render_jobs_history_section(jobs: list):
                     st.toast(f"Job {job_id[-8:]} chargé — passe sur l'onglet Résultats", icon="📊")
                     st.rerun()
             with bc2:
-                archive_path = None
-                if job_dir:
-                    try:
-                        archive_path = ensure_job_archive(job_dir)
-                    except OSError:
-                        archive_path = None
-                if archive_path and os.path.exists(archive_path):
-                    try:
-                        archive_bytes = read_job_file_bytes(archive_path)
-                        st.download_button(
-                            "Télécharger archive",
-                            archive_bytes,
-                            file_name="archive.zip",
-                            mime="application/zip",
-                            key=f"job_archive_{job_id}",
-                            width="stretch",
-                            on_click="ignore",
-                        )
-                    except OSError:
-                        st.button(
-                            "Archive illisible",
-                            disabled=True,
-                            key=f"job_archive_unreadable_{job_id}",
-                            width="stretch",
-                        )
-                else:
-                    st.button(
-                        "Archive absente",
-                        disabled=True,
-                        key=f"job_archive_missing_{job_id}",
-                        width="stretch",
-                    )
+                if st.button("Fichiers job", key=f"job_files_{job_id}", width="stretch", type="secondary"):
+                    _show_results_for_run(job_id, job_dir, focus_files=True)
+                    st.toast(f"Fichiers du job {job_id[-8:]} ouverts", icon="📦")
+                    st.rerun()
             if is_active:
                 with bc3:
                     if st.button("Reprendre le suivi", key=f"job_resume_{job_id}", width="stretch"):
@@ -3567,9 +3580,9 @@ def _render_opt_history_tab():
 
 
 MAIN_TAB_HOME = "🏠  Accueil"
-MAIN_TAB_BACKTEST = "📊  Backtest"
-MAIN_TAB_HISTORY = "📂  Historique"
-MAIN_TAB_NEW = "➕  Nouvelle Stratégie"
+MAIN_TAB_BACKTEST = "📊  Backtest manuel"
+MAIN_TAB_HISTORY = "📂  Historique manuel"
+MAIN_TAB_NEW = "➕  Nouvelle stratégie"
 MAIN_TAB_DATA = "🗄️  Données"
 MAIN_TAB_MAINTENANCE = "🧹  Maintenance"
 MAIN_TAB_OPTIMIZATION = "🔬  Optimisation"
@@ -3615,10 +3628,16 @@ def render_home_tab():
     """Tableau de bord d'accueil : etat local, donnees, jobs et alertes."""
     summary = build_dashboard_summary()
 
-    st.markdown("## Accueil")
-    st.caption(
-        "Vue rapide de l'état local : données disponibles, jobs, espace disque "
-        "et alertes importantes."
+    page_header(
+        "Accueil",
+        "Vue rapide de l'état local : données disponibles, jobs, espace disque et alertes importantes.",
+        "Tableau de bord local",
+    )
+    help_panel(
+        "Que faire maintenant ?",
+        "Commence par importer ou vérifier tes données, puis lance une optimisation rapide. "
+        "Quand un job est terminé, ouvre l'historique pour consulter les résultats et télécharger les fichiers.",
+        "info",
     )
 
     disk_free_pct = (
@@ -3665,9 +3684,11 @@ def render_home_tab():
                     source_label = "fallback legacy"
                 else:
                     source_label = "manquant"
+                data_type = "CSV de test" if source.asset.startswith("PWCSV") else "Données utilisateur"
                 rows.append({
                     "Actif": source.asset,
                     "Timeframe": source.timeframe,
+                    "Type": data_type,
                     "Source": source_label,
                     "Fichier": source.relative_path,
                     "Etat": "OK" if source.exists else "Aucun CSV",
@@ -3688,32 +3709,39 @@ def render_home_tab():
         st.markdown("### Actions rapides")
         a1, a2, a3, a4 = st.columns(4)
         with a1:
-            if st.button("Aller aux Données", width="stretch"):
+            if st.button("Préparer un CSV", width="stretch"):
                 _switch_main_tab(MAIN_TAB_DATA)
         with a2:
-            if st.button("Configurer une optimisation", width="stretch"):
+            if st.button("Lancer une optimisation", width="stretch"):
                 _switch_main_tab(MAIN_TAB_OPTIMIZATION, opt_subtab=OPT_SUBTAB_CONFIG)
         with a3:
-            if st.button("Voir l'historique runs", width="stretch"):
+            if st.button("Voir les jobs", width="stretch"):
                 _switch_main_tab(MAIN_TAB_OPTIMIZATION, opt_subtab=OPT_SUBTAB_HISTORY)
         with a4:
-            if st.button("Ouvrir Maintenance", width="stretch"):
+            if st.button("Nettoyer localement", width="stretch"):
                 _switch_main_tab(MAIN_TAB_MAINTENANCE)
 
 
 def render_data_tab():
     """Onglet d'import et validation des CSV de marche."""
-    st.markdown("## Données")
-    st.caption(
-        "Importe un petit ou grand CSV, vérifie sa qualité, puis sauvegarde-le dans "
-        "`data/ACTIF/TIMEFRAME/` pour les prochains backtests."
+    page_header(
+        "Données",
+        "Importe un CSV, vérifie sa qualité, puis sauvegarde-le dans data/ACTIF/TIMEFRAME/.",
+        "Préparation des historiques",
+    )
+    return_home_button(lambda: _switch_main_tab(MAIN_TAB_HOME), key="data_return_home")
+    help_panel(
+        "Parcours conseillé",
+        "1. Choisis l'actif et le timeframe. 2. Importe le CSV. "
+        "3. Corrige les erreurs bloquantes si besoin. 4. Sauvegarde seulement quand le résumé est OK.",
+        "info",
     )
 
     existing_assets = list_available_assets()
     selected_existing_asset = existing_assets[0] if existing_assets else DEFAULT_ASSET
 
     with st.container(border=True):
-        st.markdown("### 1. Choisir la destination")
+        step_title(1, "Choisir la destination", "C'est le dossier où le CSV sera rangé pour les prochains backtests.")
         c1, c2 = st.columns(2)
         with c1:
             selected_existing_asset = st.selectbox(
@@ -3748,9 +3776,10 @@ def render_data_tab():
 
         effective_timeframe = normalize_timeframe(custom_timeframe or selected_existing_timeframe)
         target_path = data_csv_target_path(effective_asset, effective_timeframe)
-        st.info(
-            f"Destination prévue : `{to_relative_path(target_path)}`",
-            icon=None,
+        help_panel(
+            "Destination prévue",
+            f"`{to_relative_path(target_path)}`",
+            "info",
         )
 
     uploaded_file = st.file_uploader(
@@ -3767,13 +3796,13 @@ def render_data_tab():
     result = validate_market_csv_bytes(uploaded_file.getvalue())
 
     with st.container(border=True):
-        st.markdown("### 3. Résumé qualité")
+        step_title(3, "Résumé qualité", "La sauvegarde est désactivée tant qu'il reste une erreur bloquante.")
         if result.errors:
-            st.error("Erreurs bloquantes : sauvegarde désactivée.", icon=None)
+            help_panel("Erreurs bloquantes", "La sauvegarde est désactivée. Corrige le CSV puis importe-le à nouveau.", "error")
         elif result.warnings:
-            st.warning("CSV utilisable avec avertissements.", icon=None)
+            help_panel("CSV utilisable avec avertissements", "Tu peux sauvegarder, mais lis les avertissements avant de lancer un gros job.", "warning")
         else:
-            st.success("CSV OK : il peut être sauvegardé.", icon=None)
+            help_panel("CSV validé", "Le fichier peut être sauvegardé et utilisé dans l'optimisation.", "success")
 
         summary = result.summary
         m1, m2, m3, m4 = st.columns(4)
@@ -3807,7 +3836,7 @@ def render_data_tab():
             st.dataframe(result.dataframe.head(20), width="stretch", hide_index=True)
 
     with st.container(border=True):
-        st.markdown("### 4. Sauvegarder")
+        step_title(4, "Sauvegarder", "Les CSV sauvegardés dans data/ restent locaux et sont ignorés par Git.")
         target_exists = target_path.exists()
         overwrite = False
         if target_exists:
@@ -3860,10 +3889,17 @@ def _maintenance_items_dataframe(items):
 
 def render_maintenance_tab():
     """Onglet de maintenance locale, avec simulation obligatoire."""
-    st.markdown("## Maintenance locale")
-    st.caption(
-        "Cette page aide à nettoyer les fichiers générés localement. "
-        "Rien n'est supprimé automatiquement : la simulation est toujours affichée avant toute action réelle."
+    page_header(
+        "Maintenance locale",
+        "Nettoie les fichiers générés localement avec simulation obligatoire.",
+        "Nettoyage sécurisé",
+    )
+    return_home_button(lambda: _switch_main_tab(MAIN_TAB_HOME), key="maint_return_home")
+    help_panel(
+        "Sécurité anti-suppression",
+        "Rien n'est supprimé automatiquement. Les jobs actifs sont protégés. "
+        "Une suppression réelle demande une confirmation écrite exacte.",
+        "warning",
     )
 
     try:
@@ -3890,6 +3926,7 @@ def render_maintenance_tab():
         st.info("Aucun dossier job trouvé dans `results/`.", icon=None)
 
     st.markdown("#### Simulation de nettoyage jobs")
+    st.caption("La simulation montre ce qui serait supprimé, sans rien toucher sur le disque.")
     f1, f2, f3, f4 = st.columns(4)
     with f1:
         include_completed = st.checkbox("Jobs terminés", value=True, key="maint_jobs_completed")
@@ -3937,9 +3974,10 @@ def render_maintenance_tab():
         st.info("Aucun job ne correspond aux filtres de nettoyage.", icon=None)
 
     with st.expander("Suppression réelle des jobs sélectionnés", expanded=False):
-        st.warning(
+        help_panel(
+            "Zone danger jobs",
             "Action irréversible. Les jobs actifs, chemins non autorisés et fichiers protégés restent bloqués.",
-            icon=None,
+            "warning",
         )
         confirm_jobs = st.text_input(
             "Pour confirmer, tape exactement SUPPRIMER",
@@ -3983,7 +4021,11 @@ def render_maintenance_tab():
         st.success("Aucun dossier `data/PWCSV.../` détecté.", icon=None)
 
     with st.expander("Suppression réelle des dossiers PWCSV", expanded=False):
-        st.warning("Cette action ne concerne que les dossiers `data/PWCSV.../`, jamais les CSV utilisateur.", icon=None)
+        help_panel(
+            "Zone danger dossiers de test",
+            "Cette action ne concerne que les dossiers `data/PWCSV.../`, jamais les CSV utilisateur.",
+            "warning",
+        )
         confirm_pwcsv = st.text_input(
             "Pour confirmer, tape exactement SUPPRIMER PWCSV",
             value="",
@@ -4010,10 +4052,11 @@ def render_maintenance_tab():
     st.caption("Pour confirmer, tape exactement `SUPPRIMER PWCSV` dans la section dédiée aux dossiers PWCSV.")
 
     with st.expander("Zone danger CSV utilisateur", expanded=False):
-        st.warning(
+        help_panel(
+            "Suppression CSV utilisateur désactivée",
             "Par sécurité, cette version ne supprime aucun vrai CSV utilisateur. "
             "`nasdaq_3m.csv`, `.env`, `.venv`, `.git`, `.streamlit/credentials.toml` et `app_corrupted_backup.py` sont protégés.",
-            icon=None,
+            "warning",
         )
         st.button("Suppression CSV utilisateur désactivée", disabled=True, width="stretch")
 
