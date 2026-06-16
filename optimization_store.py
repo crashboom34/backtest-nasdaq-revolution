@@ -687,6 +687,8 @@ def build_meta(
         "date":                      datetime.now().isoformat(),
         "strategy_name":             config_dict.get("strategy_name", ""),
         "mode":                      config_dict.get("mode", ""),
+        "preset_name":               config_dict.get("preset_name", ""),
+        "preset_description":        config_dict.get("preset_description", ""),
         "status":                    status,
         "variables_tested":          [pr["name"] for pr in config_dict.get("param_ranges", [])
                                       if pr.get("enabled", True)],
@@ -695,6 +697,7 @@ def build_meta(
         "combinations_filtered_out": combinations_filtered,
         "duration_seconds":          round(duration_seconds, 1),
         "workers_used":              config_dict.get("n_workers", 1),
+        "workers":                   config_dict.get("workers", config_dict.get("n_workers", 1)),
         "benchmark_ms_per_backtest": round(benchmark_ms, 1),
         "score_weights":             config_dict.get("score_weights", {}),
         "filters":                   config_dict.get("filters", {}),

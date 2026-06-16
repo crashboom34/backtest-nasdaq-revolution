@@ -197,6 +197,7 @@ pip install -r requirements-server.txt
 - [x] Validation Playwright UX Edge : actions rapides testées, job rapide `job_20260615_184659_a272` terminé, 12/12 combinaisons, téléchargements OK, aucune erreur console
 - [x] Tests validés : 12 combos / 1 worker et 42 combos / 2 workers → 7/7 fichiers présents
 - [x] Dépôt GitHub créé (privé) : https://github.com/crashboom34/backtest-nasdaq-revolution
+- [x] Préréglages d'optimisation Streamlit : `Test rapide local`, `Test moyen`, `Optimisation complète`, `Serveur puissant`, `Personnalisé`
 
 ### Reste à faire (prochaines étapes suggérées)
 
@@ -228,22 +229,32 @@ pip install -r requirements-server.txt
 
 ---
 
-## 11. Mode validation rapide (PC lent)
+## 11. Préréglages d'optimisation Streamlit
 
-Le toggle **"⚡ Mode validation rapide (PC lent)"** dans Streamlit applique automatiquement :
+L'onglet **Optimisation > Configuration** propose maintenant un sélecteur de préréglage pour éviter de régler les limites à la main.
 
-| Paramètre           | Valeur mode rapide | Valeur mode complet |
-|---------------------|--------------------|---------------------|
-| `max_rows`          | 20 000 lignes      | None (tout l'historique) |
-| `benchmark_n_sample`| 1                  | 5 (défaut selectbox) |
-| `n_workers`         | 1                  | auto (cpu_count)     |
-| `max_combinations`  | 12 combinaisons réellement exécutées | None / illimité |
+| Préréglage | `max_rows` | `max_combinations` | `n_workers` | `benchmark_n_sample` | Note |
+|------------|------------|--------------------|-------------|----------------------|------|
+| `Test rapide local` | 20 000 | 12 | 1 | 1 | Remplace l'ancien mode validation rapide |
+| `Test moyen` | 100 000 | 100 | 2 | 3 | Test local plus représentatif |
+| `Optimisation complète` | None | None | choisi par l'utilisateur | 5 | Peut être long |
+| `Serveur puissant` | None | limite élevée configurable | workers élevés configurables | 5 | Prévu pour serveur |
+| `Personnalisé` | manuel | manuel | manuel | manuel | L'utilisateur garde le contrôle |
 
-**Important** : les résultats obtenus en mode rapide ne sont **pas représentatifs** d'une vraie optimisation. Ce mode sert uniquement à vérifier que le pipeline fonctionne (benchmark → running → fichiers générés).
+Chaque nouveau job enregistre dans `config_used.json` et `meta.json` :
 
-Quand `max_rows = None` et `quick_mode = False`, un `st.warning()` orange s'affiche dans l'expander "Période d'optimisation" pour alerter l'utilisateur.
+- `preset_name`
+- `preset_description`
+- `max_rows`
+- `max_combinations`
+- `benchmark_n_sample`
+- `n_workers`
 
-Dernière validation automatisée :
+Compatibilité : les anciens jobs sans `preset_name` restent lisibles et sont affichés comme `Ancien job`. Les anciens jobs avec `quick_validation_mode=true` sont reconnus comme `Test rapide local`.
+
+**Important** : les résultats obtenus avec `Test rapide local` ne sont **pas représentatifs** d'une vraie optimisation. Ce mode sert uniquement à vérifier que le pipeline fonctionne (benchmark → running → fichiers générés).
+
+Dernière validation automatisée avant cette évolution :
 
 - Compilation : `.\.venv\Scripts\python.exe -m py_compile app.py optimization_store.py optimizer_process.py job_store.py job_launcher.py run_job.py path_resolver.py optimizer.py`
 - Tests : `.\.venv\Scripts\python.exe -m pytest --basetemp <temp dédié> tests\test_optimization_store.py tests\test_job_launcher.py tests\test_job_store.py` → 35 passed

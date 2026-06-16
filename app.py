@@ -27,6 +27,11 @@ from job_artifacts import (
     read_job_file_bytes,
 )
 from job_launcher import launch_optimizer_job
+from optimization_presets import (
+    get_preset,
+    is_quick_preset,
+    preset_names,
+)
 from maintenance import (
     build_cleanup_plan,
     delete_items,
@@ -1424,12 +1429,45 @@ def _is_quick_validation(config: dict = None, meta: dict = None) -> bool:
     for source in (config or {}, meta or {}):
         if not isinstance(source, dict):
             continue
+        if is_quick_preset(str(source.get("preset_name", ""))):
+            return True
         if _as_bool(source.get("quick_validation_mode")):
             return True
         nested = source.get("config")
-        if isinstance(nested, dict) and _as_bool(nested.get("quick_validation_mode")):
-            return True
+        if isinstance(nested, dict):
+            if is_quick_preset(str(nested.get("preset_name", ""))):
+                return True
+            if _as_bool(nested.get("quick_validation_mode")):
+                return True
     return False
+
+
+def _preset_label(config: dict = None, meta: dict = None, fallback: str = "Ancien job") -> str:
+    for source in (config or {}, meta or {}):
+        if not isinstance(source, dict):
+            continue
+        name = source.get("preset_name")
+        if name:
+            return str(name)
+        nested = source.get("config")
+        if isinstance(nested, dict) and nested.get("preset_name"):
+            return str(nested.get("preset_name"))
+    if _is_quick_validation(config, meta):
+        return "Test rapide local"
+    return fallback
+
+
+def _preset_description(config: dict = None, meta: dict = None) -> str:
+    for source in (config or {}, meta or {}):
+        if not isinstance(source, dict):
+            continue
+        desc = source.get("preset_description")
+        if desc:
+            return str(desc)
+        nested = source.get("config")
+        if isinstance(nested, dict) and nested.get("preset_description"):
+            return str(nested.get("preset_description"))
+    return ""
 
 
 def _score_verdict(score: float, status: str = "completed", valid_count: int = 0,
@@ -1651,30 +1689,43 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
     else:
         st.error(data_resolution.message, icon=None)
 
-    # ── Mode validation rapide (F2) ───────────────────────────
+    # ── Préréglage d'optimisation ─────────────────────────────
+    st.markdown("<div class='section-title'>Préréglage d'optimisation</div>", unsafe_allow_html=True)
+    preset_options = preset_names(os.cpu_count())
+    if st.session_state.get("opt_preset_name") not in preset_options:
+        st.session_state["opt_preset_name"] = preset_options[0]
+
+    preset_name = st.selectbox(
+        "Préréglage",
+        options=preset_options,
+        key="opt_preset_name",
+        help="Choisis un niveau de calcul. Personnalisé laisse tous les champs modifiables.",
+    )
+    selected_preset = get_preset(preset_name, os.cpu_count())
+    quick_mode = is_quick_preset(selected_preset.name)
+
+    if st.session_state.get("_opt_last_preset_name") != selected_preset.name:
+        st.session_state["_opt_last_preset_name"] = selected_preset.name
+        if not selected_preset.manual_control:
+            if selected_preset.workers is not None:
+                st.session_state["opt_workers"] = int(selected_preset.workers)
+            st.session_state["opt_benchmark_n_sample"] = int(selected_preset.benchmark_n_sample)
+            st.session_state["opt_use_start"] = False
+            st.session_state["opt_use_end"] = False
+            st.session_state["opt_use_maxrows"] = selected_preset.max_rows is not None
+            if selected_preset.max_rows is not None:
+                st.session_state["opt_max_rows_widget"] = int(selected_preset.max_rows)
+            st.session_state["opt_use_max_combinations"] = selected_preset.max_combinations is not None
+            if selected_preset.max_combinations is not None:
+                st.session_state["opt_max_combinations_widget"] = int(selected_preset.max_combinations)
+
     help_panel(
-        "Mode recommandé pour tester",
-        "Pour un premier essai sur PC lent, active le mode validation rapide. "
-        "Il vérifie le pipeline complet sans lancer un calcul long.",
-        "info",
+        selected_preset.name,
+        selected_preset.description,
+        "warning" if selected_preset.warning else "info",
     )
-    quick_mode = st.toggle(
-        "⚡ Mode validation rapide - test technique PC lent",
-        value=False,
-        key="opt_quick_mode",
-        help=(
-            "Presets automatiques : 20 000 lignes max · 12 combinaisons max · "
-            "1 worker · 1 échantillon benchmark · train/test désactivé. "
-            "Idéal pour vérifier que le pipeline fonctionne avant un long run."
-        ),
-    )
-    if quick_mode:
-        help_panel(
-            "Test technique activé",
-            "Ce mode sert à valider techniquement l'optimisateur, pas à trouver le meilleur réglage final. "
-            "Les presets (20 000 lignes, 12 combos max, 1 worker, benchmark×1) sont appliqués automatiquement.",
-            "warning",
-        )
+    if selected_preset.warning:
+        st.warning(selected_preset.warning, icon=None)
 
     # ── Mode d'optimisation ───────────────────────────────────
     st.markdown("<div class='section-title'>Mode d'optimisation</div>", unsafe_allow_html=True)
@@ -1804,21 +1855,67 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
     wc1, wc2 = st.columns([2, 1])
     with wc1:
         n_workers_default = max(1, min(os.cpu_count() or 4, 8))
+        n_workers_max = max(os.cpu_count() or 8, int(selected_preset.workers or 1), 2)
+        if "opt_workers" not in st.session_state:
+            st.session_state["opt_workers"] = (
+                int(selected_preset.workers)
+                if selected_preset.workers is not None
+                else n_workers_default
+            )
         n_workers = st.slider(
-            "Nombre de workers (CPU)", 1, os.cpu_count() or 8,
+            "Nombre de workers (CPU)", 1, n_workers_max,
             value=n_workers_default, key="opt_workers",
+            disabled=(
+                not selected_preset.manual_control
+                and not selected_preset.configurable_workers
+            ),
         )
     with wc2:
+        benchmark_options = [1, 3, 5, 10, 15]
+        if "opt_benchmark_n_sample" not in st.session_state:
+            st.session_state["opt_benchmark_n_sample"] = int(selected_preset.benchmark_n_sample)
         benchmark_n_sample = st.selectbox(
             "Échantillons benchmark",
-            options=[1, 3, 5, 10, 15],
-            index=2,              # défaut = 5
+            options=benchmark_options,
+            index=benchmark_options.index(int(selected_preset.benchmark_n_sample)),
             key="opt_benchmark_n_sample",
             help=(
                 "Nombre de backtests pour mesurer la vitesse avant l'optimisation. "
                 "Moins = démarrage plus rapide mais estimation moins précise."
             ),
+            disabled=not selected_preset.manual_control,
         )
+
+    with st.expander("🎚️ Limite de combinaisons", expanded=False):
+        st.caption(
+            "Cette limite coupe le nombre de réglages testés. "
+            "Elle protège le PC local contre les runs trop longs."
+        )
+        if "opt_use_max_combinations" not in st.session_state:
+            st.session_state["opt_use_max_combinations"] = selected_preset.max_combinations is not None
+        if "opt_max_combinations_widget" not in st.session_state:
+            st.session_state["opt_max_combinations_widget"] = int(selected_preset.max_combinations or 100_000)
+
+        max_combo_toggle_disabled = (
+            not selected_preset.manual_control
+            and not selected_preset.configurable_max_combinations
+        )
+        use_max_combinations = st.checkbox(
+            "Limiter le nombre de combinaisons",
+            key="opt_use_max_combinations",
+            disabled=max_combo_toggle_disabled,
+        )
+        if use_max_combinations:
+            max_combinations_limit = int(st.number_input(
+                "Combinaisons maximum",
+                min_value=1,
+                max_value=5_000_000,
+                step=10,
+                key="opt_max_combinations_widget",
+                disabled=max_combo_toggle_disabled,
+            ))
+        else:
+            max_combinations_limit = None
 
     gp = {
         "initial_capital": float(initial_capital),
@@ -1836,34 +1933,53 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
             "</div>", unsafe_allow_html=True
         )
         pc1, pc2, pc3 = st.columns(3)
+        period_fields_disabled = not selected_preset.manual_control
         with pc1:
-            use_start = st.checkbox("Date de début", value=False, key="opt_use_start")
+            use_start = st.checkbox(
+                "Date de début",
+                value=False,
+                key="opt_use_start",
+                disabled=period_fields_disabled,
+            )
             if use_start:
                 _d_start = st.date_input(
                     "Début", value=datetime.date(2022, 1, 1),
                     key="opt_start_date_widget",
+                    disabled=period_fields_disabled,
                 )
                 opt_start_date_str = _d_start.isoformat()
             else:
                 opt_start_date_str = None
         with pc2:
-            use_end = st.checkbox("Date de fin", value=False, key="opt_use_end")
+            use_end = st.checkbox(
+                "Date de fin",
+                value=False,
+                key="opt_use_end",
+                disabled=period_fields_disabled,
+            )
             if use_end:
                 _d_end = st.date_input(
                     "Fin", value=datetime.date(2024, 12, 31),
                     key="opt_end_date_widget",
+                    disabled=period_fields_disabled,
                 )
                 opt_end_date_str = _d_end.isoformat()
             else:
                 opt_end_date_str = None
         with pc3:
-            use_maxrows = st.checkbox("Limiter les lignes", value=False, key="opt_use_maxrows")
+            use_maxrows = st.checkbox(
+                "Limiter les lignes",
+                value=False,
+                key="opt_use_maxrows",
+                disabled=period_fields_disabled,
+            )
             if use_maxrows:
                 opt_max_rows = st.number_input(
                     "Nb de lignes max", value=100_000,
                     min_value=10_000, max_value=1_000_000, step=10_000,
                     key="opt_max_rows_widget",
                     help="Filtre appliqué après le filtre de date — garde les N premières lignes.",
+                    disabled=period_fields_disabled,
                 )
             else:
                 opt_max_rows = None
@@ -1880,33 +1996,22 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
             st.info("📅 Filtrage actif : " + " · ".join(_filter_parts))
         else:
             if quick_mode:
-                st.info("⚡ Mode rapide actif : une limite de 20 000 lignes sera appliquée automatiquement.")
+                st.info("Mode rapide actif : une limite de 20 000 lignes sera appliquée automatiquement.")
+            elif selected_preset.full_history:
+                st.info("Historique complet : aucun filtre de date ou de lignes n'est appliqué.")
             else:
                 st.warning(
                     "Aucun filtre actif : l'optimisation utilisera tout l'historique. "
-                    "Sur un PC lent, active le mode validation rapide ou limite le nombre de lignes.",
+                    "Sur un PC lent, choisis Test rapide local ou limite le nombre de lignes.",
                     icon=None,
                 )
 
-    # ── Override mode validation rapide ──────────────────────
-    _QUICK_MAX_COMBOS   = 12
-    _QUICK_MAX_ROWS     = 20_000
-    _QUICK_BENCHMARK    = 1
-    _QUICK_N_WORKERS    = 1
-    if quick_mode:
-        # Remplacer les valeurs par les presets
-        n_workers         = _QUICK_N_WORKERS
-        benchmark_n_sample = _QUICK_BENCHMARK
-        if opt_max_rows is None or opt_max_rows > _QUICK_MAX_ROWS:
-            opt_max_rows  = _QUICK_MAX_ROWS
-
     enabled_ranges = [pr for pr in param_ranges if pr.enabled]
     raw_total_combos = total_combos
-    max_combinations_limit = _QUICK_MAX_COMBOS if quick_mode else None
 
-    # Limiter le nb de combinaisons en mode validation rapide
-    if quick_mode and total_combos > _QUICK_MAX_COMBOS:
-        total_combos = _QUICK_MAX_COMBOS
+    # Limiter le nb de combinaisons selon le préréglage.
+    if max_combinations_limit is not None and total_combos > max_combinations_limit:
+        total_combos = max_combinations_limit
 
     if enabled_ranges:
         ms_per_bt      = st.session_state.get("opt_benchmark_ms", 500.0)
@@ -2065,21 +2170,22 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
     with st.container(border=True):
         st.markdown("### Avant de lancer")
         st.caption("Vérifie ces points avant de créer un nouveau dossier dans `results/job_xxx/`.")
-        r1, r2, r3, r4 = st.columns(4)
-        r1.metric("Mode", "Test rapide" if quick_mode else "Optimisation complète")
+        r1, r2, r3, r4, r5 = st.columns(5)
+        r1.metric("Préréglage", selected_preset.name)
         r2.metric("Combinaisons", f"{int(total_combos or 0):,}")
         r3.metric("Workers", int(n_workers or 1))
         r4.metric("Benchmark", f"{int(benchmark_n_sample or 1)}×")
+        r5.metric("Lignes", f"{int(opt_max_rows):,}" if opt_max_rows else "historique complet")
         st.write(f"Fichier de données : `{data_resolution.relative_path}`")
         if quick_mode:
             st.caption(
-                f"Mode rapide : max {_QUICK_MAX_ROWS:,} lignes, {_QUICK_MAX_COMBOS} combinaisons, "
-                f"{_QUICK_N_WORKERS} worker. Résultats non représentatifs."
+                "Test rapide local : max 20 000 lignes, 12 combinaisons, "
+                "1 worker. Résultats non représentatifs."
             )
         elif raw_total_combos > total_combos:
             st.caption(f"Combinaisons initiales : {raw_total_combos:,}; exécutées : {total_combos:,}.")
         else:
-            st.caption("Mode complet : aucune limite rapide forcée.")
+            st.caption(selected_preset.description)
 
     # ── Bouton LANCER ─────────────────────────────────────────
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
@@ -2203,6 +2309,8 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                 "base_params":     dict(params),
                 "param_ranges":    [_pr_to_dict(pr) for pr in param_ranges],
                 "mode":            mode_idx,
+                "preset_name":     selected_preset.name,
+                "preset_description": selected_preset.description,
                 "score_weights":   _sw_to_dict(score_weights),
                 "filters": {
                     "min_trades":             filters.min_trades,
@@ -2220,6 +2328,7 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                 },
                 "global_params":   gp,
                 "n_workers":       n_workers,
+                "workers":         n_workers,
                 "top_k_save":      100,
                 "top_k_display":   10,
                 "total_combinations": total_combos,
@@ -2231,7 +2340,7 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                 "max_rows":             opt_max_rows,
                 # Benchmark configurable (F3)
                 "benchmark_n_sample":   int(benchmark_n_sample),
-                # Mode validation rapide (F2)
+                # Compatibilité ancien mode validation rapide.
                 "quick_validation_mode": bool(quick_mode),
             }
 
@@ -2635,6 +2744,7 @@ def _render_active_job_card(job: dict, key_prefix: str) -> None:
     total    = job.get("total_combinations", 0) or 0
     config   = _load_job_config(job_dir)
     asset, timeframe = _infer_asset_timeframe(config)
+    preset_label = _preset_label(config, job)
     tested_label, tested_sub = _format_processed_total(tested, total)
     tested_text = f"{tested_label} tests traités"
     if tested_sub:
@@ -2651,7 +2761,7 @@ def _render_active_job_card(job: dict, key_prefix: str) -> None:
             {_safe_html(_status_ui(status)["label"])} · Progression {progress:.1f}% · Écoulé {format_duration(elapsed)}
           </div>
           <div class="h-meta" style="margin-top:2px">
-            Actif {_safe_html(asset)} · Timeframe {_safe_html(timeframe)} · {_safe_html(tested_text)}
+            Préréglage {_safe_html(preset_label)} · Actif {_safe_html(asset)} · Timeframe {_safe_html(timeframe)} · {_safe_html(tested_text)}
           </div>
         </div>
         {_status_badge(status)}
@@ -2943,6 +3053,8 @@ def _render_results_tab():
     report  = meta.get("report", {})
     sens    = meta.get("sensitivity", {})
     asset, timeframe = _infer_asset_timeframe(job_config)
+    preset_label = _preset_label(job_config, meta)
+    preset_desc = _preset_description(job_config, meta)
     df_results = opt_store.load_results_csv(run_id, job_dir=job_dir)
     if df_results is None:
         df_results = pd.DataFrame()
@@ -2972,6 +3084,7 @@ def _render_results_tab():
     status_info = _status_ui(status_str)
     source_label = "Job" if job_dir else "Run"
     details = [
+        f"Préréglage {preset_label}",
         f"Mode {mode}" if mode else "",
         f"{processed_label} tests traités",
         f"{n_filtered:,} filtrés" if n_filtered else "",
@@ -2996,6 +3109,8 @@ def _render_results_tab():
     else:
         title_text = f"🔬 {_safe_html(meta.get('strategy_name', ''))} — {source_label} {_safe_html(run_id[-8:])}"
         subtitle_text = f"{_safe_html(details)} &nbsp;·&nbsp; {valid_count} résultats valides"
+        if preset_desc:
+            subtitle_text += f"<br>{_safe_html(preset_desc)}"
 
     st.markdown(f"""
     <div class="dash-header" style="margin-bottom:16px">
@@ -3014,21 +3129,23 @@ def _render_results_tab():
     </div>
     """, unsafe_allow_html=True)
 
-    s1, s2, s3, s4, s5, s6 = st.columns(6)
+    s1, s2, s3, s4, s5, s6, s7 = st.columns(7)
     with s1:
         st.markdown(card("Statut", status_info["label"], "white"), unsafe_allow_html=True)
     with s2:
+        st.markdown(card("Préréglage", _safe_html(preset_label), "white"), unsafe_allow_html=True)
+    with s3:
         st.markdown(card("Meilleur score", f"{float(best_score or 0):.1f}", _score_class(float(best_score or 0))),
                     unsafe_allow_html=True)
-    with s3:
-        st.markdown(card("Tests traités", processed_label, "white", sub=processed_sub), unsafe_allow_html=True)
     with s4:
+        st.markdown(card("Tests traités", processed_label, "white", sub=processed_sub), unsafe_allow_html=True)
+    with s5:
         st.markdown(card("Résultats valides", f"{valid_count:,}", "green" if valid_count else "red"),
                     unsafe_allow_html=True)
-    with s5:
+    with s6:
         st.markdown(card("Tests filtrés", f"{int(n_filtered or 0):,}", "accent" if n_filtered else "white"),
                     unsafe_allow_html=True)
-    with s6:
+    with s7:
         st.markdown(card("Verdict", verdict, "white"), unsafe_allow_html=True)
 
     _render_results_diagnostic(status_str, df_results, valid_count, int(n_filtered or 0),
@@ -3392,6 +3509,7 @@ def _render_jobs_history_section(jobs: list):
         variables  = job.get("variables_tested", []) or []
         config     = _load_job_config(job_dir)
         asset, timeframe = _infer_asset_timeframe(config)
+        preset_label = _preset_label(config, job)
         quick_validation = _is_quick_validation(config, job)
         files_ok = [
             filename for filename, _, _ in _JOB_DOWNLOAD_FILES
@@ -3405,7 +3523,7 @@ def _render_jobs_history_section(jobs: list):
         status_info = _status_ui(status)
         valid_hint = 1 if float(best_score or 0) > 0 else 0
         verdict = _score_verdict(float(best_score or 0), status, valid_hint, quick_validation)
-        run_type = "Test local rapide" if quick_validation else "Optimisation complète"
+        run_type = preset_label
         variables_label = ", ".join(variables[:4]) if variables else "—"
         if len(variables) > 4:
             variables_label += "…"

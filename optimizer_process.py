@@ -176,7 +176,7 @@ if __name__ == "__main__":
         filters=filters,
         train_test=train_test,
         global_params=cfg_dict.get("global_params", {}),
-        n_workers=cfg_dict.get("n_workers", 1),
+        n_workers=cfg_dict.get("n_workers", cfg_dict.get("workers", 1)),
         max_combinations_warning=cfg_dict.get("max_combinations_warning", 100_000),
         max_combinations=max_combinations,
         top_k_save=cfg_dict.get("top_k_save", 100),

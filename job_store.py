@@ -12,6 +12,7 @@ Fichiers générés dans job_dir/ :
 """
 
 import csv
+import html as html_lib
 import json
 import os
 from datetime import datetime
@@ -41,6 +42,8 @@ def write_metrics(
         "generated_at":         datetime.now().isoformat(),
         "strategy_name":        meta.get("strategy_name", ""),
         "mode":                 meta.get("mode", ""),
+        "preset_name":          config_dict.get("preset_name", meta.get("preset_name", "")),
+        "preset_description":   config_dict.get("preset_description", meta.get("preset_description", "")),
         "status":               meta.get("status", "completed"),
 
         # Perf optimisation
@@ -167,6 +170,8 @@ def write_report_html(
     filters    = config_dict.get("filters", {})
     sw         = config_dict.get("score_weights", {})
     tt         = config_dict.get("train_test", {})
+    preset_name = html_lib.escape(str(config_dict.get("preset_name") or meta.get("preset_name") or "Ancien job"))
+    preset_desc = html_lib.escape(str(config_dict.get("preset_description") or meta.get("preset_description") or ""))
     now        = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # ── Top 10 rows ───────────────────────────────────────────────────────────
@@ -237,6 +242,19 @@ def write_report_html(
         </table>
       </div>"""
 
+    preset_block = f"""
+      <div class="card">
+        <h2>Préréglage</h2>
+        <table><tr><th>Paramètre</th><th>Valeur</th></tr>
+          <tr><td>Nom</td><td>{preset_name}</td></tr>
+          <tr><td>Description</td><td>{preset_desc}</td></tr>
+          <tr><td>Lignes max</td><td>{config_dict.get('max_rows') or 'Historique complet'}</td></tr>
+          <tr><td>Combinaisons max</td><td>{config_dict.get('max_combinations') or 'Illimité'}</td></tr>
+          <tr><td>Benchmark</td><td>{config_dict.get('benchmark_n_sample', 5)}</td></tr>
+          <tr><td>Workers</td><td>{config_dict.get('n_workers', 1)}</td></tr>
+        </table>
+      </div>"""
+
     html = f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -293,6 +311,10 @@ def write_report_html(
 
   <!-- KPIs -->
   <div class="grid">
+    <div class="kpi">
+      <div class="label">Préréglage</div>
+      <div class="value">{preset_name}</div>
+    </div>
     <div class="kpi">
       <div class="label">Meilleur Score</div>
       <div class="value">{best.get('score', 0):.2f}</div>
@@ -352,6 +374,7 @@ def write_report_html(
   {'<div class="card"><h2>Sensibilité des Variables</h2><table><tr><th>Variable</th><th>Impact</th><th>Score</th></tr>' + sens_rows + '</table></div>' if sens_rows else ''}
 
   {tt_block}
+  {preset_block}
 
   <!-- Config -->
   <div class="grid" style="grid-template-columns:1fr 1fr;margin-bottom:0">
