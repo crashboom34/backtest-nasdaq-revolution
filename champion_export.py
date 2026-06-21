@@ -43,6 +43,17 @@ def render_champion_markdown(report: ChampionReport) -> str:
         "",
         *_markdown_list(report.weaknesses, "Aucun point faible majeur détecté."),
         "",
+        "## Checklist de validation",
+        "",
+        *[
+            f"- **{item.label}** — {item.status} : {item.detail}"
+            for item in report.validation.criteria
+        ],
+        "",
+        f"**Verdict global : {report.validation.verdict}**",
+        "",
+        f"**Recommandation de validation :** {report.validation.recommendation}",
+        "",
         "## Décision recommandée",
         "",
         f"**{report.decision.title}**",
@@ -70,6 +81,13 @@ def render_champion_html(report: ChampionReport) -> str:
     weaknesses = _html_list(
         report.weaknesses,
         "Aucun point faible majeur détecté.",
+    )
+    validation_rows = "\n".join(
+        "<tr>"
+        f"<th>{html.escape(item.label)}</th>"
+        f"<td><strong>{html.escape(item.status)}</strong><br>{html.escape(item.detail)}</td>"
+        "</tr>"
+        for item in report.validation.criteria
     )
     title = f"Rapport Champion - {record.job_id}"
     return f"""<!doctype html>
@@ -109,6 +127,12 @@ def render_champion_html(report: ChampionReport) -> str:
   <section>
     <h2>Points faibles</h2>
     {weaknesses}
+  </section>
+  <section>
+    <h2>Checklist de validation</h2>
+    <table>{validation_rows}</table>
+    <p><strong>Verdict global : {html.escape(report.validation.verdict)}</strong></p>
+    <p><strong>Recommandation de validation :</strong> {html.escape(report.validation.recommendation)}</p>
   </section>
   <section class="decision">
     <h2>Décision recommandée</h2>

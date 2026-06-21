@@ -8,6 +8,7 @@ from typing import Optional
 from job_annotations import FEATURED_STATUSES
 from job_artifacts import list_job_download_files
 from job_comparison import JobComparisonRecord, load_job_record
+from champion_validation import ChampionValidation, evaluate_champion
 
 
 DECISION_TEST_LONGER = "test_longer"
@@ -36,6 +37,7 @@ class ChampionReport:
     weaknesses: tuple[str, ...]
     alerts: tuple[str, ...]
     decision: ChampionDecision
+    validation: ChampionValidation
 
     @property
     def missing_metrics(self) -> tuple[str, ...]:
@@ -64,6 +66,7 @@ def load_champion_report(job: dict) -> Optional[ChampionReport]:
         weaknesses=tuple(weaknesses),
         alerts=tuple(alerts),
         decision=decision,
+        validation=evaluate_champion(record),
     )
 
 

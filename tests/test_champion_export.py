@@ -79,6 +79,9 @@ def test_markdown_export_is_non_empty_and_complete(tmp_path):
         "results.csv",
         "Points forts",
         "Points faibles",
+        "Checklist de validation",
+        "Nombre de trades suffisant",
+        "Prometteur mais à retester",
         "Décision recommandée",
     ):
         assert expected in content
@@ -95,6 +98,9 @@ def test_html_export_is_non_empty_complete_and_escaped(tmp_path):
     assert "Solide &lt;à confirmer&gt; &amp; surveiller." in content
     assert "Solide <à confirmer> & surveiller." not in content
     assert "results.csv" in content
+    assert "Checklist de validation" in content
+    assert "Nombre de trades suffisant" in content
+    assert "Prometteur mais à retester" in content
     assert "Décision recommandée" in content
 
 

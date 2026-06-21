@@ -53,6 +53,11 @@ from champion_export import (
     render_champion_html,
     render_champion_markdown,
 )
+from champion_validation import (
+    VERDICT_INCOMPLETE,
+    VERDICT_INSUFFICIENT,
+    VERDICT_SERIOUS,
+)
 from job_launcher import (
     ActiveJobExistsError,
     clone_config_for_new_job,
@@ -4432,6 +4437,33 @@ def _render_champion_report_tab() -> None:
             "Fichier de données": record.data_file,
         }]).set_index("Actif"),
     )
+
+    st.markdown("#### Checklist de validation Champion")
+    st.caption(
+        "Cette checklist distingue un résultat sérieux d'un simple signal prometteur."
+    )
+    st.table(
+        pd.DataFrame([
+            {
+                "Critère": item.label,
+                "Statut": item.status,
+                "Explication": item.detail,
+            }
+            for item in report.validation.criteria
+        ]).set_index("Critère"),
+    )
+    validation_message = (
+        f"**{report.validation.verdict}**  \n"
+        f"{report.validation.recommendation}"
+    )
+    if report.validation.verdict == VERDICT_SERIOUS:
+        st.success(validation_message, icon=None)
+    elif report.validation.verdict == VERDICT_INSUFFICIENT:
+        st.error(validation_message, icon=None)
+    elif report.validation.verdict == VERDICT_INCOMPLETE:
+        st.info(validation_message, icon=None)
+    else:
+        st.warning(validation_message, icon=None)
 
     st.markdown("#### Pourquoi ce job est intéressant")
     reason_col, caution_col = st.columns(2)

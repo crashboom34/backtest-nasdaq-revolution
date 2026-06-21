@@ -40,6 +40,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `job_annotations.py`     | Lit/écrit les classements, notes et tags dans `job_notes.json` sans toucher aux résultats |
 | `champion_report.py`     | Construit la fiche Champion/Favori, détecte forces/alertes et propose une décision simple |
 | `champion_export.py`     | Génère en mémoire les exports Markdown et HTML du Rapport Champion |
+| `champion_validation.py` | Évalue les 8 critères de sérieux d'un Champion/Favori et produit un verdict global |
 | `ui_components.py`       | Petits helpers d'affichage Streamlit : en-têtes, panneaux d'aide, étapes |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
 
@@ -144,6 +145,9 @@ Ou en terminal :
 - **Classements disponibles** : `Champion`, `Favori`, `À revoir`, `Rejeté`. Les anciens jobs sans `job_notes.json` sont affichés comme non classés.
 - **Rapport Champion** : la sous-page `Optimisation > Rapport Champion` ne lit que les artefacts existants. Elle n'écrit jamais dans `config_used.json`, `metrics.json`, `results.csv` ou les autres résultats calculés.
 - **Exports Rapport Champion** : Markdown et HTML sont générés en mémoire pour `st.download_button`. Ils ne sont pas écrits dans le dossier job et ne sont pas ajoutés à `archive.zip`.
+- **Checklist Champion** : 8 critères sont calculés en lecture seule : trades, score, drawdown, win rate, métriques essentielles, preset, combinaisons et période/volume de données. Statuts possibles : `Validé`, `À surveiller`, `Bloquant`, `Inconnu`.
+- **Verdict Champion** : priorité aux métriques essentielles manquantes (`Données incomplètes`), puis aux critères bloquants (`Insuffisant`). Un job n'est `Candidat sérieux` que si les 8 critères sont validés ; sinon il reste `Prometteur mais à retester`.
+- **Seuils checklist** : 30 trades, score strictement positif, drawdown à surveiller dès 20 % et bloquant dès 30 %, win rate exploitable dès 40 %, au moins 100 combinaisons, au moins 100 000 lignes ou 180 jours si l'information existe. `Test rapide local` reste non représentatif.
 - **Recommandations Champion** : règles pédagogiques simples, pas une validation financière. Zéro trade ou score nul/négatif entraîne un rejet en l'état ; moins de 30 trades recommande un test plus long ; un drawdown supérieur ou égal à 20 % recommande de dupliquer puis ajuster la config ; des métriques essentielles absentes imposent l'observation.
 - **Téléchargements UX** : l'historique n'affiche plus de `download_button` pour chaque job afin d'éviter les sources Streamlit invalidées. Le bouton `Fichiers job` ouvre le job, et les vrais téléchargements restent dans l'onglet `Fichiers job`.
 
@@ -219,6 +223,7 @@ pip install -r requirements-server.txt
 - [x] Favoris / champions : classement, note et tags par job, filtres, sous-page dédiée, affichage Résultats/Historique/Comparaison/Accueil
 - [x] Rapport Champion : fiche synthèse Champion/Favori, forces/faiblesses, alertes, décision recommandée, fichiers et actions
 - [x] Exports Rapport Champion : téléchargements Markdown et HTML générés en mémoire, sans dépendance externe
+- [x] Checklist Champion : 8 critères, 4 statuts, verdict global et recommandation intégrés à l'UI et aux exports
 
 ### Reste à faire (prochaines étapes suggérées)
 
@@ -253,6 +258,7 @@ pip install -r requirements-server.txt
 | Aucun moyen de conserver un jugement humain sur un job | Corrigé | `job_notes.json` séparé, statuts Champion/Favori/À revoir/Rejeté, tags et note libre |
 | Difficile de décider quoi faire d'un Champion/Favori | Corrigé | Rapport Champion natif avec contexte, métriques, alertes et recommandation pédagogique |
 | Rapport Champion difficile à partager | Corrigé | Exports Markdown et HTML téléchargeables, autonomes et générés en mémoire |
+| Champion marqué sans preuve de robustesse | Corrigé | Checklist explicite avec seuils, verdict global et recommandations de retest |
 
 ---
 
