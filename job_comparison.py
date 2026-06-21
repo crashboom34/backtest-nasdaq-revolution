@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from job_annotations import JobAnnotation, load_annotation
+
 
 MIN_SELECTED_JOBS = 2
 MAX_SELECTED_JOBS = 5
@@ -33,6 +35,7 @@ class JobComparisonRecord:
     strategy_name: str
     config: dict[str, Any] = field(default_factory=dict, compare=False)
     missing_metrics: tuple[str, ...] = ()
+    annotation: JobAnnotation = field(default_factory=JobAnnotation, compare=False)
 
     @property
     def comparison_key(self) -> tuple[str, str, str, str]:
@@ -186,6 +189,7 @@ def load_job_record(job: dict) -> Optional[JobComparisonRecord]:
         strategy_name=strategy_name,
         config=config,
         missing_metrics=missing,
+        annotation=load_annotation(job_dir),
     )
 
 

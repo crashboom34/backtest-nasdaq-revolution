@@ -26,6 +26,16 @@ from job_artifacts import (
     list_job_download_files,
     read_job_file_bytes,
 )
+from job_annotations import (
+    ANNOTATION_STATUSES,
+    ANNOTATION_TAGS,
+    JobAnnotation,
+    clear_annotation,
+    featured_jobs,
+    filter_jobs_by_annotation,
+    load_annotation,
+    save_annotation,
+)
 from job_comparison import (
     best_job,
     comparison_issues,
@@ -561,6 +571,9 @@ def _value_kw(key: str, value):
 
 def _index_kw(key: str, index: int):
     return {} if key in st.session_state else {"index": index}
+
+def _default_kw(key: str, value):
+    return {} if key in st.session_state else {"default": value}
 
 def card(label, value, color="white", sub=""):
     return f"""
@@ -1494,6 +1507,109 @@ def _render_job_config_actions(config: dict, source_job_id: str, key_prefix: str
             st.rerun()
 
 
+_ANNOTATION_ICONS = {
+    "Champion": "🏆",
+    "Favori": "⭐",
+    "À revoir": "🔎",
+    "Rejeté": "⛔",
+}
+
+
+def _annotation_label(annotation: JobAnnotation) -> str:
+    if not annotation.status:
+        return "Non classé"
+    return f"{_ANNOTATION_ICONS.get(annotation.status, '')} {annotation.status}".strip()
+
+
+def _render_annotation_summary(annotation: JobAnnotation, show_note: bool = True) -> None:
+    if annotation.is_empty:
+        st.caption("Aucune annotation utilisateur.")
+        return
+    st.markdown(f"**{_annotation_label(annotation)}**")
+    if annotation.tags:
+        st.caption("Tags : " + " · ".join(annotation.tags))
+    if show_note and annotation.note:
+        st.write(annotation.note)
+
+
+def _reset_annotation_widget_state(job_id: str) -> None:
+    for suffix in ("status", "tags", "note"):
+        st.session_state.pop(f"annotation_{suffix}_{job_id}", None)
+
+
+def _render_job_annotation_editor(job_id: str, job_dir: str, job_status: str) -> None:
+    if not job_dir:
+        return
+
+    annotation = load_annotation(job_dir)
+    with st.container(border=True):
+        st.markdown("### Classement personnel")
+        st.caption(
+            "Cette information est enregistrée dans `job_notes.json`. "
+            "Les résultats calculés restent inchangés."
+        )
+        _render_annotation_summary(annotation)
+
+        if str(job_status or "").lower() != "completed":
+            st.info("Le classement est disponible pour les jobs terminés.", icon=None)
+            return
+
+        status_key = f"annotation_status_{job_id}"
+        tags_key = f"annotation_tags_{job_id}"
+        note_key = f"annotation_note_{job_id}"
+        status_options = list(ANNOTATION_STATUSES)
+
+        with st.form(f"annotation_form_{job_id}"):
+            status = st.selectbox(
+                "Statut",
+                options=status_options,
+                **_index_kw(status_key, status_options.index(annotation.status)),
+                format_func=lambda value: value or "Aucun statut",
+                key=status_key,
+            )
+            tags = st.multiselect(
+                "Tags",
+                options=list(ANNOTATION_TAGS),
+                **_default_kw(tags_key, list(annotation.tags)),
+                key=tags_key,
+            )
+            note = st.text_area(
+                "Note personnelle",
+                **_value_kw(note_key, annotation.note),
+                height=100,
+                placeholder="Pourquoi ce job est intéressant, ou pourquoi il faut le revoir...",
+                key=note_key,
+            )
+            save_col, clear_col, _ = st.columns([1.2, 1.2, 3.6])
+            with save_col:
+                save_clicked = st.form_submit_button("Enregistrer", width="stretch")
+            with clear_col:
+                clear_clicked = st.form_submit_button(
+                    "Vider l'annotation",
+                    width="stretch",
+                    type="secondary",
+                )
+
+        if save_clicked:
+            try:
+                save_annotation(job_dir, status=status, note=note, tags=tags)
+            except (OSError, ValueError) as exc:
+                st.error(f"Annotation non enregistrée : {exc}", icon=None)
+            else:
+                _reset_annotation_widget_state(job_id)
+                st.toast("Annotation enregistrée.", icon="💾")
+                st.rerun()
+        if clear_clicked:
+            try:
+                clear_annotation(job_dir)
+            except (OSError, ValueError) as exc:
+                st.error(f"Annotation non vidée : {exc}", icon=None)
+            else:
+                _reset_annotation_widget_state(job_id)
+                st.toast("Annotation vidée.", icon="🧹")
+                st.rerun()
+
+
 def _score_color(score: float) -> str:
     if score >= 70:
         return GREEN
@@ -1756,6 +1872,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
         "⏳ Progression",
         "📊 Résultats",
         "📂 Historique Runs",
+        "🏆 Champions / Favoris",
         "⚖️ Comparaison de jobs",
     ]
     if st.session_state.pop("opt_focus_config_tab", False):
@@ -1765,7 +1882,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
     elif st.session_state.get("opt_subtabs") not in subtab_labels:
         st.session_state["opt_subtabs"] = "⚙️ Configuration"
 
-    sub_config, sub_progress, sub_results, sub_history, sub_comparison = st.tabs(
+    sub_config, sub_progress, sub_results, sub_history, sub_featured, sub_comparison = st.tabs(
         subtab_labels,
         default=st.session_state.get("opt_subtabs", "⚙️ Configuration"),
         key="opt_subtabs",
@@ -1802,7 +1919,14 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
             _render_opt_history_tab()
 
     # ════════════════════════════════════════════════════════════
-    # SOUS-ONGLET E : COMPARAISON
+    # SOUS-ONGLET E : CHAMPIONS / FAVORIS
+    # ════════════════════════════════════════════════════════════
+    with sub_featured:
+        if getattr(sub_featured, "open", False):
+            _render_featured_jobs_tab()
+
+    # ════════════════════════════════════════════════════════════
+    # SOUS-ONGLET F : COMPARAISON
     # ════════════════════════════════════════════════════════════
     with sub_comparison:
         if getattr(sub_comparison, "open", False):
@@ -3299,6 +3423,7 @@ def _render_results_tab():
     asset, timeframe = _infer_asset_timeframe(job_config)
     preset_label = _preset_label(job_config, meta)
     preset_desc = _preset_description(job_config, meta)
+    job_annotation = load_annotation(job_dir) if job_dir else JobAnnotation()
     df_results = opt_store.load_results_csv(run_id, job_dir=job_dir)
     if df_results is None:
         df_results = pd.DataFrame()
@@ -3329,6 +3454,7 @@ def _render_results_tab():
     source_label = "Job" if job_dir else "Run"
     details = [
         f"Préréglage {preset_label}",
+        _annotation_label(job_annotation) if not job_annotation.is_empty else "",
         f"Mode {mode}" if mode else "",
         f"{processed_label} tests traités",
         f"{n_filtered:,} filtrés" if n_filtered else "",
@@ -3375,6 +3501,9 @@ def _render_results_tab():
 
     if job_dir and job_config:
         _render_job_config_actions(job_config, run_id, key_prefix="results_job_actions")
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    if job_dir:
+        _render_job_annotation_editor(run_id, job_dir, status_str)
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
     s1, s2, s3, s4, s5, s6, s7 = st.columns(7)
@@ -3756,6 +3885,7 @@ def _render_jobs_history_section(jobs: list):
         mode       = job.get("mode", "")
         variables  = job.get("variables_tested", []) or []
         config     = _load_job_config(job_dir)
+        annotation = load_annotation(job_dir)
         asset, timeframe = _infer_asset_timeframe(config)
         preset_label = _preset_label(config, job)
         quick_validation = _is_quick_validation(config, job)
@@ -3789,6 +3919,8 @@ def _render_jobs_history_section(jobs: list):
                     f"Actif {asset} · Timeframe {timeframe} · Mode {mode or '—'} · "
                     f"Variables : {variables_label} · Fichiers : {len(files_ok)}/{len(_JOB_DOWNLOAD_FILES)}"
                 )
+                if not annotation.is_empty:
+                    _render_annotation_summary(annotation)
             with head_right:
                 st.markdown(f"{status_info['icon']} **{status_info['label']}**")
 
@@ -3875,7 +4007,34 @@ def _render_opt_history_tab():
     jobs = opt_store.list_jobs()
     runs = opt_store.list_runs()
 
-    _render_jobs_history_section(jobs)
+    history_filter = st.selectbox(
+        "Filtrer les jobs",
+        options=[
+            "Tous",
+            "Champions / Favoris",
+            "Champion",
+            "Favori",
+            "À revoir",
+            "Rejeté",
+            "Non classés",
+        ],
+        key="job_annotation_filter",
+    )
+    if history_filter == "Champions / Favoris":
+        displayed_jobs = featured_jobs(jobs)
+    elif history_filter == "Non classés":
+        displayed_jobs = [
+            job for job in jobs
+            if load_annotation(job.get("job_dir", "")).is_empty
+        ]
+    elif history_filter == "Tous":
+        displayed_jobs = jobs
+    else:
+        displayed_jobs = filter_jobs_by_annotation(jobs, [history_filter])
+
+    if history_filter != "Tous":
+        st.caption(f"{len(displayed_jobs)} job(s) correspondent au filtre `{history_filter}`.")
+    _render_jobs_history_section(displayed_jobs)
 
     st.markdown("<hr style='border-color:var(--border);margin:18px 0 22px'>", unsafe_allow_html=True)
 
@@ -3984,9 +4143,13 @@ def _render_opt_history_tab():
 
 def _comparison_option_label(record) -> str:
     date_label = _fmt_date(record.date)
+    annotation_label = (
+        f" · {_annotation_label(record.annotation)}"
+        if not record.annotation.is_empty else ""
+    )
     return (
         f"{record.job_id} · {date_label} · "
-        f"{record.asset}/{record.timeframe} · {record.preset}"
+        f"{record.asset}/{record.timeframe} · {record.preset}{annotation_label}"
     )
 
 
@@ -3998,6 +4161,9 @@ def _comparison_table_row(record, best_job_id: str) -> dict:
         "Actif": record.asset,
         "Timeframe": record.timeframe,
         "Preset": record.preset,
+        "Classement": _annotation_label(record.annotation)
+        if not record.annotation.is_empty else "Non classé",
+        "Tags": " · ".join(record.annotation.tags),
         "Statut": _status_ui(record.status)["label"],
         "Score": record.score,
         "Trades": record.trades,
@@ -4010,7 +4176,11 @@ def _comparison_table_row(record, best_job_id: str) -> dict:
     }
 
 
-def _render_comparison_job_actions(record, active_jobs: list) -> None:
+def _render_comparison_job_actions(
+    record,
+    active_jobs: list,
+    key_prefix: str = "compare",
+) -> None:
     with st.container(border=True):
         title = f"`{record.job_id}`"
         if record.score is not None:
@@ -4020,12 +4190,14 @@ def _render_comparison_job_actions(record, active_jobs: list) -> None:
             f"{record.asset}/{record.timeframe} · {record.preset} · "
             f"{record.data_file}"
         )
+        if not record.annotation.is_empty:
+            _render_annotation_summary(record.annotation)
 
         a1, a2, a3, a4 = st.columns(4)
         with a1:
             if st.button(
                 "Voir résultats",
-                key=f"compare_view_{record.job_id}",
+                key=f"{key_prefix}_view_{record.job_id}",
                 width="stretch",
             ):
                 _show_results_for_run(record.job_id, record.job_dir)
@@ -4033,7 +4205,7 @@ def _render_comparison_job_actions(record, active_jobs: list) -> None:
         with a2:
             if st.button(
                 "Ouvrir fichiers",
-                key=f"compare_files_{record.job_id}",
+                key=f"{key_prefix}_files_{record.job_id}",
                 width="stretch",
                 type="secondary",
             ):
@@ -4042,7 +4214,7 @@ def _render_comparison_job_actions(record, active_jobs: list) -> None:
         with a3:
             if st.button(
                 "Dupliquer config",
-                key=f"compare_duplicate_{record.job_id}",
+                key=f"{key_prefix}_duplicate_{record.job_id}",
                 width="stretch",
                 type="secondary",
                 disabled=not bool(record.config),
@@ -4052,7 +4224,7 @@ def _render_comparison_job_actions(record, active_jobs: list) -> None:
         with a4:
             if st.button(
                 "Relancer même config",
-                key=f"compare_relaunch_{record.job_id}",
+                key=f"{key_prefix}_relaunch_{record.job_id}",
                 width="stretch",
                 disabled=bool(active_jobs) or not bool(record.config),
             ):
@@ -4067,6 +4239,50 @@ def _render_comparison_job_actions(record, active_jobs: list) -> None:
                     })
                     st.success(f"Nouveau job créé : `{launched.job_id}`")
                     st.rerun()
+
+
+def _render_featured_jobs_tab() -> None:
+    st.markdown("### Champions / Favoris")
+    st.caption(
+        "Retrouve ici les jobs que tu as explicitement classés Champion ou Favori."
+    )
+    jobs = featured_jobs(opt_store.list_jobs())
+    if not jobs:
+        st.info(
+            "Aucun champion ou favori pour le moment. Ouvre un job terminé dans Résultats "
+            "pour lui attribuer un classement.",
+            icon=None,
+        )
+        return
+
+    records_by_id = {
+        record.job_id: record
+        for record in load_comparison_records(jobs)
+    }
+    ordered_jobs = sorted(
+        jobs,
+        key=lambda job: str(job.get("date", "")),
+        reverse=True,
+    )
+    ordered_jobs.sort(
+        key=lambda job: 0 if job["annotation"].status == "Champion" else 1
+    )
+    active_jobs = _list_active_jobs()
+    if active_jobs:
+        st.warning(
+            "Un job est actif : les relances sont temporairement désactivées.",
+            icon=None,
+        )
+
+    for job in ordered_jobs:
+        record = records_by_id.get(job.get("job_id"))
+        if record is None:
+            continue
+        _render_comparison_job_actions(
+            record,
+            active_jobs,
+            key_prefix="featured",
+        )
 
 
 def _render_job_comparison_tab() -> None:
@@ -4161,7 +4377,7 @@ def _render_job_comparison_tab() -> None:
             icon=None,
         )
     for record in selected:
-        _render_comparison_job_actions(record, active_jobs)
+        _render_comparison_job_actions(record, active_jobs, key_prefix="compare")
 
 
 MAIN_TAB_HOME = "🏠  Accueil"
@@ -4173,6 +4389,7 @@ MAIN_TAB_MAINTENANCE = "🧹  Maintenance"
 MAIN_TAB_OPTIMIZATION = "🔬  Optimisation"
 OPT_SUBTAB_CONFIG = "⚙️ Configuration"
 OPT_SUBTAB_HISTORY = "📂 Historique Runs"
+OPT_SUBTAB_FEATURED = "🏆 Champions / Favoris"
 OPT_SUBTAB_COMPARISON = "⚖️ Comparaison de jobs"
 
 
@@ -4258,6 +4475,29 @@ def render_home_tab():
                     st.write("Aucun")
         else:
             st.info("Aucun job détecté pour le moment.", icon=None)
+
+    champion_jobs = filter_jobs_by_annotation(
+        opt_store.list_jobs(),
+        ["Champion"],
+    )
+    champion_records = load_comparison_records(champion_jobs)
+    if champion_records:
+        champion = best_job(champion_records) or champion_records[0]
+        with st.container(border=True):
+            st.markdown("### Champion actuel")
+            st.write(f"🏆 `{champion.job_id}`")
+            st.caption(
+                f"{champion.asset}/{champion.timeframe} · {champion.preset} · "
+                f"score {champion.score:.1f}" if champion.score is not None
+                else f"{champion.asset}/{champion.timeframe} · {champion.preset}"
+            )
+            if champion.annotation.note:
+                st.write(champion.annotation.note)
+            if st.button("Ouvrir Champions / Favoris", key="home_open_featured"):
+                _switch_main_tab(
+                    MAIN_TAB_OPTIMIZATION,
+                    opt_subtab=OPT_SUBTAB_FEATURED,
+                )
 
     with st.container(border=True):
         st.markdown("### Données disponibles")

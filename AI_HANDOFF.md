@@ -37,6 +37,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `maintenance.py`         | Analyse les fichiers locaux générés et prépare des nettoyages sécurisés |
 | `dashboard.py`           | Agrège les KPIs d'accueil : disque, jobs, données disponibles, alertes |
 | `job_comparison.py`      | Normalise les métriques récentes/legacy et prépare la comparaison de 2 à 5 jobs |
+| `job_annotations.py`     | Lit/écrit les classements, notes et tags dans `job_notes.json` sans toucher aux résultats |
 | `ui_components.py`       | Petits helpers d'affichage Streamlit : en-têtes, panneaux d'aide, étapes |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
 
@@ -82,6 +83,7 @@ results/job_xxx/
 ├── best_strategies.csv    # Top 100 stratégies
 ├── report.html            # Rapport standalone (pas de dépendances externes)
 ├── logs.txt               # Journal d'exécution
+├── job_notes.json         # Annotation utilisateur optionnelle, séparée des résultats
 └── archive.zip            # 7 fichiers bundlés (exclut tested.json, meta.json, stop.flag)
 ```
 
@@ -135,6 +137,9 @@ Ou en terminal :
 - **Relance / duplication** : `Relancer même config` clone `config_used.json` dans un nouveau job. `Dupliquer config` charge les widgets de l'onglet Configuration sans lancer de job.
 - **Comparaison jobs** : l'onglet `Optimisation > Comparaison de jobs` utilise `job_comparison.py`. Il lit d'abord `metrics.json`, puis retombe sur `meta.json` et `results.csv` pour les anciens jobs.
 - **Comparabilité** : afficher un avertissement si stratégie, actif, timeframe ou fichier de données diffèrent. La page reste lisible et ne bloque pas les anciens jobs incomplets.
+- **Annotations jobs** : `job_notes.json` contient uniquement `status`, `note`, `tags`, `updated_at`. Ne jamais écrire ces données dans `config_used.json`, `metrics.json` ou `results.csv`.
+- **Archive et annotations** : `job_notes.json` reste volontairement hors de `archive.zip`, qui conserve exactement ses 7 artefacts calculés.
+- **Classements disponibles** : `Champion`, `Favori`, `À revoir`, `Rejeté`. Les anciens jobs sans `job_notes.json` sont affichés comme non classés.
 - **Téléchargements UX** : l'historique n'affiche plus de `download_button` pour chaque job afin d'éviter les sources Streamlit invalidées. Le bouton `Fichiers job` ouvre le job, et les vrais téléchargements restent dans l'onglet `Fichiers job`.
 
 ---
@@ -206,6 +211,7 @@ pip install -r requirements-server.txt
 - [x] Préréglages d'optimisation Streamlit : `Test rapide local`, `Test moyen`, `Optimisation complète`, `Serveur puissant`, `Personnalisé`
 - [x] Sécurité lancement jobs : blocage des doubles lancements, affichage job actif, arrêt propre visible, relance/duplication de config
 - [x] Comparaison de jobs : sélection de 2 à 5 jobs terminés, tableau métriques, meilleur score, actions et compatibilité legacy
+- [x] Favoris / champions : classement, note et tags par job, filtres, sous-page dédiée, affichage Résultats/Historique/Comparaison/Accueil
 
 ### Reste à faire (prochaines étapes suggérées)
 
@@ -237,6 +243,7 @@ pip install -r requirements-server.txt
 | Double clic sur lancement optimisation | Corrigé | Garde-fou UI + refus dans `job_launcher.py` si un job actif existe |
 | Stop demandé peu visible | Corrigé | `stop.flag` maintient un état `Arrêt demandé` dans les cartes actives jusqu'à consommation par le process |
 | Comparaison difficile entre optimisations | Corrigé | Sous-page native Streamlit avec score, trades, win rate, drawdown, durée, combinaisons et contexte des données |
+| Aucun moyen de conserver un jugement humain sur un job | Corrigé | `job_notes.json` séparé, statuts Champion/Favori/À revoir/Rejeté, tags et note libre |
 
 ---
 

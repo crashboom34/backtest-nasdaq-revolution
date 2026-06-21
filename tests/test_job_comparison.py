@@ -8,6 +8,7 @@ from job_comparison import (
     load_job_record,
     validate_selection,
 )
+from job_annotations import save_annotation
 
 
 def _write_json(path: Path, data: dict) -> None:
@@ -128,3 +129,16 @@ def test_selection_limited_to_two_to_five_jobs():
     assert validate_selection(["a", "b"])[0] is True
     assert validate_selection(["a", "b", "c", "d", "e"])[0] is True
     assert validate_selection(["a", "b", "c", "d", "e", "f"])[0] is False
+
+
+def test_comparison_record_includes_annotation(tmp_path):
+    job, job_dir = _job(tmp_path, "job_annotated")
+    _write_json(job_dir / "config_used.json", {"data_file": "nasdaq_3m.csv"})
+    _write_json(job_dir / "metrics.json", {"best_score": 10})
+    save_annotation(job_dir, status="Champion", note="Référence", tags=["prometteur"])
+
+    record = load_job_record(job)
+
+    assert record.annotation.status == "Champion"
+    assert record.annotation.note == "Référence"
+    assert record.annotation.tags == ("prometteur",)
