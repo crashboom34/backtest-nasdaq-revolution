@@ -207,7 +207,7 @@ class TestProgressFile:
 
         assert store.list_active_jobs() == []
 
-    def test_list_active_jobs_ignores_job_with_stop_flag(self, monkeypatch, tmp_path):
+    def test_list_active_jobs_keeps_running_job_with_stop_flag(self, monkeypatch, tmp_path):
         monkeypatch.setenv("BACKTEST_BASE_DIR", str(tmp_path))
 
         job_id = "job_stop_flag_detection"
@@ -223,7 +223,20 @@ class TestProgressFile:
         }, job_dir=job_dir)
         store.write_stop_flag(job_id, job_dir=job_dir)
 
-        assert store.list_active_jobs() == []
+        active_jobs = store.list_active_jobs()
+
+        assert len(active_jobs) == 1
+        assert active_jobs[0]["job_id"] == job_id
+        assert active_jobs[0]["stop_requested"] is True
+
+    def test_write_stop_flag_creates_file(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BACKTEST_BASE_DIR", str(tmp_path))
+
+        job_id = "job_stop_flag_file"
+        job_dir = store.get_job_dir(job_id)
+        store.write_stop_flag(job_id, job_dir=job_dir)
+
+        assert store.stop_flag_exists(job_id, job_dir=job_dir) is True
 
     @pytest.mark.parametrize("status", ["completed", "error", "failed", "stopped"])
     def test_list_active_jobs_ignores_terminal_jobs(self, monkeypatch, tmp_path, status):

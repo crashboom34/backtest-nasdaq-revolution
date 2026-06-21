@@ -26,7 +26,11 @@ from job_artifacts import (
     list_job_download_files,
     read_job_file_bytes,
 )
-from job_launcher import launch_optimizer_job
+from job_launcher import (
+    ActiveJobExistsError,
+    clone_config_for_new_job,
+    launch_optimizer_job,
+)
 from optimization_presets import (
     get_preset,
     is_quick_preset,
@@ -545,6 +549,12 @@ def fmt_pct(v, sign=True):
 
 def color_cls(v):
     return "green" if v >= 0 else "red"
+
+def _value_kw(key: str, value):
+    return {} if key in st.session_state else {"value": value}
+
+def _index_kw(key: str, index: int):
+    return {} if key in st.session_state else {"index": index}
 
 def card(label, value, color="white", sub=""):
     return f"""
@@ -1325,6 +1335,159 @@ def _launch_optimizer(config_dict: dict):
     )
 
 
+def _launch_config_as_new_job(config: dict, source_job_id: str = ""):
+    """Relance une config existante dans un nouveau dossier job."""
+    cfg = clone_config_for_new_job(config, source_job_id=source_job_id)
+    return _launch_optimizer(cfg)
+
+
+def _date_from_config(value):
+    if not value:
+        return None
+    try:
+        return datetime.date.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _load_config_into_widgets(config: dict) -> None:
+    """Charge une config de job dans les widgets Optimisation sans lancer."""
+    if not config:
+        return
+
+    preset_name = config.get("preset_name")
+    if preset_name in preset_names(os.cpu_count()):
+        st.session_state["opt_preset_name"] = preset_name
+        st.session_state["_opt_last_preset_name"] = preset_name
+
+    if config.get("asset"):
+        st.session_state["opt_asset"] = config.get("asset")
+    if config.get("timeframe"):
+        st.session_state["opt_timeframe"] = config.get("timeframe")
+    if config.get("mode"):
+        st.session_state["opt_mode"] = config.get("mode")
+
+    workers = config.get("workers", config.get("n_workers"))
+    if workers is not None:
+        st.session_state["opt_workers"] = int(workers)
+    if config.get("benchmark_n_sample") is not None:
+        st.session_state["opt_benchmark_n_sample"] = int(config.get("benchmark_n_sample"))
+
+    max_combinations = config.get("max_combinations")
+    st.session_state["opt_use_max_combinations"] = max_combinations is not None
+    if max_combinations is not None:
+        st.session_state["opt_max_combinations_widget"] = int(max_combinations)
+
+    start_date = _date_from_config(config.get("opt_start_date"))
+    end_date = _date_from_config(config.get("opt_end_date"))
+    st.session_state["opt_use_start"] = start_date is not None
+    st.session_state["opt_use_end"] = end_date is not None
+    if start_date:
+        st.session_state["opt_start_date_widget"] = start_date
+    if end_date:
+        st.session_state["opt_end_date_widget"] = end_date
+
+    max_rows = config.get("max_rows")
+    st.session_state["opt_use_maxrows"] = max_rows is not None
+    if max_rows is not None:
+        st.session_state["opt_max_rows_widget"] = int(max_rows)
+
+    score_weights = config.get("score_weights", {}) or {}
+    for key, widget_key in {
+        "profit_factor": "sw_pf",
+        "max_drawdown": "sw_dd",
+        "total_trades": "sw_nt",
+        "max_consecutive_losses": "sw_mc",
+        "pct_gain": "sw_gain",
+        "win_rate": "sw_wr",
+        "avg_win_loss_ratio": "sw_ratio",
+        "equity_regularity": "sw_eq",
+        "recovery_factor": "sw_rf",
+    }.items():
+        if key in score_weights:
+            st.session_state[widget_key] = float(score_weights[key])
+
+    filters = config.get("filters", {}) or {}
+    for key, widget_key, caster in (
+        ("min_trades", "f_trades", int),
+        ("max_drawdown_pct", "f_dd", float),
+        ("min_profit_factor", "f_pf", float),
+        ("max_consecutive_losses", "f_consec", int),
+        ("min_win_rate", "f_wr", float),
+    ):
+        if key in filters:
+            st.session_state[widget_key] = caster(filters[key])
+
+    train_test = config.get("train_test", {}) or {}
+    st.session_state["tt_enabled"] = bool(train_test.get("enabled", False))
+    if train_test.get("split_method"):
+        st.session_state["tt_method"] = train_test.get("split_method")
+    if train_test.get("train_ratio") is not None:
+        st.session_state["tt_ratio"] = float(train_test.get("train_ratio"))
+    if train_test.get("split_date"):
+        st.session_state["tt_date"] = str(train_test.get("split_date"))
+    if train_test.get("alert_degradation_pct") is not None:
+        st.session_state["tt_alert"] = int(train_test.get("alert_degradation_pct"))
+
+    for pr in config.get("param_ranges", []) or []:
+        name = pr.get("name")
+        if not name:
+            continue
+        st.session_state[f"opt_en_{name}"] = bool(pr.get("enabled", False))
+        if pr.get("min_val") is not None:
+            st.session_state[f"opt_min_{name}"] = pr.get("min_val")
+        if pr.get("max_val") is not None:
+            st.session_state[f"opt_max_{name}"] = pr.get("max_val")
+        if pr.get("step") is not None:
+            st.session_state[f"opt_step_{name}"] = pr.get("step")
+
+
+def _duplicate_config_to_configuration(config: dict, source_job_id: str = "") -> None:
+    _load_config_into_widgets(config)
+    st.session_state["opt_focus_config_tab"] = True
+    st.session_state["opt_config_loaded_from_job"] = source_job_id
+    st.toast("Config dupliquée. Tu peux la modifier avant de lancer.", icon="📋")
+
+
+def _render_job_config_actions(config: dict, source_job_id: str, key_prefix: str) -> None:
+    if not config:
+        return
+
+    active_jobs = _list_active_jobs()
+    if active_jobs:
+        st.warning(
+            "Un job est actif : la relance est bloquée pour éviter deux optimisations en parallèle.",
+            icon=None,
+        )
+
+    a1, a2, _ = st.columns([1.35, 1.35, 4.3])
+    with a1:
+        if st.button(
+            "Relancer même config",
+            key=f"{key_prefix}_relaunch_{source_job_id}",
+            width="stretch",
+            disabled=bool(active_jobs),
+        ):
+            try:
+                launched = _launch_config_as_new_job(config, source_job_id)
+            except ActiveJobExistsError as exc:
+                st.error(str(exc), icon=None)
+                _render_active_jobs_reconnect_panel(exc.active_jobs, key_prefix=f"{key_prefix}_active")
+            else:
+                _remember_job_for_tracking({"job_id": launched.job_id, "job_dir": launched.job_dir})
+                st.success(f"Nouveau job créé : `{launched.job_id}`")
+                st.rerun()
+    with a2:
+        if st.button(
+            "Dupliquer config",
+            key=f"{key_prefix}_duplicate_{source_job_id}",
+            width="stretch",
+            type="secondary",
+        ):
+            _duplicate_config_to_configuration(config, source_job_id)
+            st.rerun()
+
+
 def _score_color(score: float) -> str:
     if score >= 70:
         return GREEN
@@ -1364,6 +1527,12 @@ _STATUS_UI = {
         "icon": "⚙️",
         "color": "#f59e0b",
         "description": "Les combinaisons sont en cours de test.",
+    },
+    "stopping": {
+        "label": "Arrêt demandé",
+        "icon": "⏹",
+        "color": "#f59e0b",
+        "description": "Le signal d'arrêt propre a été envoyé. Le job va s'arrêter dès que possible.",
     },
     "completed": {
         "label": "Terminé",
@@ -1582,7 +1751,9 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
         "📊 Résultats",
         "📂 Historique Runs",
     ]
-    if st.session_state.pop("opt_focus_results_tab", False):
+    if st.session_state.pop("opt_focus_config_tab", False):
+        st.session_state["opt_subtabs"] = "⚙️ Configuration"
+    elif st.session_state.pop("opt_focus_results_tab", False):
         st.session_state["opt_subtabs"] = "📊 Résultats"
     elif st.session_state.get("opt_subtabs") not in subtab_labels:
         st.session_state["opt_subtabs"] = "⚙️ Configuration"
@@ -1636,6 +1807,14 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
     if active_jobs:
         _render_active_jobs_reconnect_panel(active_jobs, key_prefix="cfg_reconnect")
         st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+    loaded_from_job = st.session_state.pop("opt_config_loaded_from_job", "")
+    if loaded_from_job:
+        st.success(
+            f"Config du job `{loaded_from_job}` chargée dans le formulaire. "
+            "Tu peux modifier les champs avant de lancer un nouveau job.",
+            icon=None,
+        )
 
     # ── Données de marché ─────────────────────────────────────
     st.markdown("<div class='section-title'>Données de marché</div>", unsafe_allow_html=True)
@@ -1739,7 +1918,8 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
     mode_idx  = st.radio(
         "Mode", options=mode_keys,
         format_func=lambda k: mode_labels[k],
-        index=3, key="opt_mode",
+        **_index_kw("opt_mode", 3),
+        key="opt_mode",
         horizontal=False,
     )
 
@@ -1793,7 +1973,7 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
             with c0:
                 enabled = st.checkbox(
                     f"Optimiser {lbl}",
-                    value=False,
+                    **_value_kw(f"opt_en_{k}", False),
                     key=f"opt_en_{k}",
                     label_visibility="collapsed",
                 )
@@ -1804,17 +1984,23 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                 )
             with c2:
                 min_v = st.number_input(
-                    f"Minimum {lbl}", value=mn, key=f"opt_min_{k}", label_visibility="collapsed",
+                    f"Minimum {lbl}",
+                    **_value_kw(f"opt_min_{k}", mn),
+                    key=f"opt_min_{k}", label_visibility="collapsed",
                     format="%.2f" if typ == "float" else "%d",
                 )
             with c3:
                 max_v = st.number_input(
-                    f"Maximum {lbl}", value=mx, key=f"opt_max_{k}", label_visibility="collapsed",
+                    f"Maximum {lbl}",
+                    **_value_kw(f"opt_max_{k}", mx),
+                    key=f"opt_max_{k}", label_visibility="collapsed",
                     format="%.2f" if typ == "float" else "%d",
                 )
             with c4:
                 step_v = st.number_input(
-                    f"Pas {lbl}", value=stp, key=f"opt_step_{k}", label_visibility="collapsed",
+                    f"Pas {lbl}",
+                    **_value_kw(f"opt_step_{k}", stp),
+                    key=f"opt_step_{k}", label_visibility="collapsed",
                     format="%.3f" if typ == "float" else "%d",
                 )
             with c5:
@@ -1856,15 +2042,17 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
     with wc1:
         n_workers_default = max(1, min(os.cpu_count() or 4, 8))
         n_workers_max = max(os.cpu_count() or 8, int(selected_preset.workers or 1), 2)
-        if "opt_workers" not in st.session_state:
-            st.session_state["opt_workers"] = (
-                int(selected_preset.workers)
-                if selected_preset.workers is not None
-                else n_workers_default
-            )
+        n_workers_initial = (
+            int(selected_preset.workers)
+            if selected_preset.workers is not None
+            else n_workers_default
+        )
         n_workers = st.slider(
-            "Nombre de workers (CPU)", 1, n_workers_max,
-            value=n_workers_default, key="opt_workers",
+            "Nombre de workers (CPU)",
+            1,
+            n_workers_max,
+            **_value_kw("opt_workers", n_workers_initial),
+            key="opt_workers",
             disabled=(
                 not selected_preset.manual_control
                 and not selected_preset.configurable_workers
@@ -1872,12 +2060,10 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         )
     with wc2:
         benchmark_options = [1, 3, 5, 10, 15]
-        if "opt_benchmark_n_sample" not in st.session_state:
-            st.session_state["opt_benchmark_n_sample"] = int(selected_preset.benchmark_n_sample)
         benchmark_n_sample = st.selectbox(
             "Échantillons benchmark",
             options=benchmark_options,
-            index=benchmark_options.index(int(selected_preset.benchmark_n_sample)),
+            **_index_kw("opt_benchmark_n_sample", benchmark_options.index(int(selected_preset.benchmark_n_sample))),
             key="opt_benchmark_n_sample",
             help=(
                 "Nombre de backtests pour mesurer la vitesse avant l'optimisation. "
@@ -1903,6 +2089,7 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         use_max_combinations = st.checkbox(
             "Limiter le nombre de combinaisons",
             key="opt_use_max_combinations",
+            **_value_kw("opt_use_max_combinations", selected_preset.max_combinations is not None),
             disabled=max_combo_toggle_disabled,
         )
         if use_max_combinations:
@@ -1912,6 +2099,7 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                 max_value=5_000_000,
                 step=10,
                 key="opt_max_combinations_widget",
+                **_value_kw("opt_max_combinations_widget", int(selected_preset.max_combinations or 100_000)),
                 disabled=max_combo_toggle_disabled,
             ))
         else:
@@ -1937,13 +2125,14 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         with pc1:
             use_start = st.checkbox(
                 "Date de début",
-                value=False,
+                **_value_kw("opt_use_start", False),
                 key="opt_use_start",
                 disabled=period_fields_disabled,
             )
             if use_start:
                 _d_start = st.date_input(
-                    "Début", value=datetime.date(2022, 1, 1),
+                    "Début",
+                    **_value_kw("opt_start_date_widget", datetime.date(2022, 1, 1)),
                     key="opt_start_date_widget",
                     disabled=period_fields_disabled,
                 )
@@ -1953,13 +2142,14 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         with pc2:
             use_end = st.checkbox(
                 "Date de fin",
-                value=False,
+                **_value_kw("opt_use_end", False),
                 key="opt_use_end",
                 disabled=period_fields_disabled,
             )
             if use_end:
                 _d_end = st.date_input(
-                    "Fin", value=datetime.date(2024, 12, 31),
+                    "Fin",
+                    **_value_kw("opt_end_date_widget", datetime.date(2024, 12, 31)),
                     key="opt_end_date_widget",
                     disabled=period_fields_disabled,
                 )
@@ -1969,13 +2159,14 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         with pc3:
             use_maxrows = st.checkbox(
                 "Limiter les lignes",
-                value=False,
+                **_value_kw("opt_use_maxrows", False),
                 key="opt_use_maxrows",
                 disabled=period_fields_disabled,
             )
             if use_maxrows:
                 opt_max_rows = st.number_input(
-                    "Nb de lignes max", value=100_000,
+                    "Nb de lignes max",
+                    **_value_kw("opt_max_rows_widget", 100_000),
                     min_value=10_000, max_value=1_000_000, step=10_000,
                     key="opt_max_rows_widget",
                     help="Filtre appliqué après le filtre de date — garde les N premières lignes.",
@@ -2097,17 +2288,17 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         )
         c1, c2, c3 = st.columns(3)
         with c1:
-            w_pf   = st.slider("Profit Factor",          0.0, 5.0, 3.0, 0.5, key="sw_pf")
-            w_dd   = st.slider("Max Drawdown",           0.0, 5.0, 3.0, 0.5, key="sw_dd")
-            w_nt   = st.slider("Nb Trades",              0.0, 5.0, 2.0, 0.5, key="sw_nt")
+            w_pf   = st.slider("Profit Factor", 0.0, 5.0, **_value_kw("sw_pf", 3.0), step=0.5, key="sw_pf")
+            w_dd   = st.slider("Max Drawdown", 0.0, 5.0, **_value_kw("sw_dd", 3.0), step=0.5, key="sw_dd")
+            w_nt   = st.slider("Nb Trades", 0.0, 5.0, **_value_kw("sw_nt", 2.0), step=0.5, key="sw_nt")
         with c2:
-            w_mc   = st.slider("Pertes consécutives",    0.0, 5.0, 2.0, 0.5, key="sw_mc")
-            w_gain = st.slider("% de gain",              0.0, 5.0, 2.0, 0.5, key="sw_gain")
-            w_wr   = st.slider("Win Rate",               0.0, 5.0, 1.0, 0.5, key="sw_wr")
+            w_mc   = st.slider("Pertes consécutives", 0.0, 5.0, **_value_kw("sw_mc", 2.0), step=0.5, key="sw_mc")
+            w_gain = st.slider("% de gain", 0.0, 5.0, **_value_kw("sw_gain", 2.0), step=0.5, key="sw_gain")
+            w_wr   = st.slider("Win Rate", 0.0, 5.0, **_value_kw("sw_wr", 1.0), step=0.5, key="sw_wr")
         with c3:
-            w_ratio = st.slider("Ratio Gain/Perte",      0.0, 5.0, 1.5, 0.5, key="sw_ratio")
-            w_eq    = st.slider("Régularité Equity",     0.0, 5.0, 1.5, 0.5, key="sw_eq")
-            w_rf    = st.slider("Recovery Factor",       0.0, 5.0, 1.0, 0.5, key="sw_rf")
+            w_ratio = st.slider("Ratio Gain/Perte", 0.0, 5.0, **_value_kw("sw_ratio", 1.5), step=0.5, key="sw_ratio")
+            w_eq    = st.slider("Régularité Equity", 0.0, 5.0, **_value_kw("sw_eq", 1.5), step=0.5, key="sw_eq")
+            w_rf    = st.slider("Recovery Factor", 0.0, 5.0, **_value_kw("sw_rf", 1.0), step=0.5, key="sw_rf")
 
     score_weights = ScoreWeights(
         profit_factor=w_pf, max_drawdown=w_dd, total_trades=w_nt,
@@ -2119,13 +2310,13 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
     with st.expander("🚧 Filtres éliminatoires", expanded=False):
         fc1, fc2, fc3 = st.columns(3)
         with fc1:
-            f_trades = st.number_input("Trades min",        value=30,  min_value=1,   step=5,   key="f_trades")
-            f_dd     = st.number_input("DD max (%)",         value=25.0, min_value=0.0, step=1.0, key="f_dd")
+            f_trades = st.number_input("Trades min", **_value_kw("f_trades", 30), min_value=1, step=5, key="f_trades")
+            f_dd     = st.number_input("DD max (%)", **_value_kw("f_dd", 25.0), min_value=0.0, step=1.0, key="f_dd")
         with fc2:
-            f_pf     = st.number_input("PF min",            value=1.1,  min_value=0.5, step=0.1, key="f_pf")
-            f_consec = st.number_input("Pertes consec max", value=12,   min_value=1,   step=1,   key="f_consec")
+            f_pf     = st.number_input("PF min", **_value_kw("f_pf", 1.1), min_value=0.5, step=0.1, key="f_pf")
+            f_consec = st.number_input("Pertes consec max", **_value_kw("f_consec", 12), min_value=1, step=1, key="f_consec")
         with fc3:
-            f_wr     = st.number_input("Win Rate min (%)",  value=35.0, min_value=0.0, step=1.0, key="f_wr")
+            f_wr     = st.number_input("Win Rate min (%)", **_value_kw("f_wr", 35.0), min_value=0.0, step=1.0, key="f_wr")
 
     filters = FilterConfig(
         min_trades=int(f_trades),
@@ -2137,21 +2328,22 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
 
     # ── Train / Test ──────────────────────────────────────────
     with st.expander("🔀 Split Train / Test (anti-overfitting)", expanded=False):
-        tt_enabled = st.toggle("Activer le split train/test", value=False, key="tt_enabled")
+        tt_enabled = st.toggle("Activer le split train/test", **_value_kw("tt_enabled", False), key="tt_enabled")
         if tt_enabled:
             tt_method = st.radio(
                 "Méthode de split", ["ratio", "date"],
                 format_func=lambda x: "Par ratio (ex: 70%/30%)" if x == "ratio" else "Par date fixe",
+                **_index_kw("tt_method", 0),
                 key="tt_method", horizontal=True,
             )
             if tt_method == "ratio":
-                tt_ratio = st.slider("Ratio d'entraînement", 0.5, 0.9, 0.7, 0.05, key="tt_ratio")
+                tt_ratio = st.slider("Ratio d'entraînement", 0.5, 0.9, **_value_kw("tt_ratio", 0.7), step=0.05, key="tt_ratio")
                 tt_date  = None
             else:
                 tt_ratio = 0.7
-                tt_date  = st.text_input("Date de séparation (YYYY-MM-DD)", value="2024-01-01",
+                tt_date  = st.text_input("Date de séparation (YYYY-MM-DD)", **_value_kw("tt_date", "2024-01-01"),
                                           key="tt_date")
-            tt_alert = st.slider("Alerte dégradation (%)", 10, 60, 30, 5, key="tt_alert")
+            tt_alert = st.slider("Alerte dégradation (%)", 10, 60, **_value_kw("tt_alert", 30), step=5, key="tt_alert")
         else:
             tt_method = "ratio"
             tt_ratio  = 0.7
@@ -2195,6 +2387,8 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
     if current_run_id:
         status = _get_run_status(current_run_id)
         is_running = (status in ("running", "benchmarking", "created"))
+    blocking_active_jobs = _list_active_jobs()
+    launch_in_flight = bool(st.session_state.get("opt_launch_in_flight"))
 
     if not data_ready:
         st.button("▶  Lancer l'optimisation", disabled=True,
@@ -2204,11 +2398,24 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
         st.button("▶  Lancer l'optimisation", disabled=True,
                   width="stretch", key="opt_launch_disabled")
         st.info("Sélectionnez au moins un paramètre à optimiser.")
-    elif is_running:
-        st.button("▶  Optimisation en cours…", disabled=True,
+    elif launch_in_flight:
+        st.button("▶  Lancement en cours…", disabled=True,
+                  width="stretch", key="opt_launch_in_flight_btn")
+        st.info("Le job est en train d'être créé. Attends quelques secondes avant toute autre action.")
+    elif is_running or blocking_active_jobs:
+        st.button("▶  Optimisation déjà en cours", disabled=True,
                   width="stretch", key="opt_running_btn")
+        st.warning(
+            "Un job actif existe déjà. Pour éviter deux optimisations en parallèle, reprends le suivi "
+            "ou arrête proprement le job actif avant d'en lancer un autre.",
+            icon=None,
+        )
+        if blocking_active_jobs:
+            _render_active_jobs_reconnect_panel(blocking_active_jobs, key_prefix="cfg_launch_block")
         if st.button("⏹  Arrêter proprement", width="stretch", key="opt_stop_btn"):
-            _write_stop_flag(current_run_id)
+            target_job_id = current_run_id or (blocking_active_jobs[0].get("job_id") if blocking_active_jobs else "")
+            if target_job_id:
+                _write_stop_flag(target_job_id)
             st.toast("Signal d'arrêt envoyé…", icon="⏹")
     else:
         # ── Anti-overload : protection avant lancement (F5) ───
@@ -2256,6 +2463,15 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
             st.button("▶  Lancer l'optimisation", disabled=True,
                       width="stretch", key="opt_launch_blocked")
         elif st.button("▶  Lancer l'optimisation", width="stretch", key="opt_launch"):
+            if _list_active_jobs():
+                st.error(
+                    "Lancement annulé : un job actif vient d'être détecté. "
+                    "Ouvre la Progression ou l'Historique pour le reprendre.",
+                    icon=None,
+                )
+                st.rerun()
+
+            st.session_state["opt_launch_in_flight"] = True
 
             requested_job_id = opt_store.make_job_id()
 
@@ -2359,11 +2575,18 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                     except Exception:
                         pass
 
-            launched = _launch_optimizer(config_dict)
-            run_id = launched.job_id
-            _remember_job_for_tracking({"job_id": run_id, "job_dir": launched.job_dir})
-            st.success(f"✅ Optimisation lancée ! Job : `{run_id}`")
-            st.toast("Passe sur l'onglet ⏳ Progression pour suivre l'avancement.", icon="🔬")
+            try:
+                launched = _launch_optimizer(config_dict)
+            except ActiveJobExistsError as exc:
+                st.session_state["opt_launch_in_flight"] = False
+                st.error(str(exc), icon=None)
+                _render_active_jobs_reconnect_panel(exc.active_jobs, key_prefix="cfg_launch_error")
+            else:
+                st.session_state["opt_launch_in_flight"] = False
+                run_id = launched.job_id
+                _remember_job_for_tracking({"job_id": run_id, "job_dir": launched.job_dir})
+                st.success(f"✅ Optimisation lancée ! Job : `{run_id}`")
+                st.toast("Passe sur l'onglet ⏳ Progression pour suivre l'avancement.", icon="🔬")
 
 
 # ── Sous-onglet Progression ────────────────────────────────────────
@@ -2738,6 +2961,7 @@ def _render_active_job_card(job: dict, key_prefix: str) -> None:
     job_id   = job.get("job_id", "")
     job_dir  = job.get("job_dir", "")
     status   = job.get("status", "unknown")
+    status_display = "stopping" if job.get("stop_requested") else status
     progress = float(job.get("progress_pct", 0) or 0)
     elapsed  = job.get("duration_seconds", 0) or 0
     tested   = job.get("combinations_tested", 0) or 0
@@ -2758,13 +2982,13 @@ def _render_active_job_card(job: dict, key_prefix: str) -> None:
             {_safe_html(job_id)}
           </div>
           <div class="h-meta" style="margin-top:4px">
-            {_safe_html(_status_ui(status)["label"])} · Progression {progress:.1f}% · Écoulé {format_duration(elapsed)}
+            {_safe_html(_status_ui(status_display)["label"])} · Progression {progress:.1f}% · Écoulé {format_duration(elapsed)}
           </div>
           <div class="h-meta" style="margin-top:2px">
             Préréglage {_safe_html(preset_label)} · Actif {_safe_html(asset)} · Timeframe {_safe_html(timeframe)} · {_safe_html(tested_text)}
           </div>
         </div>
-        {_status_badge(status)}
+        {_status_badge(status_display)}
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -2783,9 +3007,15 @@ def _render_active_job_card(job: dict, key_prefix: str) -> None:
             st.toast("Job chargé — ouvre l'onglet Résultats.", icon="📊")
             st.rerun()
     with c3:
-        if st.button("Arrêter proprement", key=f"{key_prefix}_stop_{job_id}", width="stretch"):
+        if st.button(
+            "Arrêter proprement",
+            key=f"{key_prefix}_stop_{job_id}",
+            width="stretch",
+            disabled=bool(job.get("stop_requested")),
+        ):
             opt_store.write_stop_flag(job_id, job_dir=job_dir or _job_dir_for_run(job_id))
             st.toast("Signal d'arrêt envoyé…", icon="⏹")
+            st.rerun()
 
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
 
@@ -3128,6 +3358,10 @@ def _render_results_tab():
       </div>
     </div>
     """, unsafe_allow_html=True)
+
+    if job_dir and job_config:
+        _render_job_config_actions(job_config, run_id, key_prefix="results_job_actions")
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
     s1, s2, s3, s4, s5, s6, s7 = st.columns(7)
     with s1:
@@ -3520,7 +3754,8 @@ def _render_jobs_history_section(jobs: list):
         except Exception:
             is_active = False
         tested_label, tested_sub = _format_processed_total(n_tested, n_total)
-        status_info = _status_ui(status)
+        status_display = "stopping" if job.get("stop_requested") else status
+        status_info = _status_ui(status_display)
         valid_hint = 1 if float(best_score or 0) > 0 else 0
         verdict = _score_verdict(float(best_score or 0), status, valid_hint, quick_validation)
         run_type = preset_label
@@ -3562,9 +3797,9 @@ def _render_jobs_history_section(jobs: list):
             st.progress(max(0.0, min(1.0, progress / 100)), text=f"Progression {progress:.1f}%")
 
             if is_active:
-                bc1, bc2, bc3, _ = st.columns([1, 1.35, 1.5, 4.15])
+                bc1, bc2, bc3, bc4, bc5, bc6, _ = st.columns([1, 1.25, 1.25, 1.45, 1.25, 1.25, 1.55])
             else:
-                bc1, bc2, _ = st.columns([1, 1.35, 5.65])
+                bc1, bc2, bc4, bc5, _ = st.columns([1, 1.25, 1.35, 1.35, 3.05])
 
             with bc1:
                 if st.button("Voir", key=f"job_view_{job_id}", width="stretch", type="secondary"):
@@ -3578,10 +3813,46 @@ def _render_jobs_history_section(jobs: list):
                     st.rerun()
             if is_active:
                 with bc3:
-                    if st.button("Reprendre le suivi", key=f"job_resume_{job_id}", width="stretch"):
+                    if st.button("Reprendre", key=f"job_resume_{job_id}", width="stretch"):
                         _remember_job_for_tracking(job)
                         st.toast(f"Suivi repris pour {job_id[-8:]}", icon="⏳")
                         st.rerun()
+                with bc4:
+                    if st.button(
+                        "Arrêter",
+                        key=f"job_stop_{job_id}",
+                        width="stretch",
+                        disabled=bool(job.get("stop_requested")),
+                    ):
+                        opt_store.write_stop_flag(job_id, job_dir=job_dir or _job_dir_for_run(job_id))
+                        st.toast("Signal d'arrêt envoyé…", icon="⏹")
+                        st.rerun()
+                relaunch_col = bc5
+                duplicate_col = bc6
+            else:
+                relaunch_col = bc4
+                duplicate_col = bc5
+            with relaunch_col:
+                if st.button(
+                    "Relancer",
+                    key=f"job_relaunch_{job_id}",
+                    width="stretch",
+                    disabled=bool(_list_active_jobs()),
+                    type="secondary",
+                ):
+                    try:
+                        launched = _launch_config_as_new_job(config, job_id)
+                    except ActiveJobExistsError as exc:
+                        st.error(str(exc), icon=None)
+                        _render_active_jobs_reconnect_panel(exc.active_jobs, key_prefix=f"hist_active_{job_id}")
+                    else:
+                        _remember_job_for_tracking({"job_id": launched.job_id, "job_dir": launched.job_dir})
+                        st.success(f"Nouveau job créé : `{launched.job_id}`")
+                        st.rerun()
+            with duplicate_col:
+                if st.button("Dupliquer", key=f"job_duplicate_{job_id}", width="stretch", type="secondary"):
+                    _duplicate_config_to_configuration(config, job_id)
+                    st.rerun()
 
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 

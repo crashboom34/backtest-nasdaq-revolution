@@ -239,6 +239,11 @@ def write_stop_flag(run_id: str, job_dir: Optional[str] = None) -> None:
         f.write("stop")
 
 
+def stop_flag_exists(run_id: str, job_dir: Optional[str] = None) -> bool:
+    """Retourne True si une demande d'arrêt est en attente."""
+    return os.path.exists(_path(run_id, "_stop.flag", job_dir))
+
+
 def check_and_clear_stop_flag(run_id: str, job_dir: Optional[str] = None) -> bool:
     """Retourne True si le flag existe, puis le supprime."""
     path = _path(run_id, "_stop.flag", job_dir)
@@ -491,6 +496,7 @@ def list_jobs() -> list:
         job_dir  = os.path.join(results_root, dirname)
         job_id   = dirname
         run_id   = job_id  # V1: run_id == job_id
+        stop_requested = stop_flag_exists(run_id, job_dir)
 
         meta = load_meta(run_id, job_dir)
         if meta is None:
@@ -513,6 +519,7 @@ def list_jobs() -> list:
                     "best_score":          prog.get("best_score", 0),
                     "workers_used":        prog.get("workers_used", 1),
                     "progress_pct":        prog.get("progress_pct", 0),
+                    "stop_requested":      stop_requested,
                 })
                 continue
 
@@ -541,6 +548,7 @@ def list_jobs() -> list:
                         if pr.get("enabled")
                     ],
                     "progress_pct":        0,
+                    "stop_requested":      stop_requested,
                 })
             continue
 
@@ -564,6 +572,7 @@ def list_jobs() -> list:
             "workers_used":        meta.get("workers_used", 1),
             "variables_tested":    meta.get("variables_tested", []),
             "progress_pct":        meta.get("progress_pct", 100),
+            "stop_requested":      stop_requested,
         })
 
     jobs.sort(key=lambda j: j["date"], reverse=True)
@@ -596,11 +605,13 @@ def is_active_job(job: dict, now_ts: Optional[float] = None) -> bool:
     if status in TERMINAL_JOB_STATUSES:
         return False
 
-    if job_id and job_dir and os.path.exists(_path(job_id, "_stop.flag", job_dir)):
-        return False
+    stop_requested = bool(job_id and job_dir and stop_flag_exists(job_id, job_dir))
 
     if status in ACTIVE_JOB_STATUSES:
         return True
+
+    if stop_requested:
+        return False
 
     if status == "created":
         ts = _job_timestamp_for_activity(job)

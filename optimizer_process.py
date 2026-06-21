@@ -379,8 +379,13 @@ if __name__ == "__main__":
     # EXÉCUTION
     # ════════════════════════════════════════════════════════════
 
+    stop_requested = {"value": False}
+
     def stop_flag_fn():
-        return check_and_clear_stop_flag(run_id, job_dir=job_dir)
+        if check_and_clear_stop_flag(run_id, job_dir=job_dir):
+            stop_requested["value"] = True
+            return True
+        return False
 
     final_status = "completed"
     sensitivity  = {}
@@ -405,7 +410,7 @@ if __name__ == "__main__":
         save_tested_hashes(run_id, already_tested, job_dir=job_dir)
 
         # Vérifier si arrêt propre demandé
-        if check_and_clear_stop_flag(run_id, job_dir=job_dir):
+        if stop_requested["value"] or check_and_clear_stop_flag(run_id, job_dir=job_dir):
             final_status = "stopped"
 
         _log(f"Optimisation terminée — {state['completed']} testées, "

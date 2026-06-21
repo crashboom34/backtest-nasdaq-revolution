@@ -51,6 +51,63 @@ def test_build_optimizer_command_includes_job_dir(tmp_path):
     assert command[4].endswith("job_abc")
 
 
+def test_launch_optimizer_job_blocks_when_active_job_exists(monkeypatch):
+    monkeypatch.setattr(job_launcher, "list_active_jobs", lambda: [{"job_id": "job_active"}])
+
+    try:
+        job_launcher.launch_optimizer_job({"strategy_name": "T", "param_ranges": []})
+    except job_launcher.ActiveJobExistsError as exc:
+        assert exc.active_jobs[0]["job_id"] == "job_active"
+    else:
+        raise AssertionError("Expected ActiveJobExistsError")
+
+
+def test_launch_optimizer_job_second_call_sees_recent_created_job(monkeypatch, tmp_path):
+    monkeypatch.setenv("BACKTEST_BASE_DIR", str(tmp_path))
+
+    class FakeProcess:
+        pass
+
+    monkeypatch.setattr(job_launcher.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+
+    config = {
+        "strategy_name": "Test Strategy",
+        "mode": "grid",
+        "param_ranges": [],
+        "n_workers": 1,
+    }
+
+    first = job_launcher.launch_optimizer_job(config)
+    assert first.job_id.startswith("job_")
+
+    try:
+        job_launcher.launch_optimizer_job(config)
+    except job_launcher.ActiveJobExistsError as exc:
+        assert exc.active_jobs[0]["job_id"] == first.job_id
+    else:
+        raise AssertionError("Expected second launch to be blocked")
+
+
+def test_clone_config_for_new_job_removes_old_identity():
+    cloned = job_launcher.clone_config_for_new_job(
+        {
+            "run_id": "job_old",
+            "job_id": "job_old",
+            "job_dir": "results/job_old",
+            "strategy_name": "Test Strategy",
+            "param_ranges": [],
+            "max_combinations": 12,
+        }
+    )
+
+    assert "run_id" not in cloned
+    assert "job_id" not in cloned
+    assert "job_dir" not in cloned
+    assert cloned["source_job_id"] == "job_old"
+    assert cloned["relaunched_from_job_id"] == "job_old"
+    assert cloned["max_combinations"] == 12
+
+
 def _optimizer_config(max_combinations=None) -> OptimizationConfig:
     return OptimizationConfig(
         run_id="test_quick_limit",
