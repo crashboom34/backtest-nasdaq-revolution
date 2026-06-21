@@ -39,6 +39,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `job_comparison.py`      | Normalise les métriques récentes/legacy et prépare la comparaison de 2 à 5 jobs |
 | `job_annotations.py`     | Lit/écrit les classements, notes et tags dans `job_notes.json` sans toucher aux résultats |
 | `champion_report.py`     | Construit la fiche Champion/Favori, détecte forces/alertes et propose une décision simple |
+| `champion_export.py`     | Génère en mémoire les exports Markdown et HTML du Rapport Champion |
 | `ui_components.py`       | Petits helpers d'affichage Streamlit : en-têtes, panneaux d'aide, étapes |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
 
@@ -142,6 +143,7 @@ Ou en terminal :
 - **Archive et annotations** : `job_notes.json` reste volontairement hors de `archive.zip`, qui conserve exactement ses 7 artefacts calculés.
 - **Classements disponibles** : `Champion`, `Favori`, `À revoir`, `Rejeté`. Les anciens jobs sans `job_notes.json` sont affichés comme non classés.
 - **Rapport Champion** : la sous-page `Optimisation > Rapport Champion` ne lit que les artefacts existants. Elle n'écrit jamais dans `config_used.json`, `metrics.json`, `results.csv` ou les autres résultats calculés.
+- **Exports Rapport Champion** : Markdown et HTML sont générés en mémoire pour `st.download_button`. Ils ne sont pas écrits dans le dossier job et ne sont pas ajoutés à `archive.zip`.
 - **Recommandations Champion** : règles pédagogiques simples, pas une validation financière. Zéro trade ou score nul/négatif entraîne un rejet en l'état ; moins de 30 trades recommande un test plus long ; un drawdown supérieur ou égal à 20 % recommande de dupliquer puis ajuster la config ; des métriques essentielles absentes imposent l'observation.
 - **Téléchargements UX** : l'historique n'affiche plus de `download_button` pour chaque job afin d'éviter les sources Streamlit invalidées. Le bouton `Fichiers job` ouvre le job, et les vrais téléchargements restent dans l'onglet `Fichiers job`.
 
@@ -216,6 +218,7 @@ pip install -r requirements-server.txt
 - [x] Comparaison de jobs : sélection de 2 à 5 jobs terminés, tableau métriques, meilleur score, actions et compatibilité legacy
 - [x] Favoris / champions : classement, note et tags par job, filtres, sous-page dédiée, affichage Résultats/Historique/Comparaison/Accueil
 - [x] Rapport Champion : fiche synthèse Champion/Favori, forces/faiblesses, alertes, décision recommandée, fichiers et actions
+- [x] Exports Rapport Champion : téléchargements Markdown et HTML générés en mémoire, sans dépendance externe
 
 ### Reste à faire (prochaines étapes suggérées)
 
@@ -249,6 +252,7 @@ pip install -r requirements-server.txt
 | Comparaison difficile entre optimisations | Corrigé | Sous-page native Streamlit avec score, trades, win rate, drawdown, durée, combinaisons et contexte des données |
 | Aucun moyen de conserver un jugement humain sur un job | Corrigé | `job_notes.json` séparé, statuts Champion/Favori/À revoir/Rejeté, tags et note libre |
 | Difficile de décider quoi faire d'un Champion/Favori | Corrigé | Rapport Champion natif avec contexte, métriques, alertes et recommandation pédagogique |
+| Rapport Champion difficile à partager | Corrigé | Exports Markdown et HTML téléchargeables, autonomes et générés en mémoire |
 
 ---
 

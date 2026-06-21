@@ -48,6 +48,11 @@ from champion_report import (
     ChampionReport,
     load_champion_report,
 )
+from champion_export import (
+    champion_export_filename,
+    render_champion_html,
+    render_champion_markdown,
+)
 from job_launcher import (
     ActiveJobExistsError,
     clone_config_for_new_job,
@@ -4464,6 +4469,34 @@ def _render_champion_report_tab() -> None:
         "Cette recommandation est une aide à la décision fondée sur les métriques "
         "disponibles. Elle ne garantit pas les performances futures."
     )
+
+    st.markdown("#### Télécharger ce rapport")
+    st.caption(
+        "Les exports sont générés en mémoire. Aucun fichier supplémentaire n'est écrit dans le job."
+    )
+    markdown_export = render_champion_markdown(report)
+    html_export = render_champion_html(report)
+    download_md, download_html, _ = st.columns([1.4, 1.4, 3.2])
+    with download_md:
+        st.download_button(
+            "Télécharger Markdown",
+            data=markdown_export.encode("utf-8"),
+            file_name=champion_export_filename(report, "md"),
+            mime="text/markdown; charset=utf-8",
+            key=f"champion_report_md_{record.job_id}",
+            width="stretch",
+            on_click="ignore",
+        )
+    with download_html:
+        st.download_button(
+            "Télécharger HTML",
+            data=html_export.encode("utf-8"),
+            file_name=champion_export_filename(report, "html"),
+            mime="text/html; charset=utf-8",
+            key=f"champion_report_html_{record.job_id}",
+            width="stretch",
+            on_click="ignore",
+        )
 
     st.markdown("#### Fichiers disponibles")
     if report.available_files:
