@@ -26,6 +26,12 @@ from job_artifacts import (
     list_job_download_files,
     read_job_file_bytes,
 )
+from job_comparison import (
+    best_job,
+    comparison_issues,
+    load_comparison_records,
+    validate_selection,
+)
 from job_launcher import (
     ActiveJobExistsError,
     clone_config_for_new_job,
@@ -1750,6 +1756,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
         "⏳ Progression",
         "📊 Résultats",
         "📂 Historique Runs",
+        "⚖️ Comparaison de jobs",
     ]
     if st.session_state.pop("opt_focus_config_tab", False):
         st.session_state["opt_subtabs"] = "⚙️ Configuration"
@@ -1758,7 +1765,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
     elif st.session_state.get("opt_subtabs") not in subtab_labels:
         st.session_state["opt_subtabs"] = "⚙️ Configuration"
 
-    sub_config, sub_progress, sub_results, sub_history = st.tabs(
+    sub_config, sub_progress, sub_results, sub_history, sub_comparison = st.tabs(
         subtab_labels,
         default=st.session_state.get("opt_subtabs", "⚙️ Configuration"),
         key="opt_subtabs",
@@ -1793,6 +1800,13 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
     with sub_history:
         if getattr(sub_history, "open", False):
             _render_opt_history_tab()
+
+    # ════════════════════════════════════════════════════════════
+    # SOUS-ONGLET E : COMPARAISON
+    # ════════════════════════════════════════════════════════════
+    with sub_comparison:
+        if getattr(sub_comparison, "open", False):
+            _render_job_comparison_tab()
 
 
 # ── Sous-onglet Configuration ──────────────────────────────────────
@@ -3968,6 +3982,188 @@ def _render_opt_history_tab():
             st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
 
+def _comparison_option_label(record) -> str:
+    date_label = _fmt_date(record.date)
+    return (
+        f"{record.job_id} · {date_label} · "
+        f"{record.asset}/{record.timeframe} · {record.preset}"
+    )
+
+
+def _comparison_table_row(record, best_job_id: str) -> dict:
+    return {
+        "Meilleur": "Oui" if record.job_id == best_job_id else "",
+        "Job": record.job_id,
+        "Date": _fmt_date(record.date),
+        "Actif": record.asset,
+        "Timeframe": record.timeframe,
+        "Preset": record.preset,
+        "Statut": _status_ui(record.status)["label"],
+        "Score": record.score,
+        "Trades": record.trades,
+        "Win rate (%)": record.win_rate,
+        "Drawdown (%)": record.drawdown_pct,
+        "Durée": format_duration(record.duration_seconds or 0)
+        if record.duration_seconds is not None else "Indisponible",
+        "Combinaisons": record.combinations,
+        "Fichier de données": record.data_file,
+    }
+
+
+def _render_comparison_job_actions(record, active_jobs: list) -> None:
+    with st.container(border=True):
+        title = f"`{record.job_id}`"
+        if record.score is not None:
+            title += f" · score {record.score:.1f}"
+        st.markdown(f"**{title}**")
+        st.caption(
+            f"{record.asset}/{record.timeframe} · {record.preset} · "
+            f"{record.data_file}"
+        )
+
+        a1, a2, a3, a4 = st.columns(4)
+        with a1:
+            if st.button(
+                "Voir résultats",
+                key=f"compare_view_{record.job_id}",
+                width="stretch",
+            ):
+                _show_results_for_run(record.job_id, record.job_dir)
+                st.rerun()
+        with a2:
+            if st.button(
+                "Ouvrir fichiers",
+                key=f"compare_files_{record.job_id}",
+                width="stretch",
+                type="secondary",
+            ):
+                _show_results_for_run(record.job_id, record.job_dir, focus_files=True)
+                st.rerun()
+        with a3:
+            if st.button(
+                "Dupliquer config",
+                key=f"compare_duplicate_{record.job_id}",
+                width="stretch",
+                type="secondary",
+                disabled=not bool(record.config),
+            ):
+                _duplicate_config_to_configuration(record.config, record.job_id)
+                st.rerun()
+        with a4:
+            if st.button(
+                "Relancer même config",
+                key=f"compare_relaunch_{record.job_id}",
+                width="stretch",
+                disabled=bool(active_jobs) or not bool(record.config),
+            ):
+                try:
+                    launched = _launch_config_as_new_job(record.config, record.job_id)
+                except ActiveJobExistsError as exc:
+                    st.error(str(exc), icon=None)
+                else:
+                    _remember_job_for_tracking({
+                        "job_id": launched.job_id,
+                        "job_dir": launched.job_dir,
+                    })
+                    st.success(f"Nouveau job créé : `{launched.job_id}`")
+                    st.rerun()
+
+
+def _render_job_comparison_tab() -> None:
+    st.markdown("### Comparaison de jobs")
+    st.caption(
+        "Compare de 2 à 5 optimisations terminées. Pour une comparaison fiable, "
+        "privilégie la même stratégie, le même actif, le même timeframe et le même fichier CSV."
+    )
+
+    records = load_comparison_records(opt_store.list_jobs())
+    if not records:
+        st.info(
+            "Aucun job terminé n'est disponible. Lance d'abord une optimisation rapide, "
+            "puis reviens ici.",
+            icon=None,
+        )
+        return
+
+    by_id = {record.job_id: record for record in records}
+    historical_best = best_job(records)
+    default_ids = [records[0].job_id]
+    if historical_best and historical_best.job_id not in default_ids:
+        default_ids.append(historical_best.job_id)
+    elif len(records) > 1:
+        default_ids.append(records[1].job_id)
+    selected_ids = st.multiselect(
+        "Jobs à comparer",
+        options=list(by_id),
+        default=default_ids,
+        format_func=lambda job_id: _comparison_option_label(by_id[job_id]),
+        max_selections=5,
+        key="comparison_job_ids",
+        help="Minimum 2 jobs, maximum 5.",
+    )
+
+    is_valid, selection_message = validate_selection(selected_ids)
+    if not is_valid:
+        st.info(selection_message, icon=None)
+        return
+
+    selected = [by_id[job_id] for job_id in selected_ids]
+    winner = best_job(selected)
+    winner_id = winner.job_id if winner else ""
+
+    if winner:
+        st.success(
+            f"Meilleur score disponible : `{winner.job_id}` avec {winner.score:.1f}. "
+            "Le score seul ne garantit pas qu'un réglage est robuste.",
+            icon=None,
+        )
+    else:
+        st.warning(
+            "Aucun score exploitable n'est disponible pour les jobs sélectionnés.",
+            icon=None,
+        )
+
+    for issue in comparison_issues(selected):
+        st.warning(issue, icon=None)
+
+    table = pd.DataFrame([
+        _comparison_table_row(record, winner_id)
+        for record in selected
+    ])
+    st.dataframe(
+        table,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Score": st.column_config.NumberColumn(format="%.2f"),
+            "Win rate (%)": st.column_config.NumberColumn(format="%.2f"),
+            "Drawdown (%)": st.column_config.NumberColumn(format="%.2f"),
+            "Trades": st.column_config.NumberColumn(format="%d"),
+            "Combinaisons": st.column_config.NumberColumn(format="%d"),
+        },
+    )
+
+    missing = [record for record in selected if record.missing_metrics]
+    if missing:
+        with st.expander("Métriques manquantes", expanded=False):
+            for record in missing:
+                st.write(
+                    f"`{record.job_id}` : "
+                    + ", ".join(record.missing_metrics)
+                )
+
+    st.markdown("### Actions")
+    active_jobs = _list_active_jobs()
+    if active_jobs:
+        st.warning(
+            "Un job est actif : les boutons de relance sont désactivés. "
+            "Voir, fichiers et duplication restent disponibles.",
+            icon=None,
+        )
+    for record in selected:
+        _render_comparison_job_actions(record, active_jobs)
+
+
 MAIN_TAB_HOME = "🏠  Accueil"
 MAIN_TAB_BACKTEST = "📊  Backtest manuel"
 MAIN_TAB_HISTORY = "📂  Historique manuel"
@@ -3977,6 +4173,7 @@ MAIN_TAB_MAINTENANCE = "🧹  Maintenance"
 MAIN_TAB_OPTIMIZATION = "🔬  Optimisation"
 OPT_SUBTAB_CONFIG = "⚙️ Configuration"
 OPT_SUBTAB_HISTORY = "📂 Historique Runs"
+OPT_SUBTAB_COMPARISON = "⚖️ Comparaison de jobs"
 
 
 def _switch_main_tab(tab_label: str, opt_subtab: str = None) -> None:
@@ -4096,7 +4293,7 @@ def render_home_tab():
 
     with st.container(border=True):
         st.markdown("### Actions rapides")
-        a1, a2, a3, a4 = st.columns(4)
+        a1, a2, a3, a4, a5 = st.columns(5)
         with a1:
             if st.button("Préparer un CSV", width="stretch"):
                 _switch_main_tab(MAIN_TAB_DATA)
@@ -4107,6 +4304,9 @@ def render_home_tab():
             if st.button("Voir les jobs", width="stretch"):
                 _switch_main_tab(MAIN_TAB_OPTIMIZATION, opt_subtab=OPT_SUBTAB_HISTORY)
         with a4:
+            if st.button("Comparer les jobs", width="stretch"):
+                _switch_main_tab(MAIN_TAB_OPTIMIZATION, opt_subtab=OPT_SUBTAB_COMPARISON)
+        with a5:
             if st.button("Nettoyer localement", width="stretch"):
                 _switch_main_tab(MAIN_TAB_MAINTENANCE)
 

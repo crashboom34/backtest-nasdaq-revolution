@@ -36,6 +36,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `data_validator.py`      | Valide et normalise les CSV importés avant sauvegarde dans `data/`   |
 | `maintenance.py`         | Analyse les fichiers locaux générés et prépare des nettoyages sécurisés |
 | `dashboard.py`           | Agrège les KPIs d'accueil : disque, jobs, données disponibles, alertes |
+| `job_comparison.py`      | Normalise les métriques récentes/legacy et prépare la comparaison de 2 à 5 jobs |
 | `ui_components.py`       | Petits helpers d'affichage Streamlit : en-têtes, panneaux d'aide, étapes |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
 
@@ -132,6 +133,8 @@ Ou en terminal :
 - **Lancement optimisation** : Streamlit et `job_launcher.py` refusent de créer un nouveau job si `optimization_store.list_active_jobs()` trouve déjà un job actif.
 - **Arrêt propre** : `stop.flag` reste le signal d'arrêt. Pendant que le flag existe sur un job `running` ou `benchmarking`, le job reste considéré actif et l'UI affiche `Arrêt demandé`.
 - **Relance / duplication** : `Relancer même config` clone `config_used.json` dans un nouveau job. `Dupliquer config` charge les widgets de l'onglet Configuration sans lancer de job.
+- **Comparaison jobs** : l'onglet `Optimisation > Comparaison de jobs` utilise `job_comparison.py`. Il lit d'abord `metrics.json`, puis retombe sur `meta.json` et `results.csv` pour les anciens jobs.
+- **Comparabilité** : afficher un avertissement si stratégie, actif, timeframe ou fichier de données diffèrent. La page reste lisible et ne bloque pas les anciens jobs incomplets.
 - **Téléchargements UX** : l'historique n'affiche plus de `download_button` pour chaque job afin d'éviter les sources Streamlit invalidées. Le bouton `Fichiers job` ouvre le job, et les vrais téléchargements restent dans l'onglet `Fichiers job`.
 
 ---
@@ -202,6 +205,7 @@ pip install -r requirements-server.txt
 - [x] Dépôt GitHub créé (privé) : https://github.com/crashboom34/backtest-nasdaq-revolution
 - [x] Préréglages d'optimisation Streamlit : `Test rapide local`, `Test moyen`, `Optimisation complète`, `Serveur puissant`, `Personnalisé`
 - [x] Sécurité lancement jobs : blocage des doubles lancements, affichage job actif, arrêt propre visible, relance/duplication de config
+- [x] Comparaison de jobs : sélection de 2 à 5 jobs terminés, tableau métriques, meilleur score, actions et compatibilité legacy
 
 ### Reste à faire (prochaines étapes suggérées)
 
@@ -232,6 +236,7 @@ pip install -r requirements-server.txt
 | Interface encore trop peu guidée pour débutant | En amélioration | Helpers `ui_components.py`, messages plus pédagogiques et parcours principaux clarifiés |
 | Double clic sur lancement optimisation | Corrigé | Garde-fou UI + refus dans `job_launcher.py` si un job actif existe |
 | Stop demandé peu visible | Corrigé | `stop.flag` maintient un état `Arrêt demandé` dans les cartes actives jusqu'à consommation par le process |
+| Comparaison difficile entre optimisations | Corrigé | Sous-page native Streamlit avec score, trades, win rate, drawdown, durée, combinaisons et contexte des données |
 
 ---
 
