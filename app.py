@@ -54,9 +54,15 @@ from champion_export import (
     render_champion_markdown,
 )
 from champion_validation import (
+    ChampionValidationSettings,
     VERDICT_INCOMPLETE,
     VERDICT_INSUFFICIENT,
     VERDICT_SERIOUS,
+)
+from validation_settings import (
+    load_validation_settings,
+    reset_validation_settings,
+    save_validation_settings,
 )
 from job_launcher import (
     ActiveJobExistsError,
@@ -4357,12 +4363,151 @@ def _format_report_metric(value, suffix: str = "", decimals: int = 1) -> str:
         return "Indisponible"
 
 
+_VALIDATION_SETTING_KEYS = (
+    "champion_min_trades",
+    "champion_min_score",
+    "champion_watch_drawdown",
+    "champion_blocking_drawdown",
+    "champion_min_win_rate",
+    "champion_min_combinations",
+    "champion_min_rows",
+    "champion_min_period_days",
+    "champion_quick_non_validating",
+)
+
+
+def _clear_validation_setting_widgets() -> None:
+    for key in _VALIDATION_SETTING_KEYS:
+        st.session_state.pop(key, None)
+
+
+def _render_champion_validation_settings() -> ChampionValidationSettings:
+    settings = load_validation_settings()
+    with st.expander("Réglages validation", expanded=False):
+        st.caption(
+            "Ces seuils sont globaux à l'application et enregistrés dans "
+            "`settings/champion_validation.json`, jamais dans les jobs."
+        )
+        with st.form("champion_validation_settings_form"):
+            c1, c2 = st.columns(2)
+            with c1:
+                min_trades = st.number_input(
+                    "Trades minimum sérieux",
+                    min_value=1,
+                    step=1,
+                    value=settings.min_trades,
+                    key="champion_min_trades",
+                )
+                min_score = st.number_input(
+                    "Score minimum",
+                    step=1.0,
+                    value=settings.min_score,
+                    key="champion_min_score",
+                )
+                watch_drawdown = st.number_input(
+                    "Drawdown : seuil surveillance (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=1.0,
+                    value=settings.watch_drawdown_pct,
+                    key="champion_watch_drawdown",
+                )
+                blocking_drawdown = st.number_input(
+                    "Drawdown : seuil bloquant (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=1.0,
+                    value=settings.blocking_drawdown_pct,
+                    key="champion_blocking_drawdown",
+                )
+            with c2:
+                min_win_rate = st.number_input(
+                    "Win rate minimum exploitable (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=1.0,
+                    value=settings.min_win_rate_pct,
+                    key="champion_min_win_rate",
+                )
+                min_combinations = st.number_input(
+                    "Combinaisons minimum",
+                    min_value=1,
+                    step=10,
+                    value=settings.min_combinations,
+                    key="champion_min_combinations",
+                )
+                min_rows = st.number_input(
+                    "Lignes de données minimum",
+                    min_value=1,
+                    step=10_000,
+                    value=settings.min_rows,
+                    key="champion_min_rows",
+                )
+                min_period_days = st.number_input(
+                    "Jours de données minimum",
+                    min_value=1,
+                    step=30,
+                    value=settings.min_period_days,
+                    key="champion_min_period_days",
+                )
+            quick_non_validating = st.checkbox(
+                "Considérer Test rapide local comme non validant",
+                value=settings.quick_preset_non_validating,
+                key="champion_quick_non_validating",
+            )
+            save_col, reset_col, _ = st.columns([1.3, 1.5, 3.2])
+            with save_col:
+                save_clicked = st.form_submit_button(
+                    "Enregistrer les seuils",
+                    width="stretch",
+                )
+            with reset_col:
+                reset_clicked = st.form_submit_button(
+                    "Réinitialiser par défaut",
+                    width="stretch",
+                    type="secondary",
+                )
+
+        if save_clicked:
+            try:
+                save_validation_settings(ChampionValidationSettings(
+                    min_trades=int(min_trades),
+                    min_score=float(min_score),
+                    watch_drawdown_pct=float(watch_drawdown),
+                    blocking_drawdown_pct=float(blocking_drawdown),
+                    min_win_rate_pct=float(min_win_rate),
+                    min_combinations=int(min_combinations),
+                    min_rows=int(min_rows),
+                    min_period_days=int(min_period_days),
+                    quick_preset_non_validating=bool(quick_non_validating),
+                ))
+            except (OSError, TypeError, ValueError) as exc:
+                st.error(f"Seuils non enregistrés : {exc}", icon=None)
+            else:
+                _clear_validation_setting_widgets()
+                st.toast("Seuils Champion enregistrés.", icon="💾")
+                st.rerun()
+        if reset_clicked:
+            try:
+                reset_validation_settings()
+            except OSError as exc:
+                st.error(f"Réinitialisation impossible : {exc}", icon=None)
+            else:
+                _clear_validation_setting_widgets()
+                st.toast("Seuils Champion réinitialisés.", icon="↩️")
+                st.rerun()
+
+        st.caption("Fichier actif : `settings/champion_validation.json`")
+    return settings
+
+
 def _render_champion_report_tab() -> None:
     st.markdown("### Rapport Champion")
     st.caption(
         "Une fiche de décision pour relire rapidement un Champion ou un Favori, "
         "sans modifier ses résultats calculés."
     )
+    validation_settings = _render_champion_validation_settings()
 
     featured = [
         job for job in featured_jobs(opt_store.list_jobs())
@@ -4370,7 +4515,7 @@ def _render_champion_report_tab() -> None:
     ]
     reports = [
         report for job in featured
-        if (report := load_champion_report(job)) is not None
+        if (report := load_champion_report(job, settings=validation_settings)) is not None
     ]
     reports.sort(key=lambda item: item.record.date, reverse=True)
     reports.sort(

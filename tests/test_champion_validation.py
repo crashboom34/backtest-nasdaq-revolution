@@ -1,5 +1,6 @@
 from job_comparison import JobComparisonRecord
 from champion_validation import (
+    ChampionValidationSettings,
     STATUS_BLOCKING,
     STATUS_UNKNOWN,
     STATUS_VALID,
@@ -114,3 +115,18 @@ def test_drawdown_between_twenty_and_thirty_is_watch():
 
     assert _criterion(validation, "drawdown").status == STATUS_WATCH
     assert validation.verdict == VERDICT_PROMISING
+
+
+def test_custom_threshold_changes_checklist():
+    settings = ChampionValidationSettings(
+        min_trades=80,
+        min_score=50.0,
+        min_combinations=200,
+    )
+
+    validation = evaluate_champion(_record(), settings)
+
+    assert _criterion(validation, "trades").status == STATUS_WATCH
+    assert _criterion(validation, "score").status == STATUS_BLOCKING
+    assert _criterion(validation, "combinations").status == STATUS_WATCH
+    assert validation.verdict == VERDICT_INSUFFICIENT

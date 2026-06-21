@@ -8,6 +8,7 @@ from champion_export import (
     render_champion_markdown,
 )
 from champion_report import load_champion_report
+from champion_validation import ChampionValidationSettings
 from job_annotations import save_annotation
 
 
@@ -19,7 +20,7 @@ def _hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _report(tmp_path: Path, *, complete: bool = True):
+def _report(tmp_path: Path, *, complete: bool = True, settings=None):
     job_dir = tmp_path / "job_export"
     job_dir.mkdir()
     _write_json(job_dir / "config_used.json", {
@@ -52,7 +53,7 @@ def _report(tmp_path: Path, *, complete: bool = True):
         "status": "completed",
         "date": "2026-06-21T14:30:00",
     }
-    return load_champion_report(job), job_dir
+    return load_champion_report(job, settings=settings), job_dir
 
 
 def test_markdown_export_is_non_empty_and_complete(tmp_path):
@@ -132,3 +133,21 @@ def test_exports_do_not_modify_raw_result_files(tmp_path):
     render_champion_html(report)
 
     assert {name: _hash(job_dir / name) for name in raw_names} == before
+
+
+def test_exports_use_configured_thresholds(tmp_path):
+    report, _ = _report(
+        tmp_path,
+        settings=ChampionValidationSettings(
+            min_trades=75,
+            min_score=10.0,
+            min_combinations=300,
+        ),
+    )
+
+    markdown = render_champion_markdown(report)
+    html = render_champion_html(report)
+
+    assert "seuil conseillé : 75" in markdown
+    assert "seuil minimum : 10.00" in markdown
+    assert "seuil conseillé : 300" in html
