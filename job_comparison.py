@@ -114,6 +114,9 @@ def load_job_record(job: dict) -> Optional[JobComparisonRecord]:
         (job, "duration_seconds"),
     )
     combinations = _int_from(
+        (metrics, "combinations_tested"),
+        (meta, "combinations_tested"),
+        (job, "combinations_tested"),
         (metrics, "total_combinations"),
         (meta, "total_combinations"),
         (job, "total_combinations"),

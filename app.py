@@ -42,6 +42,12 @@ from job_comparison import (
     load_comparison_records,
     validate_selection,
 )
+from champion_report import (
+    DECISION_REJECT,
+    DECISION_RELAUNCH,
+    ChampionReport,
+    load_champion_report,
+)
 from job_launcher import (
     ActiveJobExistsError,
     clone_config_for_new_job,
@@ -1452,13 +1458,30 @@ def _load_config_into_widgets(config: dict) -> None:
         name = pr.get("name")
         if not name:
             continue
+        value_type = pr.get("param_type")
+        numeric_values = [
+            pr.get(field)
+            for field in ("min_val", "max_val", "step")
+            if pr.get(field) is not None
+        ]
+        legacy_integer_range = (
+            value_type == "number"
+            and numeric_values
+            and all(float(value).is_integer() for value in numeric_values)
+        )
+        if value_type == "int" or legacy_integer_range:
+            caster = int
+        elif value_type in ("float", "number"):
+            caster = float
+        else:
+            caster = lambda value: value
         st.session_state[f"opt_en_{name}"] = bool(pr.get("enabled", False))
         if pr.get("min_val") is not None:
-            st.session_state[f"opt_min_{name}"] = pr.get("min_val")
+            st.session_state[f"opt_min_{name}"] = caster(pr.get("min_val"))
         if pr.get("max_val") is not None:
-            st.session_state[f"opt_max_{name}"] = pr.get("max_val")
+            st.session_state[f"opt_max_{name}"] = caster(pr.get("max_val"))
         if pr.get("step") is not None:
-            st.session_state[f"opt_step_{name}"] = pr.get("step")
+            st.session_state[f"opt_step_{name}"] = caster(pr.get("step"))
 
 
 def _duplicate_config_to_configuration(config: dict, source_job_id: str = "") -> None:
@@ -1873,6 +1896,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
         "📊 Résultats",
         "📂 Historique Runs",
         "🏆 Champions / Favoris",
+        "📋 Rapport Champion",
         "⚖️ Comparaison de jobs",
     ]
     if st.session_state.pop("opt_focus_config_tab", False):
@@ -1882,7 +1906,15 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
     elif st.session_state.get("opt_subtabs") not in subtab_labels:
         st.session_state["opt_subtabs"] = "⚙️ Configuration"
 
-    sub_config, sub_progress, sub_results, sub_history, sub_featured, sub_comparison = st.tabs(
+    (
+        sub_config,
+        sub_progress,
+        sub_results,
+        sub_history,
+        sub_featured,
+        sub_champion_report,
+        sub_comparison,
+    ) = st.tabs(
         subtab_labels,
         default=st.session_state.get("opt_subtabs", "⚙️ Configuration"),
         key="opt_subtabs",
@@ -1926,7 +1958,14 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
             _render_featured_jobs_tab()
 
     # ════════════════════════════════════════════════════════════
-    # SOUS-ONGLET F : COMPARAISON
+    # SOUS-ONGLET F : RAPPORT CHAMPION
+    # ════════════════════════════════════════════════════════════
+    with sub_champion_report:
+        if getattr(sub_champion_report, "open", False):
+            _render_champion_report_tab()
+
+    # ════════════════════════════════════════════════════════════
+    # SOUS-ONGLET G : COMPARAISON
     # ════════════════════════════════════════════════════════════
     with sub_comparison:
         if getattr(sub_comparison, "open", False):
@@ -2125,22 +2164,26 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                     f"Minimum {lbl}",
                     **_value_kw(f"opt_min_{k}", mn),
                     key=f"opt_min_{k}", label_visibility="collapsed",
-                    format="%.2f" if typ == "float" else "%d",
+                    **({"format": "%.2f"} if typ == "float" else {}),
                 )
             with c3:
                 max_v = st.number_input(
                     f"Maximum {lbl}",
                     **_value_kw(f"opt_max_{k}", mx),
                     key=f"opt_max_{k}", label_visibility="collapsed",
-                    format="%.2f" if typ == "float" else "%d",
+                    **({"format": "%.2f"} if typ == "float" else {}),
                 )
             with c4:
                 step_v = st.number_input(
                     f"Pas {lbl}",
                     **_value_kw(f"opt_step_{k}", stp),
                     key=f"opt_step_{k}", label_visibility="collapsed",
-                    format="%.3f" if typ == "float" else "%d",
+                    **({"format": "%.3f"} if typ == "float" else {}),
                 )
+            if typ == "int":
+                min_v = int(min_v)
+                max_v = int(max_v)
+                step_v = int(step_v)
             with c5:
                 if enabled and step_v > 0:
                     n_vals = max(1, int((max_v - min_v) / step_v) + 1)
@@ -4285,6 +4328,179 @@ def _render_featured_jobs_tab() -> None:
         )
 
 
+def _champion_report_option_label(report: ChampionReport) -> str:
+    record = report.record
+    return (
+        f"{_annotation_label(record.annotation)} · {record.job_id} · "
+        f"{_fmt_date(record.date)} · {record.asset}/{record.timeframe}"
+    )
+
+
+def _format_report_metric(value, suffix: str = "", decimals: int = 1) -> str:
+    if value is None:
+        return "Indisponible"
+    if isinstance(value, int):
+        return f"{value}{suffix}"
+    try:
+        return f"{float(value):.{decimals}f}{suffix}"
+    except (TypeError, ValueError):
+        return "Indisponible"
+
+
+def _render_champion_report_tab() -> None:
+    st.markdown("### Rapport Champion")
+    st.caption(
+        "Une fiche de décision pour relire rapidement un Champion ou un Favori, "
+        "sans modifier ses résultats calculés."
+    )
+
+    featured = [
+        job for job in featured_jobs(opt_store.list_jobs())
+        if str(job.get("status", "")).lower() == "completed"
+    ]
+    reports = [
+        report for job in featured
+        if (report := load_champion_report(job)) is not None
+    ]
+    reports.sort(key=lambda item: item.record.date, reverse=True)
+    reports.sort(
+        key=lambda item: 0 if item.record.annotation.status == "Champion" else 1
+    )
+    if not reports:
+        st.info(
+            "Aucun Rapport Champion disponible. Classe d'abord un job terminé "
+            "comme Champion ou Favori depuis Résultats.",
+            icon=None,
+        )
+        return
+
+    reports_by_id = {report.record.job_id: report for report in reports}
+    selected_id = st.selectbox(
+        "Champion ou favori à analyser",
+        options=list(reports_by_id),
+        format_func=lambda job_id: _champion_report_option_label(reports_by_id[job_id]),
+        key="champion_report_job_id",
+    )
+    report = reports_by_id[selected_id]
+    record = report.record
+
+    with st.container(border=True):
+        title_col, status_col = st.columns([4, 1])
+        with title_col:
+            st.markdown(f"#### `{record.job_id}`")
+            st.caption(
+                f"{_fmt_date(record.date)} · {record.asset}/{record.timeframe} · "
+                f"{record.preset}"
+            )
+        with status_col:
+            st.metric("Classement", _annotation_label(record.annotation))
+        if record.annotation.note:
+            st.write(record.annotation.note)
+        if record.annotation.tags:
+            st.caption("Tags : " + " · ".join(record.annotation.tags))
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Score", _format_report_metric(record.score, decimals=2))
+    k2.metric("Trades", _format_report_metric(record.trades, decimals=0))
+    k3.metric("Win rate", _format_report_metric(record.win_rate, " %"))
+    k4.metric("Drawdown", _format_report_metric(record.drawdown_pct, " %"))
+
+    k5, k6, k7 = st.columns(3)
+    k5.metric(
+        "Durée",
+        format_duration(record.duration_seconds or 0)
+        if record.duration_seconds is not None else "Indisponible",
+    )
+    k6.metric(
+        "Combinaisons testées",
+        _format_report_metric(record.combinations, decimals=0),
+    )
+    k7.metric("Fichiers disponibles", len(report.available_files))
+
+    st.markdown("#### Contexte du job")
+    st.table(
+        pd.DataFrame([{
+            "Actif": record.asset,
+            "Timeframe": record.timeframe,
+            "Preset": record.preset,
+            "Statut job": _status_ui(record.status)["label"],
+            "Fichier de données": record.data_file,
+        }]).set_index("Actif"),
+    )
+
+    st.markdown("#### Pourquoi ce job est intéressant")
+    reason_col, caution_col = st.columns(2)
+    with reason_col:
+        with st.container(border=True):
+            st.markdown("**Points forts détectés**")
+            if report.strengths:
+                for point in report.strengths:
+                    st.write(f"✓ {point}")
+            else:
+                st.caption("Aucun point fort ne peut être confirmé avec les données disponibles.")
+    with caution_col:
+        with st.container(border=True):
+            st.markdown("**Points faibles ou informations manquantes**")
+            if report.weaknesses:
+                for point in report.weaknesses:
+                    st.write(f"• {point}")
+            else:
+                st.caption("Aucun point faible majeur détecté par les règles simples.")
+
+    for alert in report.alerts:
+        st.warning(alert, icon=None)
+
+    st.markdown("#### Décision recommandée")
+    decision_message = (
+        f"**{report.decision.title}**  \n{report.decision.explanation}"
+    )
+    if report.decision.code == DECISION_REJECT:
+        st.error(decision_message, icon=None)
+    elif report.decision.code == DECISION_RELAUNCH:
+        st.success(decision_message, icon=None)
+    else:
+        st.warning(decision_message, icon=None)
+    st.caption(
+        "Cette recommandation est une aide à la décision fondée sur les métriques "
+        "disponibles. Elle ne garantit pas les performances futures."
+    )
+
+    st.markdown("#### Fichiers disponibles")
+    if report.available_files:
+        labels = {
+            filename: label
+            for filename, label, _mime in JOB_DOWNLOAD_SPECS
+        }
+        st.table(
+            pd.DataFrame([
+                {
+                    "Fichier": filename,
+                    "Contenu": labels.get(filename, filename),
+                    "État": "Disponible",
+                }
+                for filename in report.available_files
+            ]).set_index("Fichier"),
+        )
+    else:
+        st.info("Aucun fichier téléchargeable n'est disponible pour ce job.", icon=None)
+
+    st.markdown("#### Actions")
+    active_jobs = _list_active_jobs()
+    if active_jobs:
+        st.warning(
+            "Un job est actif : la relance est désactivée. Les autres actions restent disponibles.",
+            icon=None,
+        )
+    _render_comparison_job_actions(
+        record,
+        active_jobs,
+        key_prefix="champion_report",
+    )
+
+    with st.expander("Changer l'annotation, la note ou les tags", expanded=False):
+        _render_job_annotation_editor(record.job_id, record.job_dir, record.status)
+
+
 def _render_job_comparison_tab() -> None:
     st.markdown("### Comparaison de jobs")
     st.caption(
@@ -4390,6 +4606,7 @@ MAIN_TAB_OPTIMIZATION = "🔬  Optimisation"
 OPT_SUBTAB_CONFIG = "⚙️ Configuration"
 OPT_SUBTAB_HISTORY = "📂 Historique Runs"
 OPT_SUBTAB_FEATURED = "🏆 Champions / Favoris"
+OPT_SUBTAB_CHAMPION_REPORT = "📋 Rapport Champion"
 OPT_SUBTAB_COMPARISON = "⚖️ Comparaison de jobs"
 
 
@@ -4493,10 +4710,10 @@ def render_home_tab():
             )
             if champion.annotation.note:
                 st.write(champion.annotation.note)
-            if st.button("Ouvrir Champions / Favoris", key="home_open_featured"):
+            if st.button("Ouvrir Rapport Champion", key="home_open_champion_report"):
                 _switch_main_tab(
                     MAIN_TAB_OPTIMIZATION,
-                    opt_subtab=OPT_SUBTAB_FEATURED,
+                    opt_subtab=OPT_SUBTAB_CHAMPION_REPORT,
                 )
 
     with st.container(border=True):
