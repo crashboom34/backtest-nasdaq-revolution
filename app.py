@@ -69,6 +69,13 @@ from champion_validation import (
     VERDICT_INSUFFICIENT,
     VERDICT_SERIOUS,
 )
+from champion_roadmap import (
+    ROADMAP_ANNOTATIONS,
+    ROADMAP_MATURITIES,
+    build_roadmap,
+    filter_roadmap_items,
+    roadmap_summary,
+)
 from validation_settings import (
     load_validation_settings,
     reset_validation_settings,
@@ -2021,6 +2028,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
         "📂 Historique Runs",
         "🏆 Champions / Favoris",
         "📋 Rapport Champion",
+        "🗺️ Roadmap Champion",
         "⚖️ Comparaison de jobs",
     ]
     if st.session_state.pop("opt_focus_config_tab", False):
@@ -2037,6 +2045,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
         sub_history,
         sub_featured,
         sub_champion_report,
+        sub_champion_roadmap,
         sub_comparison,
     ) = st.tabs(
         subtab_labels,
@@ -2089,7 +2098,14 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
             _render_champion_report_tab()
 
     # ════════════════════════════════════════════════════════════
-    # SOUS-ONGLET G : COMPARAISON
+    # SOUS-ONGLET G : ROADMAP CHAMPION
+    # ════════════════════════════════════════════════════════════
+    with sub_champion_roadmap:
+        if getattr(sub_champion_roadmap, "open", False):
+            _render_champion_roadmap_tab()
+
+    # ════════════════════════════════════════════════════════════
+    # SOUS-ONGLET H : COMPARAISON
     # ════════════════════════════════════════════════════════════
     with sub_comparison:
         if getattr(sub_comparison, "open", False):
@@ -4853,6 +4869,159 @@ def _render_champion_report_tab() -> None:
         _render_job_annotation_editor(record.job_id, record.job_dir, record.status)
 
 
+def _roadmap_table_row(item) -> dict:
+    record = item.record
+    return {
+        "Job": record.job_id,
+        "Annotation": _annotation_label(record.annotation),
+        "Note courte": item.note_short,
+        "Tags": " · ".join(item.tags),
+        "Actif": record.asset,
+        "Timeframe": record.timeframe,
+        "Preset": record.preset,
+        "Score": record.score,
+        "Trades": record.trades,
+        "Drawdown (%)": record.drawdown_pct,
+        "Verdict checklist": item.validation_verdict,
+        "Maturité": item.maturity_status,
+        "Dernière décision": item.last_decision,
+        "Action recommandée": item.recommended_action,
+    }
+
+
+def _open_champion_report(job_id: str) -> None:
+    st.session_state["champion_report_job_id"] = job_id
+    _switch_main_tab(
+        MAIN_TAB_OPTIMIZATION,
+        opt_subtab=OPT_SUBTAB_CHAMPION_REPORT,
+    )
+
+
+def _render_champion_roadmap_tab() -> None:
+    st.markdown("### Roadmap Champion")
+    st.caption(
+        "Vue de pilotage pour classer les Champions, Favoris et jobs à revoir "
+        "selon leur niveau de maturité."
+    )
+    settings = load_validation_settings()
+    roadmap = build_roadmap(opt_store.list_jobs(), settings=settings)
+    if not roadmap.items:
+        st.info(
+            "Aucun job annoté pour le moment. Ouvre un job terminé dans Résultats "
+            "puis ajoute un classement Champion, Favori, À revoir ou Rejeté.",
+            icon=None,
+        )
+        return
+
+    summary = roadmap_summary(roadmap.items)
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Candidats sérieux", summary.serious_count)
+    k2.metric("À retester", summary.retest_count)
+    k3.metric("Rejetés", summary.rejected_count)
+    if summary.priority_job_id:
+        st.info(
+            f"Prochaine action prioritaire : `{summary.priority_job_id}` — "
+            f"{summary.priority_action}",
+            icon=None,
+        )
+
+    annotation_options = ["Tous"] + list(ROADMAP_ANNOTATIONS)
+    maturity_options = ["Tous"] + list(ROADMAP_MATURITIES)
+    asset_timeframe_options = ["Tous"] + sorted(
+        {item.asset_timeframe for item in roadmap.items}
+    )
+    tag_options = ["Tous"] + sorted(
+        {tag for item in roadmap.items for tag in item.tags}
+    )
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        annotation_filter = st.selectbox(
+            "Annotation",
+            annotation_options,
+            key="roadmap_filter_annotation",
+        )
+    with f2:
+        maturity_filter = st.selectbox(
+            "Statut de maturité",
+            maturity_options,
+            key="roadmap_filter_maturity",
+        )
+    with f3:
+        asset_filter = st.selectbox(
+            "Actif / timeframe",
+            asset_timeframe_options,
+            key="roadmap_filter_asset_timeframe",
+        )
+    with f4:
+        tag_filter = st.selectbox(
+            "Tag",
+            tag_options,
+            key="roadmap_filter_tag",
+        )
+
+    filtered = filter_roadmap_items(
+        roadmap.items,
+        annotation="" if annotation_filter == "Tous" else annotation_filter,
+        maturity_status="" if maturity_filter == "Tous" else maturity_filter,
+        asset_timeframe="" if asset_filter == "Tous" else asset_filter,
+        tag="" if tag_filter == "Tous" else tag_filter,
+    )
+    if not filtered:
+        st.warning("Aucun job ne correspond aux filtres sélectionnés.", icon=None)
+        return
+
+    st.dataframe(
+        pd.DataFrame([_roadmap_table_row(item) for item in filtered]),
+        width="stretch",
+        hide_index=True,
+    )
+
+    active_jobs = _list_active_jobs()
+    if active_jobs:
+        st.warning(
+            "Un job est actif : les relances sont désactivées, mais la duplication reste possible.",
+            icon=None,
+        )
+
+    st.markdown("#### Actions")
+    selected_action_job = st.selectbox(
+        "Job à piloter",
+        options=[item.job_id for item in filtered],
+        format_func=lambda job_id: next(
+            f"{item.job_id} · {item.maturity_status} · {item.asset_timeframe}"
+            for item in filtered if item.job_id == job_id
+        ),
+        key="roadmap_action_job_id",
+    )
+    selected_item = next(item for item in filtered if item.job_id == selected_action_job)
+    record = selected_item.record
+    with st.container(border=True):
+        r1, r2 = st.columns([1.2, 4])
+        with r1:
+            can_open_report = record.annotation.status in ("Champion", "Favori")
+            if st.button(
+                "Ouvrir Rapport Champion",
+                key=f"roadmap_open_report_{record.job_id}",
+                width="stretch",
+                disabled=not can_open_report,
+            ):
+                _open_champion_report(record.job_id)
+        with r2:
+            st.markdown(f"**{selected_item.maturity_status}**")
+            st.caption(selected_item.recommended_action)
+        _render_comparison_job_actions(
+            record,
+            active_jobs,
+            key_prefix="roadmap",
+        )
+        with st.expander("Modifier annotation, note ou tags", expanded=False):
+            _render_job_annotation_editor(
+                record.job_id,
+                record.job_dir,
+                record.status,
+            )
+
+
 def _render_job_comparison_tab() -> None:
     st.markdown("### Comparaison de jobs")
     st.caption(
@@ -4959,6 +5128,7 @@ OPT_SUBTAB_CONFIG = "⚙️ Configuration"
 OPT_SUBTAB_HISTORY = "📂 Historique Runs"
 OPT_SUBTAB_FEATURED = "🏆 Champions / Favoris"
 OPT_SUBTAB_CHAMPION_REPORT = "📋 Rapport Champion"
+OPT_SUBTAB_CHAMPION_ROADMAP = "🗺️ Roadmap Champion"
 OPT_SUBTAB_COMPARISON = "⚖️ Comparaison de jobs"
 
 
@@ -5066,6 +5236,26 @@ def render_home_tab():
                 _switch_main_tab(
                     MAIN_TAB_OPTIMIZATION,
                     opt_subtab=OPT_SUBTAB_CHAMPION_REPORT,
+                )
+
+    roadmap = build_roadmap(opt_store.list_jobs(), settings=load_validation_settings())
+    if roadmap.items:
+        roadmap_overview = roadmap_summary(roadmap.items)
+        with st.container(border=True):
+            st.markdown("### Roadmap Champion")
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Candidats sérieux", roadmap_overview.serious_count)
+            r2.metric("À retester", roadmap_overview.retest_count)
+            r3.metric("Rejetés", roadmap_overview.rejected_count)
+            if roadmap_overview.priority_job_id:
+                st.caption(
+                    f"Priorité : `{roadmap_overview.priority_job_id}` — "
+                    f"{roadmap_overview.priority_action}"
+                )
+            if st.button("Ouvrir Roadmap Champion", key="home_open_champion_roadmap"):
+                _switch_main_tab(
+                    MAIN_TAB_OPTIMIZATION,
+                    opt_subtab=OPT_SUBTAB_CHAMPION_ROADMAP,
                 )
 
     with st.container(border=True):
