@@ -43,6 +43,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `champion_export.py`     | Génère en mémoire les exports Markdown et HTML du Rapport Champion |
 | `champion_validation.py` | Évalue les 8 critères de sérieux d'un Champion/Favori et produit un verdict global |
 | `champion_roadmap.py`    | Agrège les jobs annotés en statuts de maturité et prochaine action |
+| `retest_plan.py`         | Propose un plan de retest plus sérieux et applique ses limites à une config clonée |
 | `validation_settings.py` | Lit/écrit les seuils Champion globaux dans `settings/champion_validation.json` |
 | `ui_components.py`       | Petits helpers d'affichage Streamlit : en-têtes, panneaux d'aide, étapes |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
@@ -156,6 +157,9 @@ Ou en terminal :
 - **Roadmap Champion** : la sous-page `Optimisation > Roadmap Champion` liste les jobs annotés `Champion`, `Favori`, `À revoir` et `Rejeté`. Elle calcule un statut de maturité en lecture seule : `À retester`, `À valider sur plus d'historique`, `Candidat sérieux`, `Données incomplètes`, `Rejeté`.
 - **Filtres Roadmap** : annotation, maturité, actif/timeframe et tag. Les actions réutilisent les chemins existants : Rapport Champion pour Champion/Favori, Résultats, duplication, relance si aucun job actif, modification annotation/note/tags.
 - **Accueil Roadmap** : l'Accueil affiche le nombre de candidats sérieux, à retester et rejetés, plus la prochaine action prioritaire.
+- **Plan de retest** : la sous-page `Optimisation > Plan de retest` sélectionne un Champion/Favori terminé et propose un preset, `max_rows`, `max_combinations`, workers et benchmark selon checklist, preset, trades, score, drawdown et données.
+- **Actions retest** : `Dupliquer vers Configuration` charge une config clonée avec les limites proposées. `Lancer le retest` crée un nouveau job sans écraser l'ancien si aucun job actif n'existe. `Ajouter note/tag` complète `job_notes.json` et le journal trace les actions dans `job_decisions.json`.
+- **Règles retest** : `Test rapide local` monte vers `Test moyen`; trop peu de trades pousse vers plus d'historique; drawdown élevé reste prudent avec tag `drawdown élevé`; données incomplètes demandent vérification/import; candidat sérieux relance sur plus d'historique avec limite contrôlée.
 - **Checklist Champion** : 8 critères sont calculés en lecture seule : trades, score, drawdown, win rate, métriques essentielles, preset, combinaisons et période/volume de données. Statuts possibles : `Validé`, `À surveiller`, `Bloquant`, `Inconnu`.
 - **Verdict Champion** : priorité aux métriques essentielles manquantes (`Données incomplètes`), puis aux critères bloquants (`Insuffisant`). Un job n'est `Candidat sérieux` que si les 8 critères sont validés ; sinon il reste `Prometteur mais à retester`.
 - **Seuils checklist** : 30 trades, score strictement positif, drawdown à surveiller dès 20 % et bloquant dès 30 %, win rate exploitable dès 40 %, au moins 100 combinaisons, au moins 100 000 lignes ou 180 jours si l'information existe. `Test rapide local` reste non représentatif.
@@ -277,6 +281,7 @@ pip install -r requirements-server.txt
 | Seuils Champion figés dans le code | Corrigé | Réglages globaux persistants avec valeurs par défaut et reset depuis Streamlit |
 | Décisions Champion non traçables dans le temps | Corrigé | Journal atomique par job, affiché dans l'UI et inclus dans les exports |
 | Difficile de savoir quoi faire ensuite avec plusieurs Champions/Favoris | Corrigé | Roadmap Champion avec maturité, filtres, prochaine action et résumé Accueil |
+| Retester un Champion prometteur demande trop de réglages manuels | Corrigé | Plan de retest qui propose les limites, peut dupliquer la config ou lancer un nouveau job |
 
 ---
 

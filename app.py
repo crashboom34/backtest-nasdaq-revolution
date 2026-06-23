@@ -76,6 +76,14 @@ from champion_roadmap import (
     filter_roadmap_items,
     roadmap_summary,
 )
+from retest_plan import (
+    RETEST_PLAN_EVENT_DUPLICATED,
+    RETEST_PLAN_EVENT_LAUNCHED,
+    RETEST_PLAN_EVENT_NOTE_TAGGED,
+    apply_retest_plan_to_config,
+    build_retest_plan,
+    record_retest_plan_decision,
+)
 from validation_settings import (
     load_validation_settings,
     reset_validation_settings,
@@ -1540,6 +1548,47 @@ def _duplicate_config_to_configuration(config: dict, source_job_id: str = "") ->
     st.toast("Config dupliquée. Tu peux la modifier avant de lancer.", icon="📋")
 
 
+def _duplicate_retest_plan_to_configuration(record, plan) -> None:
+    planned_config = apply_retest_plan_to_config(
+        record.config,
+        plan,
+        source_job_id=record.job_id,
+    )
+    _load_config_into_widgets(planned_config)
+    st.session_state["opt_focus_config_tab"] = True
+    st.session_state["opt_config_loaded_from_job"] = record.job_id
+    try:
+        record_retest_plan_decision(
+            record.job_dir,
+            RETEST_PLAN_EVENT_DUPLICATED,
+            "Plan de retest dupliqué vers Configuration.",
+            plan,
+        )
+    except (OSError, ValueError) as exc:
+        st.warning(f"Plan appliqué, mais historique non enregistré : {exc}", icon=None)
+    st.toast("Plan de retest chargé dans Configuration.", icon="📋")
+
+
+def _launch_retest_plan(record, plan):
+    planned_config = apply_retest_plan_to_config(
+        record.config,
+        plan,
+        source_job_id=record.job_id,
+    )
+    launched = _launch_optimizer(planned_config)
+    try:
+        record_retest_plan_decision(
+            record.job_dir,
+            RETEST_PLAN_EVENT_LAUNCHED,
+            f"Retest lancé dans le nouveau job {launched.job_id}.",
+            plan,
+            new_job_id=launched.job_id,
+        )
+    except (OSError, ValueError) as exc:
+        st.warning(f"Retest lancé, mais historique non enregistré : {exc}", icon=None)
+    return launched
+
+
 def _render_job_config_actions(config: dict, source_job_id: str, key_prefix: str) -> None:
     if not config:
         return
@@ -2029,6 +2078,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
         "🏆 Champions / Favoris",
         "📋 Rapport Champion",
         "🗺️ Roadmap Champion",
+        "🧪 Plan de retest",
         "⚖️ Comparaison de jobs",
     ]
     if st.session_state.pop("opt_focus_config_tab", False):
@@ -2046,6 +2096,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
         sub_featured,
         sub_champion_report,
         sub_champion_roadmap,
+        sub_retest_plan,
         sub_comparison,
     ) = st.tabs(
         subtab_labels,
@@ -2105,7 +2156,14 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
             _render_champion_roadmap_tab()
 
     # ════════════════════════════════════════════════════════════
-    # SOUS-ONGLET H : COMPARAISON
+    # SOUS-ONGLET H : PLAN DE RETEST
+    # ════════════════════════════════════════════════════════════
+    with sub_retest_plan:
+        if getattr(sub_retest_plan, "open", False):
+            _render_retest_plan_tab()
+
+    # ════════════════════════════════════════════════════════════
+    # SOUS-ONGLET I : COMPARAISON
     # ════════════════════════════════════════════════════════════
     with sub_comparison:
         if getattr(sub_comparison, "open", False):
@@ -4897,6 +4955,14 @@ def _open_champion_report(job_id: str) -> None:
     )
 
 
+def _open_retest_plan(job_id: str) -> None:
+    st.session_state["retest_plan_job_id"] = job_id
+    _switch_main_tab(
+        MAIN_TAB_OPTIMIZATION,
+        opt_subtab=OPT_SUBTAB_RETEST_PLAN,
+    )
+
+
 def _render_champion_roadmap_tab() -> None:
     st.markdown("### Roadmap Champion")
     st.caption(
@@ -4996,7 +5062,7 @@ def _render_champion_roadmap_tab() -> None:
     selected_item = next(item for item in filtered if item.job_id == selected_action_job)
     record = selected_item.record
     with st.container(border=True):
-        r1, r2 = st.columns([1.2, 4])
+        r1, r2, r3 = st.columns([1.2, 1.2, 3])
         with r1:
             can_open_report = record.annotation.status in ("Champion", "Favori")
             if st.button(
@@ -5007,6 +5073,14 @@ def _render_champion_roadmap_tab() -> None:
             ):
                 _open_champion_report(record.job_id)
         with r2:
+            if st.button(
+                "Préparer retest",
+                key=f"roadmap_open_retest_{record.job_id}",
+                width="stretch",
+                disabled=record.annotation.status not in ("Champion", "Favori"),
+            ):
+                _open_retest_plan(record.job_id)
+        with r3:
             st.markdown(f"**{selected_item.maturity_status}**")
             st.caption(selected_item.recommended_action)
         _render_comparison_job_actions(
@@ -5020,6 +5094,159 @@ def _render_champion_roadmap_tab() -> None:
                 record.job_dir,
                 record.status,
             )
+
+
+def _render_retest_plan_tab() -> None:
+    st.markdown("### Plan de retest")
+    st.caption(
+        "Prépare un nouveau test plus sérieux à partir d'un Champion ou Favori, "
+        "sans modifier le job d'origine."
+    )
+
+    settings = load_validation_settings()
+    featured = [
+        job for job in featured_jobs(opt_store.list_jobs())
+        if str(job.get("status", "")).lower() == "completed"
+    ]
+    records = load_comparison_records(featured)
+    records = [
+        record for record in records
+        if record.annotation.status in ("Champion", "Favori")
+    ]
+    if not records:
+        st.info(
+            "Aucun Champion ou Favori terminé pour préparer un retest. "
+            "Classe d'abord un job depuis Résultats.",
+            icon=None,
+        )
+        return
+
+    records_by_id = {record.job_id: record for record in records}
+    selected_id = st.selectbox(
+        "Champion ou favori à retester",
+        options=list(records_by_id),
+        format_func=lambda job_id: _comparison_option_label(records_by_id[job_id]),
+        key="retest_plan_job_id",
+    )
+    record = records_by_id[selected_id]
+    plan = build_retest_plan(record, settings=settings, cpu_count=os.cpu_count())
+
+    with st.container(border=True):
+        title_col, action_col = st.columns([3.5, 1.2])
+        with title_col:
+            st.markdown(f"#### `{record.job_id}`")
+            st.caption(
+                f"{_annotation_label(record.annotation)} · {record.asset}/{record.timeframe} · "
+                f"{record.preset}"
+            )
+        with action_col:
+            if st.button(
+                "Voir résultats",
+                key=f"retest_plan_view_{record.job_id}",
+                width="stretch",
+            ):
+                _show_results_for_run(record.job_id, record.job_dir)
+                st.rerun()
+        if record.annotation.note:
+            st.write(record.annotation.note)
+        if record.annotation.tags:
+            st.caption("Tags : " + " · ".join(record.annotation.tags))
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Score", _format_report_metric(record.score, decimals=2))
+    m2.metric("Trades", _format_report_metric(record.trades, decimals=0))
+    m3.metric("Drawdown", _format_report_metric(record.drawdown_pct, " %"))
+    m4.metric("Combinaisons", _format_report_metric(record.combinations, decimals=0))
+
+    st.markdown("#### Proposition")
+    st.table(pd.DataFrame([{
+        "Preset recommandé": plan.recommended_preset,
+        "Max rows": "Historique complet" if plan.max_rows is None else f"{plan.max_rows:,}",
+        "Max combinaisons": "Illimité" if plan.max_combinations is None else f"{plan.max_combinations:,}",
+        "Workers": plan.workers,
+        "Benchmark": f"{plan.benchmark_n_sample}×",
+        "Timeframe": record.timeframe,
+        "Fichier de données": record.data_file,
+    }]).set_index("Preset recommandé"))
+
+    st.info(plan.justification, icon=None)
+    if plan.suggested_tags:
+        st.caption("Tags conseillés : " + " · ".join(plan.suggested_tags))
+    if plan.launch_warning:
+        st.warning(plan.launch_warning, icon=None)
+
+    active_jobs = _list_active_jobs()
+    if active_jobs:
+        st.warning(
+            "Un job est actif : le lancement du retest est désactivé pour éviter deux optimisations en parallèle.",
+            icon=None,
+        )
+
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        if st.button(
+            "Dupliquer vers Configuration",
+            key=f"retest_duplicate_{record.job_id}",
+            width="stretch",
+            type="secondary",
+            disabled=not bool(record.config),
+        ):
+            _duplicate_retest_plan_to_configuration(record, plan)
+            st.rerun()
+    with a2:
+        if st.button(
+            "Lancer le retest",
+            key=f"retest_launch_{record.job_id}",
+            width="stretch",
+            disabled=bool(active_jobs) or not bool(record.config),
+        ):
+            try:
+                launched = _launch_retest_plan(record, plan)
+            except ActiveJobExistsError as exc:
+                st.error(str(exc), icon=None)
+                _render_active_jobs_reconnect_panel(exc.active_jobs, key_prefix="retest_active")
+            else:
+                _remember_job_for_tracking({
+                    "job_id": launched.job_id,
+                    "job_dir": launched.job_dir,
+                })
+                st.success(f"Nouveau job de retest créé : `{launched.job_id}`")
+                st.rerun()
+    with a3:
+        if st.button(
+            "Ajouter note/tag",
+            key=f"retest_note_tag_{record.job_id}",
+            width="stretch",
+            disabled=not bool(plan.suggested_tags),
+        ):
+            merged_tags = list(record.annotation.tags)
+            for tag in plan.suggested_tags:
+                if tag in ANNOTATION_TAGS and tag not in merged_tags:
+                    merged_tags.append(tag)
+            note_line = f"Plan de retest : {plan.justification}"
+            note = record.annotation.note.strip()
+            note = f"{note}\n\n{note_line}" if note else note_line
+            try:
+                save_annotation(
+                    record.job_dir,
+                    status=record.annotation.status,
+                    note=note,
+                    tags=merged_tags,
+                )
+                record_retest_plan_decision(
+                    record.job_dir,
+                    RETEST_PLAN_EVENT_NOTE_TAGGED,
+                    "Note et tags du plan de retest ajoutés.",
+                    plan,
+                )
+            except (OSError, ValueError) as exc:
+                st.error(f"Note/tag non enregistrés : {exc}", icon=None)
+            else:
+                st.toast("Note et tags ajoutés.", icon="📝")
+                st.rerun()
+
+    with st.expander("Modifier manuellement l'annotation", expanded=False):
+        _render_job_annotation_editor(record.job_id, record.job_dir, record.status)
 
 
 def _render_job_comparison_tab() -> None:
@@ -5129,6 +5356,7 @@ OPT_SUBTAB_HISTORY = "📂 Historique Runs"
 OPT_SUBTAB_FEATURED = "🏆 Champions / Favoris"
 OPT_SUBTAB_CHAMPION_REPORT = "📋 Rapport Champion"
 OPT_SUBTAB_CHAMPION_ROADMAP = "🗺️ Roadmap Champion"
+OPT_SUBTAB_RETEST_PLAN = "🧪 Plan de retest"
 OPT_SUBTAB_COMPARISON = "⚖️ Comparaison de jobs"
 
 
