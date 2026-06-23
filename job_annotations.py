@@ -79,6 +79,7 @@ def save_annotation(
     if status not in ANNOTATION_STATUSES:
         raise ValueError(f"Statut d'annotation invalide : {status}")
 
+    previous = load_annotation(job_dir)
     annotation = JobAnnotation(
         status=status,
         note=str(note or "").strip(),
@@ -102,6 +103,12 @@ def save_annotation(
                 tmp_path.unlink()
             except OSError:
                 pass
+    from job_decisions import record_annotation_changes
+    try:
+        record_annotation_changes(job_dir, previous, annotation)
+    except (OSError, ValueError):
+        # L'annotation reste utilisable même si son journal annexe est indisponible.
+        pass
     return annotation
 
 

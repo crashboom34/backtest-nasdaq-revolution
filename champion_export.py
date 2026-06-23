@@ -19,6 +19,10 @@ def champion_export_filename(report: ChampionReport, extension: str) -> str:
 def render_champion_markdown(report: ChampionReport) -> str:
     record = report.record
     annotation = record.annotation
+    decision_history = [
+        f"- **{event.timestamp or 'Date inconnue'}** — {event.message}"
+        for event in report.decisions
+    ] or ["- Aucun événement enregistré."]
     lines = [
         f"# Rapport Champion - {record.job_id}",
         "",
@@ -54,6 +58,10 @@ def render_champion_markdown(report: ChampionReport) -> str:
         "",
         f"**Recommandation de validation :** {report.validation.recommendation}",
         "",
+        "## Historique des décisions",
+        "",
+        *decision_history,
+        "",
         "## Décision recommandée",
         "",
         f"**{report.decision.title}**",
@@ -88,6 +96,13 @@ def render_champion_html(report: ChampionReport) -> str:
         f"<td><strong>{html.escape(item.status)}</strong><br>{html.escape(item.detail)}</td>"
         "</tr>"
         for item in report.validation.criteria
+    )
+    decision_history = _html_list(
+        [
+            f"{event.timestamp or 'Date inconnue'} — {event.message}"
+            for event in report.decisions
+        ],
+        "Aucun événement enregistré.",
     )
     title = f"Rapport Champion - {record.job_id}"
     return f"""<!doctype html>
@@ -133,6 +148,10 @@ def render_champion_html(report: ChampionReport) -> str:
     <table>{validation_rows}</table>
     <p><strong>Verdict global : {html.escape(report.validation.verdict)}</strong></p>
     <p><strong>Recommandation de validation :</strong> {html.escape(report.validation.recommendation)}</p>
+  </section>
+  <section>
+    <h2>Historique des décisions</h2>
+    {decision_history}
   </section>
   <section class="decision">
     <h2>Décision recommandée</h2>

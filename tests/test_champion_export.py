@@ -10,6 +10,11 @@ from champion_export import (
 from champion_report import load_champion_report
 from champion_validation import ChampionValidationSettings
 from job_annotations import save_annotation
+from job_decisions import (
+    CATEGORY_ACTION,
+    CATEGORY_EXPORT,
+    append_decision_event,
+)
 
 
 def _write_json(path: Path, data: dict) -> None:
@@ -151,3 +156,32 @@ def test_exports_use_configured_thresholds(tmp_path):
     assert "seuil conseillé : 75" in markdown
     assert "seuil minimum : 10.00" in markdown
     assert "seuil conseillé : 300" in html
+
+
+def test_exports_include_decision_history(tmp_path):
+    report, job_dir = _report(tmp_path)
+    append_decision_event(
+        job_dir,
+        "export_markdown",
+        CATEGORY_EXPORT,
+        "Rapport Markdown exporté.",
+    )
+    append_decision_event(
+        job_dir,
+        "config_duplicated",
+        CATEGORY_ACTION,
+        "Configuration dupliquée.",
+    )
+    report = load_champion_report({
+        "job_id": "job_export",
+        "job_dir": str(job_dir),
+        "status": "completed",
+        "date": "2026-06-21T14:30:00",
+    })
+
+    markdown = render_champion_markdown(report)
+    html = render_champion_html(report)
+
+    assert "Historique des décisions" in markdown
+    assert "Rapport Markdown exporté." in markdown
+    assert "Configuration dupliquée." in html

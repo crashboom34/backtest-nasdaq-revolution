@@ -17,6 +17,7 @@ import math
 import datetime
 import urllib.parse
 import html
+from dataclasses import asdict
 import history_store as hs
 import optimization_store as opt_store
 from job_artifacts import (
@@ -35,6 +36,15 @@ from job_annotations import (
     filter_jobs_by_annotation,
     load_annotation,
     save_annotation,
+)
+from job_decisions import (
+    CATEGORY_ACTION,
+    CATEGORY_ANNOTATION,
+    CATEGORY_EXPORT,
+    CATEGORY_SETTINGS,
+    append_decision_event,
+    filter_decision_events,
+    load_decision_events,
 )
 from job_comparison import (
     best_job,
@@ -1379,7 +1389,16 @@ def _launch_optimizer(config_dict: dict):
 def _launch_config_as_new_job(config: dict, source_job_id: str = ""):
     """Relance une config existante dans un nouveau dossier job."""
     cfg = clone_config_for_new_job(config, source_job_id=source_job_id)
-    return _launch_optimizer(cfg)
+    launched = _launch_optimizer(cfg)
+    if source_job_id:
+        _record_job_decision(
+            source_job_id,
+            "config_relaunched",
+            CATEGORY_ACTION,
+            f"Configuration relancée dans le nouveau job {launched.job_id}.",
+            new_state={"new_job_id": launched.job_id},
+        )
+    return launched
 
 
 def _date_from_config(value):
@@ -1504,6 +1523,13 @@ def _duplicate_config_to_configuration(config: dict, source_job_id: str = "") ->
     _load_config_into_widgets(config)
     st.session_state["opt_focus_config_tab"] = True
     st.session_state["opt_config_loaded_from_job"] = source_job_id
+    if source_job_id:
+        _record_job_decision(
+            source_job_id,
+            "config_duplicated",
+            CATEGORY_ACTION,
+            "Configuration dupliquée dans le formulaire.",
+        )
     st.toast("Config dupliquée. Tu peux la modifier avant de lancer.", icon="📋")
 
 
@@ -1558,6 +1584,88 @@ def _annotation_label(annotation: JobAnnotation) -> str:
     if not annotation.status:
         return "Non classé"
     return f"{_ANNOTATION_ICONS.get(annotation.status, '')} {annotation.status}".strip()
+
+
+def _record_job_decision(
+    job_id: str,
+    event_type: str,
+    category: str,
+    message: str,
+    old_state: dict = None,
+    new_state: dict = None,
+) -> None:
+    if not job_id:
+        return
+    job_dir = _job_dir_for_run(job_id)
+    try:
+        append_decision_event(
+            job_dir,
+            event_type,
+            category,
+            message,
+            old_state=old_state,
+            new_state=new_state,
+        )
+    except (OSError, ValueError) as exc:
+        st.warning(f"Action réalisée, mais historique non enregistré : {exc}", icon=None)
+
+
+def _record_export_decision(job_id: str, export_format: str) -> None:
+    normalized = export_format.lower()
+    _record_job_decision(
+        job_id,
+        f"export_{normalized}",
+        CATEGORY_EXPORT,
+        f"Rapport {export_format} exporté.",
+        new_state={"format": normalized},
+    )
+
+
+_DECISION_FILTERS = {
+    "Tous les événements": None,
+    "Annotations": CATEGORY_ANNOTATION,
+    "Exports": CATEGORY_EXPORT,
+    "Relances / duplications": CATEGORY_ACTION,
+    "Réglages": CATEGORY_SETTINGS,
+}
+
+
+def _render_decision_history(
+    job_dir: str,
+    key_prefix: str,
+    compact: bool = False,
+) -> None:
+    events = load_decision_events(job_dir)
+    if not events:
+        st.caption("Aucune décision enregistrée pour ce job.")
+        return
+
+    filter_label = st.selectbox(
+        "Filtrer l'historique",
+        options=list(_DECISION_FILTERS),
+        key=f"{key_prefix}_decision_filter",
+        label_visibility="collapsed" if compact else "visible",
+    )
+    filtered = filter_decision_events(events, _DECISION_FILTERS[filter_label])
+    if not filtered:
+        st.caption("Aucun événement dans cette catégorie.")
+        return
+
+    rows = [
+        {
+            "Date": event.timestamp.replace("T", " "),
+            "Type": event.category.capitalize(),
+            "Événement": event.message,
+        }
+        for event in reversed(filtered)
+    ]
+    if compact:
+        rows = rows[:5]
+    st.dataframe(
+        pd.DataFrame(rows),
+        width="stretch",
+        hide_index=True,
+    )
 
 
 def _render_annotation_summary(annotation: JobAnnotation, show_note: bool = True) -> None:
@@ -4342,6 +4450,12 @@ def _render_featured_jobs_tab() -> None:
             active_jobs,
             key_prefix="featured",
         )
+        with st.expander("Historique des décisions", expanded=False):
+            _render_decision_history(
+                record.job_dir,
+                key_prefix=f"featured_{record.job_id}",
+                compact=True,
+            )
 
 
 def _champion_report_option_label(report: ChampionReport) -> str:
@@ -4469,30 +4583,47 @@ def _render_champion_validation_settings() -> ChampionValidationSettings:
                 )
 
         if save_clicked:
+            updated_settings = ChampionValidationSettings(
+                min_trades=int(min_trades),
+                min_score=float(min_score),
+                watch_drawdown_pct=float(watch_drawdown),
+                blocking_drawdown_pct=float(blocking_drawdown),
+                min_win_rate_pct=float(min_win_rate),
+                min_combinations=int(min_combinations),
+                min_rows=int(min_rows),
+                min_period_days=int(min_period_days),
+                quick_preset_non_validating=bool(quick_non_validating),
+            )
             try:
-                save_validation_settings(ChampionValidationSettings(
-                    min_trades=int(min_trades),
-                    min_score=float(min_score),
-                    watch_drawdown_pct=float(watch_drawdown),
-                    blocking_drawdown_pct=float(blocking_drawdown),
-                    min_win_rate_pct=float(min_win_rate),
-                    min_combinations=int(min_combinations),
-                    min_rows=int(min_rows),
-                    min_period_days=int(min_period_days),
-                    quick_preset_non_validating=bool(quick_non_validating),
-                ))
+                saved_settings = save_validation_settings(updated_settings)
             except (OSError, TypeError, ValueError) as exc:
                 st.error(f"Seuils non enregistrés : {exc}", icon=None)
             else:
+                _record_job_decision(
+                    st.session_state.get("champion_report_job_id", ""),
+                    "validation_settings_changed",
+                    CATEGORY_SETTINGS,
+                    "Seuils de validation Champion modifiés.",
+                    old_state=asdict(settings),
+                    new_state=asdict(saved_settings),
+                )
                 _clear_validation_setting_widgets()
                 st.toast("Seuils Champion enregistrés.", icon="💾")
                 st.rerun()
         if reset_clicked:
             try:
-                reset_validation_settings()
+                default_settings = reset_validation_settings()
             except OSError as exc:
                 st.error(f"Réinitialisation impossible : {exc}", icon=None)
             else:
+                _record_job_decision(
+                    st.session_state.get("champion_report_job_id", ""),
+                    "validation_settings_reset",
+                    CATEGORY_SETTINGS,
+                    "Seuils de validation Champion réinitialisés.",
+                    old_state=asdict(settings),
+                    new_state=asdict(default_settings),
+                )
                 _clear_validation_setting_widgets()
                 st.toast("Seuils Champion réinitialisés.", icon="↩️")
                 st.rerun()
@@ -4662,7 +4793,8 @@ def _render_champion_report_tab() -> None:
             mime="text/markdown; charset=utf-8",
             key=f"champion_report_md_{record.job_id}",
             width="stretch",
-            on_click="ignore",
+            on_click=_record_export_decision,
+            args=(record.job_id, "Markdown"),
         )
     with download_html:
         st.download_button(
@@ -4672,8 +4804,18 @@ def _render_champion_report_tab() -> None:
             mime="text/html; charset=utf-8",
             key=f"champion_report_html_{record.job_id}",
             width="stretch",
-            on_click="ignore",
+            on_click=_record_export_decision,
+            args=(record.job_id, "HTML"),
         )
+
+    st.markdown("#### Historique des décisions")
+    st.caption(
+        "Le journal retrace les classements, notes, exports et réutilisations de configuration."
+    )
+    _render_decision_history(
+        record.job_dir,
+        key_prefix=f"champion_report_{record.job_id}",
+    )
 
     st.markdown("#### Fichiers disponibles")
     if report.available_files:

@@ -8,6 +8,7 @@ from typing import Optional
 from job_annotations import FEATURED_STATUSES
 from job_artifacts import list_job_download_files
 from job_comparison import JobComparisonRecord, load_job_record
+from job_decisions import DecisionEvent, load_decision_events
 from champion_validation import (
     ChampionValidation,
     ChampionValidationSettings,
@@ -40,6 +41,7 @@ class ChampionReport:
     alerts: tuple[str, ...]
     decision: ChampionDecision
     validation: ChampionValidation
+    decisions: tuple[DecisionEvent, ...]
 
     @property
     def missing_metrics(self) -> tuple[str, ...]:
@@ -73,6 +75,7 @@ def load_champion_report(
         alerts=tuple(alerts),
         decision=decision,
         validation=evaluate_champion(record, settings),
+        decisions=tuple(load_decision_events(record.job_dir)),
     )
 
 

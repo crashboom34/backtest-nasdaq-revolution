@@ -38,6 +38,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `dashboard.py`           | Agrège les KPIs d'accueil : disque, jobs, données disponibles, alertes |
 | `job_comparison.py`      | Normalise les métriques récentes/legacy et prépare la comparaison de 2 à 5 jobs |
 | `job_annotations.py`     | Lit/écrit les classements, notes et tags dans `job_notes.json` sans toucher aux résultats |
+| `job_decisions.py`       | Journalise atomiquement les décisions utilisateur dans `job_decisions.json` |
 | `champion_report.py`     | Construit la fiche Champion/Favori, détecte forces/alertes et propose une décision simple |
 | `champion_export.py`     | Génère en mémoire les exports Markdown et HTML du Rapport Champion |
 | `champion_validation.py` | Évalue les 8 critères de sérieux d'un Champion/Favori et produit un verdict global |
@@ -88,6 +89,7 @@ results/job_xxx/
 ├── report.html            # Rapport standalone (pas de dépendances externes)
 ├── logs.txt               # Journal d'exécution
 ├── job_notes.json         # Annotation utilisateur optionnelle, séparée des résultats
+├── job_decisions.json     # Historique optionnel des décisions et actions utilisateur
 └── archive.zip            # 7 fichiers bundlés (exclut tested.json, meta.json, stop.flag)
 ```
 
@@ -142,10 +144,14 @@ Ou en terminal :
 - **Comparaison jobs** : l'onglet `Optimisation > Comparaison de jobs` utilise `job_comparison.py`. Il lit d'abord `metrics.json`, puis retombe sur `meta.json` et `results.csv` pour les anciens jobs.
 - **Comparabilité** : afficher un avertissement si stratégie, actif, timeframe ou fichier de données diffèrent. La page reste lisible et ne bloque pas les anciens jobs incomplets.
 - **Annotations jobs** : `job_notes.json` contient uniquement `status`, `note`, `tags`, `updated_at`. Ne jamais écrire ces données dans `config_used.json`, `metrics.json` ou `results.csv`.
-- **Archive et annotations** : `job_notes.json` reste volontairement hors de `archive.zip`, qui conserve exactement ses 7 artefacts calculés.
+- **Journal des décisions** : `job_decisions.json` est append-only et séparé des résultats. Il trace les changements de statut, note, tags, les exports, les duplications, les relances et les changements de seuils liés au Champion sélectionné.
+- **Écriture du journal** : chaque événement contient `timestamp`, `event_type`, `category`, `message`, `old_state` et `new_state`. L'écriture utilise un fichier temporaire puis `os.replace()`.
+- **Compatibilité journal** : un job ancien sans `job_decisions.json`, avec un fichier absent ou illisible, reste affichable avec un historique vide.
+- **Archive et annotations** : `job_notes.json` et `job_decisions.json` restent volontairement hors de `archive.zip`, qui conserve exactement ses 7 artefacts calculés.
 - **Classements disponibles** : `Champion`, `Favori`, `À revoir`, `Rejeté`. Les anciens jobs sans `job_notes.json` sont affichés comme non classés.
 - **Rapport Champion** : la sous-page `Optimisation > Rapport Champion` ne lit que les artefacts existants. Elle n'écrit jamais dans `config_used.json`, `metrics.json`, `results.csv` ou les autres résultats calculés.
 - **Exports Rapport Champion** : Markdown et HTML sont générés en mémoire pour `st.download_button`. Ils ne sont pas écrits dans le dossier job et ne sont pas ajoutés à `archive.zip`.
+- **Historique Rapport Champion** : le Rapport Champion et la section Champions/Favoris affichent le journal avec filtres annotations, exports, relances/duplications et réglages. Les exports Markdown/HTML incluent aussi cet historique.
 - **Checklist Champion** : 8 critères sont calculés en lecture seule : trades, score, drawdown, win rate, métriques essentielles, preset, combinaisons et période/volume de données. Statuts possibles : `Validé`, `À surveiller`, `Bloquant`, `Inconnu`.
 - **Verdict Champion** : priorité aux métriques essentielles manquantes (`Données incomplètes`), puis aux critères bloquants (`Insuffisant`). Un job n'est `Candidat sérieux` que si les 8 critères sont validés ; sinon il reste `Prometteur mais à retester`.
 - **Seuils checklist** : 30 trades, score strictement positif, drawdown à surveiller dès 20 % et bloquant dès 30 %, win rate exploitable dès 40 %, au moins 100 combinaisons, au moins 100 000 lignes ou 180 jours si l'information existe. `Test rapide local` reste non représentatif.
@@ -265,6 +271,7 @@ pip install -r requirements-server.txt
 | Rapport Champion difficile à partager | Corrigé | Exports Markdown et HTML téléchargeables, autonomes et générés en mémoire |
 | Champion marqué sans preuve de robustesse | Corrigé | Checklist explicite avec seuils, verdict global et recommandations de retest |
 | Seuils Champion figés dans le code | Corrigé | Réglages globaux persistants avec valeurs par défaut et reset depuis Streamlit |
+| Décisions Champion non traçables dans le temps | Corrigé | Journal atomique par job, affiché dans l'UI et inclus dans les exports |
 
 ---
 
