@@ -98,6 +98,14 @@ from retest_links import (
     RetestLink,
     build_retest_link_index,
 )
+from demo_data import (
+    DEMO_BASE_SESSION_KEY,
+    DEMO_PREVIOUS_BASE_SESSION_KEY,
+    DEMO_SESSION_KEY,
+    default_demo_base_dir,
+    ensure_demo_dataset,
+    is_demo_base_dir,
+)
 from validation_settings import (
     load_validation_settings,
     reset_validation_settings,
@@ -1403,11 +1411,107 @@ def render_new_strategy_tab():
 
 
 # ═══════════════════════════════════════════════════════════════════
+# MODE DÉMO UI
+# ═══════════════════════════════════════════════════════════════════
+
+def _is_demo_ui_enabled() -> bool:
+    return bool(st.session_state.get(DEMO_SESSION_KEY, False))
+
+
+def _demo_base_dir_label() -> str:
+    return str(st.session_state.get(DEMO_BASE_SESSION_KEY) or default_demo_base_dir())
+
+
+def _enable_demo_ui_mode() -> None:
+    dataset = ensure_demo_dataset()
+    if DEMO_PREVIOUS_BASE_SESSION_KEY not in st.session_state:
+        st.session_state[DEMO_PREVIOUS_BASE_SESSION_KEY] = os.environ.get("BACKTEST_BASE_DIR")
+    st.session_state[DEMO_SESSION_KEY] = True
+    st.session_state[DEMO_BASE_SESSION_KEY] = str(dataset.base_dir)
+    os.environ["BACKTEST_BASE_DIR"] = str(dataset.base_dir)
+
+
+def _disable_demo_ui_mode() -> None:
+    previous_base = st.session_state.pop(DEMO_PREVIOUS_BASE_SESSION_KEY, None)
+    if previous_base:
+        os.environ["BACKTEST_BASE_DIR"] = str(previous_base)
+    else:
+        os.environ.pop("BACKTEST_BASE_DIR", None)
+    st.session_state[DEMO_SESSION_KEY] = False
+    st.session_state.pop(DEMO_BASE_SESSION_KEY, None)
+    st.session_state.pop("opt_current_run_id", None)
+    st.session_state.pop("opt_view_run_id", None)
+    st.session_state.pop("opt_job_dirs", None)
+
+
+def _sync_demo_ui_environment() -> None:
+    if _is_demo_ui_enabled():
+        base_dir = st.session_state.get(DEMO_BASE_SESSION_KEY) or str(default_demo_base_dir())
+        st.session_state[DEMO_BASE_SESSION_KEY] = str(base_dir)
+        ensure_demo_dataset(base_dir)
+        os.environ["BACKTEST_BASE_DIR"] = str(base_dir)
+        return
+
+    current_base = os.environ.get("BACKTEST_BASE_DIR")
+    if is_demo_base_dir(current_base):
+        previous_base = st.session_state.get(DEMO_PREVIOUS_BASE_SESSION_KEY)
+        if previous_base:
+            os.environ["BACKTEST_BASE_DIR"] = str(previous_base)
+        else:
+            os.environ.pop("BACKTEST_BASE_DIR", None)
+
+
+def _render_demo_mode_banner() -> None:
+    if not _is_demo_ui_enabled():
+        return
+    st.warning(
+        "MODE DÉMO UI actif : l'application lit des données factices dans un dossier temporaire. "
+        "Aucun vrai dossier `results/` n'est utilisé.",
+        icon=None,
+    )
+    st.caption(f"Dossier démo : `{_demo_base_dir_label()}`")
+
+
+def _render_demo_mode_panel() -> None:
+    with st.container(border=True):
+        st.markdown("### Mode démo UI")
+        st.caption(
+            "Utilise un jeu de jobs factices pour tester Accueil, Historique, Résultats, "
+            "Comparaison, Rapport Champion, Roadmap, Pipeline et Plan de retest."
+        )
+        if _is_demo_ui_enabled():
+            st.success("Données factices actives. Les vrais résultats restent séparés.", icon=None)
+            st.caption(f"Lecture actuelle : `{_demo_base_dir_label()}\\results`")
+            if st.button("Désactiver mode démo", key="demo_disable", width="stretch"):
+                _disable_demo_ui_mode()
+                st.toast("Mode démo désactivé. Retour aux vrais jobs.", icon="✅")
+                st.rerun()
+            return
+
+        st.info("Utiliser jeux de jobs factices sans lancer de vrai backtest.", icon=None)
+        if st.button("Activer mode démo UI", key="demo_enable", width="stretch"):
+            _enable_demo_ui_mode()
+            st.toast("Mode démo activé avec des jobs factices.", icon="🧪")
+            st.rerun()
+
+
+def _demo_launch_disabled_message() -> None:
+    st.info(
+        "Mode démo UI actif : les lancements et relances sont désactivés pour éviter "
+        "tout vrai backtest. Tu peux tester la lecture, les rapports, les filtres et la duplication.",
+        icon=None,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
 # ONGLET OPTIMISATION
 # ═══════════════════════════════════════════════════════════════════
 
 def _launch_optimizer(config_dict: dict):
     """Lance optimizer_process.py en mode job results/job_xxx/."""
+    if _is_demo_ui_enabled():
+        _demo_launch_disabled_message()
+        st.stop()
     return launch_optimizer_job(
         config_dict,
         stdout=subprocess.DEVNULL,
@@ -1608,11 +1712,14 @@ def _render_job_config_actions(config: dict, source_job_id: str, key_prefix: str
         return
 
     active_jobs = _list_active_jobs()
+    demo_mode = _is_demo_ui_enabled()
     if active_jobs:
         st.warning(
             "Un job est actif : la relance est bloquée pour éviter deux optimisations en parallèle.",
             icon=None,
         )
+    if demo_mode:
+        _demo_launch_disabled_message()
 
     a1, a2, _ = st.columns([1.35, 1.35, 4.3])
     with a1:
@@ -1620,7 +1727,7 @@ def _render_job_config_actions(config: dict, source_job_id: str, key_prefix: str
             "Relancer même config",
             key=f"{key_prefix}_relaunch_{source_job_id}",
             width="stretch",
-            disabled=bool(active_jobs),
+            disabled=bool(active_jobs) or demo_mode,
         ):
             try:
                 launched = _launch_config_as_new_job(config, source_job_id)
@@ -2792,7 +2899,11 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
     blocking_active_jobs = _list_active_jobs()
     launch_in_flight = bool(st.session_state.get("opt_launch_in_flight"))
 
-    if not data_ready:
+    if _is_demo_ui_enabled():
+        st.button("▶  Lancement désactivé en mode démo", disabled=True,
+                  width="stretch", key="opt_launch_demo_disabled")
+        _demo_launch_disabled_message()
+    elif not data_ready:
         st.button("▶  Lancer l'optimisation", disabled=True,
                   width="stretch", key="opt_launch_no_data")
         st.info("Ajoute d'abord un CSV pour l'actif et le timeframe sélectionnés.")
@@ -4247,7 +4358,7 @@ def _render_jobs_history_section(jobs: list):
                     "Relancer",
                     key=f"job_relaunch_{job_id}",
                     width="stretch",
-                    disabled=bool(_list_active_jobs()),
+                    disabled=bool(_list_active_jobs()) or _is_demo_ui_enabled(),
                     type="secondary",
                 ):
                     try:
@@ -4445,6 +4556,7 @@ def _render_comparison_job_actions(
     active_jobs: list,
     key_prefix: str = "compare",
 ) -> None:
+    demo_mode = _is_demo_ui_enabled()
     with st.container(border=True):
         title = f"`{record.job_id}`"
         if record.score is not None:
@@ -4490,7 +4602,7 @@ def _render_comparison_job_actions(
                 "Relancer même config",
                 key=f"{key_prefix}_relaunch_{record.job_id}",
                 width="stretch",
-                disabled=bool(active_jobs) or not bool(record.config),
+                disabled=bool(active_jobs) or demo_mode or not bool(record.config),
             ):
                 try:
                     launched = _launch_config_as_new_job(record.config, record.job_id)
@@ -5178,6 +5290,7 @@ def _render_pipeline_card(
     retest_links: tuple[RetestLink, ...] = (),
 ) -> None:
     record = card.item.record
+    demo_mode = _is_demo_ui_enabled()
     with st.container(border=True):
         title_col, action_col = st.columns([3, 2])
         with title_col:
@@ -5244,7 +5357,7 @@ def _render_pipeline_card(
                 "Relancer",
                 key=f"pipeline_relaunch_{record.job_id}",
                 width="stretch",
-                disabled=bool(active_jobs) or not bool(record.config),
+                disabled=bool(active_jobs) or demo_mode or not bool(record.config),
             ):
                 try:
                     launched = _launch_config_as_new_job(record.config, record.job_id)
@@ -5372,11 +5485,14 @@ def _render_retest_plan_tab() -> None:
         st.warning(plan.launch_warning, icon=None)
 
     active_jobs = _list_active_jobs()
+    demo_mode = _is_demo_ui_enabled()
     if active_jobs:
         st.warning(
             "Un job est actif : le lancement du retest est désactivé pour éviter deux optimisations en parallèle.",
             icon=None,
         )
+    if demo_mode:
+        _demo_launch_disabled_message()
 
     a1, a2, a3 = st.columns(3)
     with a1:
@@ -5394,7 +5510,7 @@ def _render_retest_plan_tab() -> None:
             "Lancer le retest",
             key=f"retest_launch_{record.job_id}",
             width="stretch",
-            disabled=bool(active_jobs) or not bool(record.config),
+            disabled=bool(active_jobs) or demo_mode or not bool(record.config),
         ):
             try:
                 launched = _launch_retest_plan(record, plan)
@@ -5606,6 +5722,7 @@ def render_home_tab():
         "Quand un job est terminé, ouvre l'historique pour consulter les résultats et télécharger les fichiers.",
         "info",
     )
+    _render_demo_mode_panel()
 
     disk_free_pct = (
         summary.disk_free_bytes / summary.disk_total_bytes * 100
@@ -6111,12 +6228,14 @@ def render_maintenance_tab():
 # ═══════════════════════════════════════════════════════════════════
 
 def main():
+    _sync_demo_ui_environment()
     strategies = load_strategies()
     if not strategies:
         st.error("Aucune stratégie trouvée dans le dossier `strategies/`.")
         return
 
     mod, params, initial_capital, spread, slip_in, slip_out, run_btn = build_sidebar(strategies)
+    _render_demo_mode_banner()
 
     # ── Onglets ───────────────────────────────────────────────
     main_tab_labels = [

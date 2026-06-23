@@ -46,6 +46,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `champion_pipeline.py`   | Regroupe les jobs annotés par étape visuelle de validation Champion |
 | `retest_plan.py`         | Propose un plan de retest plus sérieux et applique ses limites à une config clonée |
 | `retest_links.py`        | Lit le lien Champion source → retest → résultat sans modifier les artefacts bruts |
+| `demo_data.py`           | Génère un jeu de jobs factices temporaire pour tester l'UI sans toucher aux vrais `results/` |
 | `validation_settings.py` | Lit/écrit les seuils Champion globaux dans `settings/champion_validation.json` |
 | `ui_components.py`       | Petits helpers d'affichage Streamlit : en-têtes, panneaux d'aide, étapes |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
@@ -165,6 +166,9 @@ Ou en terminal :
 - **Chaîne de retest Pipeline** : `retest_links.py` relie un Champion/Favori source à ses retests en lecture seule. Il lit `retest_plan_source_job_id` dans la config clonée du retest et `new_job_id` dans l'événement `retest_plan_launched` du `job_decisions.json` source, puis affiche statut, score, trades et drawdown si disponibles.
 - **Compatibilité retests anciens** : si le retest ou ses métriques sont absents, l'UI affiche `non renseigné` ou `ancien job` sans crash. `config_used.json`, `metrics.json` et `results.csv` restent intacts.
 - **Accueil Pipeline** : l'Accueil résume les jobs suivis, candidats sérieux, jobs à retester et rejetés, avec un raccourci vers le Pipeline.
+- **Mode démo UI** : `demo_data.py` crée un `results/` factice dans le dossier temporaire système (`%TEMP%/backtest_nasdaq_demo_ui` sous Windows). Streamlit l'active depuis l'Accueil en pointant temporairement `BACKTEST_BASE_DIR` vers ce dossier, puis le restaure à la désactivation.
+- **Isolation démo** : le mode démo n'écrit jamais dans les vrais `results/`, `history/` ou `nasdaq_3m.csv`. Il sert uniquement à tester Accueil, Historique, Résultats, Comparaison, Rapport Champion, Roadmap, Pipeline, Plan de retest et les liens Champion → retest avec des données factices.
+- **Lancements en démo** : les boutons de lancement, relance et lancement de retest sont désactivés en mode démo UI pour éviter tout vrai backtest. Les actions de lecture, duplication, rapport, filtres et téléchargements restent disponibles.
 - **Plan de retest** : la sous-page `Optimisation > Plan de retest` sélectionne un Champion/Favori terminé et propose un preset, `max_rows`, `max_combinations`, workers et benchmark selon checklist, preset, trades, score, drawdown et données.
 - **Actions retest** : `Dupliquer vers Configuration` charge une config clonée avec les limites proposées. `Lancer le retest` crée un nouveau job sans écraser l'ancien si aucun job actif n'existe. `Ajouter note/tag` complète `job_notes.json` et le journal trace les actions dans `job_decisions.json`.
 - **Règles retest** : `Test rapide local` monte vers `Test moyen`; trop peu de trades pousse vers plus d'historique; drawdown élevé reste prudent avec tag `drawdown élevé`; données incomplètes demandent vérification/import; candidat sérieux relance sur plus d'historique avec limite contrôlée.
@@ -252,6 +256,7 @@ pip install -r requirements-server.txt
 - [x] Checklist Champion : 8 critères, 4 statuts, verdict global et recommandation intégrés à l'UI et aux exports
 - [x] Seuils Champion configurables : formulaire Streamlit, sauvegarde globale, reset défaut et repli robuste
 - [x] Pipeline Champion : étapes visuelles, cartes par job, actions rapides et résumé Accueil
+- [x] Mode démo UI : jobs factices temporaires, bannière visible, liens Champion → retest simulés et lancements désactivés
 
 ### Reste à faire (prochaines étapes suggérées)
 
