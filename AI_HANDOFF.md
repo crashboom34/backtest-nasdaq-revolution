@@ -45,6 +45,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `champion_roadmap.py`    | Agrège les jobs annotés en statuts de maturité et prochaine action |
 | `champion_pipeline.py`   | Regroupe les jobs annotés par étape visuelle de validation Champion |
 | `retest_plan.py`         | Propose un plan de retest plus sérieux et applique ses limites à une config clonée |
+| `retest_links.py`        | Lit le lien Champion source → retest → résultat sans modifier les artefacts bruts |
 | `validation_settings.py` | Lit/écrit les seuils Champion globaux dans `settings/champion_validation.json` |
 | `ui_components.py`       | Petits helpers d'affichage Streamlit : en-têtes, panneaux d'aide, étapes |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
@@ -161,6 +162,8 @@ Ou en terminal :
 - **Pipeline Champion** : la sous-page `Optimisation > Pipeline Champion` affiche les jobs annotés par étapes : `Détecté`, `Favori`, `Champion`, `À retester`, `Retest lancé`, `Candidat sérieux`, `Prêt validation avancée`, `Rejeté`.
 - **Règles Pipeline** : le classement combine annotation, maturité Roadmap, historique `job_decisions.json`, retest lancé, preset et tags. `Test rapide local`, trop peu de trades, trop peu de combinaisons ou demande de plus d'historique poussent vers `À retester`; un événement `retest_plan_launched` pousse vers `Retest lancé`.
 - **Actions Pipeline** : chaque carte propose Rapport Champion, Plan de retest, Résultats, duplication de config et relance si aucun job actif. Ces actions réutilisent les chemins existants et ne modifient jamais les résultats bruts.
+- **Chaîne de retest Pipeline** : `retest_links.py` relie un Champion/Favori source à ses retests en lecture seule. Il lit `retest_plan_source_job_id` dans la config clonée du retest et `new_job_id` dans l'événement `retest_plan_launched` du `job_decisions.json` source, puis affiche statut, score, trades et drawdown si disponibles.
+- **Compatibilité retests anciens** : si le retest ou ses métriques sont absents, l'UI affiche `non renseigné` ou `ancien job` sans crash. `config_used.json`, `metrics.json` et `results.csv` restent intacts.
 - **Accueil Pipeline** : l'Accueil résume les jobs suivis, candidats sérieux, jobs à retester et rejetés, avec un raccourci vers le Pipeline.
 - **Plan de retest** : la sous-page `Optimisation > Plan de retest` sélectionne un Champion/Favori terminé et propose un preset, `max_rows`, `max_combinations`, workers et benchmark selon checklist, preset, trades, score, drawdown et données.
 - **Actions retest** : `Dupliquer vers Configuration` charge une config clonée avec les limites proposées. `Lancer le retest` crée un nouveau job sans écraser l'ancien si aucun job actif n'existe. `Ajouter note/tag` complète `job_notes.json` et le journal trace les actions dans `job_decisions.json`.

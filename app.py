@@ -93,6 +93,11 @@ from retest_plan import (
     build_retest_plan,
     record_retest_plan_decision,
 )
+from retest_links import (
+    UNKNOWN_VALUE,
+    RetestLink,
+    build_retest_link_index,
+)
 from validation_settings import (
     load_validation_settings,
     reset_validation_settings,
@@ -5121,7 +5126,8 @@ def _render_champion_pipeline_tab() -> None:
         "sérieux, prêt pour une validation avancée ou rejeté."
     )
     settings = load_validation_settings()
-    pipeline = build_pipeline(opt_store.list_jobs(), settings=settings)
+    jobs = opt_store.list_jobs()
+    pipeline = build_pipeline(jobs, settings=settings)
     if not pipeline.cards:
         st.info(
             "Aucun job annoté pour le moment. Classe d'abord un job terminé en "
@@ -5150,6 +5156,7 @@ def _render_champion_pipeline_tab() -> None:
             icon=None,
         )
 
+    retest_links = build_retest_link_index(jobs)
     grouped = cards_by_stage(pipeline.cards)
     for stage in PIPELINE_STAGES:
         stage_cards = grouped.get(stage, [])
@@ -5158,10 +5165,18 @@ def _render_champion_pipeline_tab() -> None:
             st.caption("Aucun job dans cette étape.")
             continue
         for card in stage_cards:
-            _render_pipeline_card(card, active_jobs)
+            _render_pipeline_card(
+                card,
+                active_jobs,
+                retest_links.get(card.job_id, ()),
+            )
 
 
-def _render_pipeline_card(card, active_jobs: list) -> None:
+def _render_pipeline_card(
+    card,
+    active_jobs: list,
+    retest_links: tuple[RetestLink, ...] = (),
+) -> None:
     record = card.item.record
     with st.container(border=True):
         title_col, action_col = st.columns([3, 2])
@@ -5186,6 +5201,8 @@ def _render_pipeline_card(card, active_jobs: list) -> None:
             st.write(record.annotation.note)
         if record.annotation.tags:
             st.caption("Tags : " + " · ".join(record.annotation.tags))
+
+        _render_pipeline_retest_links(record.job_id, retest_links)
 
         a1, a2, a3, a4, a5 = st.columns(5)
         with a1:
@@ -5240,6 +5257,39 @@ def _render_pipeline_card(card, active_jobs: list) -> None:
                     })
                     st.success(f"Nouveau job créé : `{launched.job_id}`")
                     st.rerun()
+
+
+def _render_pipeline_retest_links(source_job_id: str, links: tuple[RetestLink, ...]) -> None:
+    st.markdown("##### Chaîne de retest")
+    if not links:
+        st.caption(
+            f"Champion source : `{source_job_id}` → retest associé : {UNKNOWN_VALUE}"
+        )
+        return
+
+    rows = []
+    for link in links:
+        status_info = _status_ui(link.retest_status)
+        rows.append({
+            "Champion source": link.source_job_id or UNKNOWN_VALUE,
+            "Retest associé": link.retest_job_id or UNKNOWN_VALUE,
+            "Statut du retest": f"{status_info['label']}",
+            "Score": _format_pipeline_metric(link.score, decimals=2),
+            "Trades": _format_pipeline_metric(link.trades, decimals=0),
+            "Drawdown": _format_pipeline_metric(link.drawdown_pct, suffix=" %"),
+            "Preset": link.preset or "ancien job",
+            "Fichier data": link.data_file or UNKNOWN_VALUE,
+        })
+    st.table(pd.DataFrame(rows))
+
+
+def _format_pipeline_metric(value, suffix: str = "", decimals: int = 1) -> str:
+    if value is None:
+        return UNKNOWN_VALUE
+    try:
+        return f"{float(value):.{decimals}f}{suffix}"
+    except (TypeError, ValueError):
+        return UNKNOWN_VALUE
 
 
 def _render_retest_plan_tab() -> None:
