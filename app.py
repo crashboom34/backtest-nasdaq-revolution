@@ -76,6 +76,15 @@ from champion_roadmap import (
     filter_roadmap_items,
     roadmap_summary,
 )
+from champion_pipeline import (
+    PIPELINE_STAGES,
+    STAGE_REJECTED,
+    STAGE_RETEST,
+    STAGE_RETEST_LAUNCHED,
+    cards_by_stage,
+    build_pipeline,
+    pipeline_summary,
+)
 from retest_plan import (
     RETEST_PLAN_EVENT_DUPLICATED,
     RETEST_PLAN_EVENT_LAUNCHED,
@@ -2078,6 +2087,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
         "🏆 Champions / Favoris",
         "📋 Rapport Champion",
         "🗺️ Roadmap Champion",
+        "🧭 Pipeline Champion",
         "🧪 Plan de retest",
         "⚖️ Comparaison de jobs",
     ]
@@ -2096,6 +2106,7 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
         sub_featured,
         sub_champion_report,
         sub_champion_roadmap,
+        sub_champion_pipeline,
         sub_retest_plan,
         sub_comparison,
     ) = st.tabs(
@@ -2156,14 +2167,21 @@ def render_optimization_tab(strategies: dict, mod, params: dict,
             _render_champion_roadmap_tab()
 
     # ════════════════════════════════════════════════════════════
-    # SOUS-ONGLET H : PLAN DE RETEST
+    # SOUS-ONGLET H : PIPELINE CHAMPION
+    # ════════════════════════════════════════════════════════════
+    with sub_champion_pipeline:
+        if getattr(sub_champion_pipeline, "open", False):
+            _render_champion_pipeline_tab()
+
+    # ════════════════════════════════════════════════════════════
+    # SOUS-ONGLET I : PLAN DE RETEST
     # ════════════════════════════════════════════════════════════
     with sub_retest_plan:
         if getattr(sub_retest_plan, "open", False):
             _render_retest_plan_tab()
 
     # ════════════════════════════════════════════════════════════
-    # SOUS-ONGLET I : COMPARAISON
+    # SOUS-ONGLET J : COMPARAISON
     # ════════════════════════════════════════════════════════════
     with sub_comparison:
         if getattr(sub_comparison, "open", False):
@@ -5096,6 +5114,134 @@ def _render_champion_roadmap_tab() -> None:
             )
 
 
+def _render_champion_pipeline_tab() -> None:
+    st.markdown("### Pipeline Champion")
+    st.caption(
+        "Vue visuelle des jobs annotés : on voit vite qui est détecté, à retester, "
+        "sérieux, prêt pour une validation avancée ou rejeté."
+    )
+    settings = load_validation_settings()
+    pipeline = build_pipeline(opt_store.list_jobs(), settings=settings)
+    if not pipeline.cards:
+        st.info(
+            "Aucun job annoté pour le moment. Classe d'abord un job terminé en "
+            "Champion, Favori, À revoir ou Rejeté.",
+            icon=None,
+        )
+        return
+
+    overview = pipeline_summary(pipeline.cards)
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Jobs dans le pipeline", len(pipeline.cards))
+    p2.metric("Candidats sérieux", overview.serious_count)
+    p3.metric("À retester", overview.retest_count)
+    p4.metric("Rejetés", overview.rejected_count)
+
+    stage_rows = [
+        {"Étape": stage, "Jobs": overview.stage_counts.get(stage, 0)}
+        for stage in PIPELINE_STAGES
+    ]
+    st.dataframe(pd.DataFrame(stage_rows), width="stretch", hide_index=True)
+
+    active_jobs = _list_active_jobs()
+    if active_jobs:
+        st.warning(
+            "Un job est actif : les relances sont désactivées pour éviter deux optimisations en parallèle.",
+            icon=None,
+        )
+
+    grouped = cards_by_stage(pipeline.cards)
+    for stage in PIPELINE_STAGES:
+        stage_cards = grouped.get(stage, [])
+        st.markdown(f"#### {stage}")
+        if not stage_cards:
+            st.caption("Aucun job dans cette étape.")
+            continue
+        for card in stage_cards:
+            _render_pipeline_card(card, active_jobs)
+
+
+def _render_pipeline_card(card, active_jobs: list) -> None:
+    record = card.item.record
+    with st.container(border=True):
+        title_col, action_col = st.columns([3, 2])
+        with title_col:
+            st.markdown(f"**`{record.job_id}`**")
+            st.caption(
+                f"{_annotation_label(record.annotation)} · {card.maturity_status} · "
+                f"{record.asset}/{record.timeframe}"
+            )
+        with action_col:
+            st.caption(f"Preset : {record.preset}")
+            st.caption(f"Dernière décision : {card.last_decision}")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Score", _format_report_metric(record.score, decimals=2))
+        m2.metric("Trades", _format_report_metric(record.trades, decimals=0))
+        m3.metric("Drawdown", _format_report_metric(record.drawdown_pct, " %"))
+        m4.metric("Étape", card.stage)
+
+        st.caption("Prochaine action : " + card.next_action)
+        if record.annotation.note:
+            st.write(record.annotation.note)
+        if record.annotation.tags:
+            st.caption("Tags : " + " · ".join(record.annotation.tags))
+
+        a1, a2, a3, a4, a5 = st.columns(5)
+        with a1:
+            if st.button(
+                "Rapport",
+                key=f"pipeline_report_{record.job_id}",
+                width="stretch",
+                disabled=record.annotation.status not in ("Champion", "Favori"),
+            ):
+                _open_champion_report(record.job_id)
+        with a2:
+            if st.button(
+                "Plan retest",
+                key=f"pipeline_retest_{record.job_id}",
+                width="stretch",
+                disabled=record.annotation.status not in ("Champion", "Favori"),
+            ):
+                _open_retest_plan(record.job_id)
+        with a3:
+            if st.button(
+                "Résultats",
+                key=f"pipeline_results_{record.job_id}",
+                width="stretch",
+            ):
+                _show_results_for_run(record.job_id, record.job_dir)
+                st.rerun()
+        with a4:
+            if st.button(
+                "Dupliquer",
+                key=f"pipeline_duplicate_{record.job_id}",
+                width="stretch",
+                type="secondary",
+                disabled=not bool(record.config),
+            ):
+                _duplicate_config_to_configuration(record.config, record.job_id)
+                st.rerun()
+        with a5:
+            if st.button(
+                "Relancer",
+                key=f"pipeline_relaunch_{record.job_id}",
+                width="stretch",
+                disabled=bool(active_jobs) or not bool(record.config),
+            ):
+                try:
+                    launched = _launch_config_as_new_job(record.config, record.job_id)
+                except ActiveJobExistsError as exc:
+                    st.error(str(exc), icon=None)
+                else:
+                    _remember_job_for_tracking({
+                        "job_id": launched.job_id,
+                        "job_dir": launched.job_dir,
+                    })
+                    st.success(f"Nouveau job créé : `{launched.job_id}`")
+                    st.rerun()
+
+
 def _render_retest_plan_tab() -> None:
     st.markdown("### Plan de retest")
     st.caption(
@@ -5356,6 +5502,7 @@ OPT_SUBTAB_HISTORY = "📂 Historique Runs"
 OPT_SUBTAB_FEATURED = "🏆 Champions / Favoris"
 OPT_SUBTAB_CHAMPION_REPORT = "📋 Rapport Champion"
 OPT_SUBTAB_CHAMPION_ROADMAP = "🗺️ Roadmap Champion"
+OPT_SUBTAB_CHAMPION_PIPELINE = "🧭 Pipeline Champion"
 OPT_SUBTAB_RETEST_PLAN = "🧪 Plan de retest"
 OPT_SUBTAB_COMPARISON = "⚖️ Comparaison de jobs"
 
@@ -5484,6 +5631,38 @@ def render_home_tab():
                 _switch_main_tab(
                     MAIN_TAB_OPTIMIZATION,
                     opt_subtab=OPT_SUBTAB_CHAMPION_ROADMAP,
+                )
+
+    pipeline = build_pipeline(opt_store.list_jobs(), settings=load_validation_settings())
+    if pipeline.cards:
+        pipeline_overview = pipeline_summary(pipeline.cards)
+        with st.container(border=True):
+            st.markdown("### Pipeline Champion")
+            q1, q2, q3, q4 = st.columns(4)
+            q1.metric("Jobs suivis", len(pipeline.cards))
+            q2.metric("Sérieux", pipeline_overview.serious_count)
+            q3.metric("À retester", pipeline_overview.retest_count)
+            q4.metric("Rejetés", pipeline_overview.rejected_count)
+            next_stage = next(
+                (
+                    stage for stage in (
+                        STAGE_RETEST,
+                        STAGE_RETEST_LAUNCHED,
+                        STAGE_REJECTED,
+                    )
+                    if pipeline_overview.stage_counts.get(stage, 0)
+                ),
+                "",
+            )
+            if next_stage:
+                st.caption(
+                    f"Étape à surveiller : {next_stage} "
+                    f"({pipeline_overview.stage_counts.get(next_stage, 0)} job(s))."
+                )
+            if st.button("Ouvrir Pipeline Champion", key="home_open_champion_pipeline"):
+                _switch_main_tab(
+                    MAIN_TAB_OPTIMIZATION,
+                    opt_subtab=OPT_SUBTAB_CHAMPION_PIPELINE,
                 )
 
     with st.container(border=True):
