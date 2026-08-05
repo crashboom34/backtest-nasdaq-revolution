@@ -102,6 +102,28 @@ lignes ou le dernier timestamp de la source change ; il n'est pas encore consult
 de backtest.
 Statut : **Confirmé**.
 
+**Contrôle qualité (quality_flags)** :
+Constat chiffré, en lecture seule, produit par `market_data/quality.analyze_quality()` sur un
+DataFrame canonique : doublons de timestamp, `high < low`, prix nul/négatif, valeur manquante,
+ordre chronologique, plus un score simple. Ne corrige jamais les données ; se contente de les
+qualifier. Version volontairement grossière — pas encore de détection de trous pendant les
+heures de séance (nécessite un calendrier de marché absent du dépôt).
+Statut : **Confirmé**.
+
+**Configuration fournisseur (clé API)** :
+Emplacement générique (`market_data/provider_config.py`) où une future clé API de fournisseur
+(EODHD, IG...) sera lue : variable d'environnement `BACKTEST_<PROVIDER>_API_KEY` en priorité,
+sinon `settings/data_providers.json` (fichier local, jamais versionné). Aucun connecteur réel
+ne consomme encore cette clé.
+Statut : **Confirmé** (mécanisme existant), **À confirmer** (aucun fournisseur réel branché
+dessus à ce jour).
+
+**Synthèse Data Center (`DatasetSummary`)** :
+Structure assemblée par `market_data/summary.py`, combinant une entrée de catalogue, le statut
+des timeframes candidats et un rapport de qualité pour un actif/timeframe donné. Fondation
+prévue pour une future page Streamlit "Data Center" ; aucune page de ce type n'existe encore.
+Statut : **Confirmé** (code existant), **À confirmer** (aucune UI ne le consomme).
+
 **Actif** :
 L'instrument tradé, identifié par un symbole (ex. `NASDAQ` / `US100`), utilisé pour organiser
 les données sur disque (`data/{actif}/{timeframe}/`) et pour la sélection dans l'UI

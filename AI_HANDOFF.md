@@ -56,6 +56,9 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `market_data/catalog.py` | Catalogue local (JSON), statut source/calculable/en cache par timeframe |
 | `market_data/resample.py` | Génère un timeframe supérieur à partir d'un timeframe source (ADR 0003) |
 | `market_data/derived.py` | Cache disque des timeframes dérivés (`derived_data/`, invalidé si la source change) |
+| `market_data/quality.py` | Contrôle qualité basique en lecture seule (`quality_flags`, score) |
+| `market_data/provider_config.py` | Emplacement générique des futures clés API fournisseurs (jamais versionné) |
+| `market_data/summary.py` | Assemble catalogue + statut timeframes + qualité (fondation future page Data Center) |
 
 ### Organisation des données de marché
 
@@ -105,11 +108,35 @@ Ce qui existe dans `market_data/` :
   invalidé automatiquement si les données source changent.
 - **Statut par timeframe** (`catalog.list_timeframe_status()`) : distingue `source`,
   `calculable_cached`, `calculable_not_cached`, `not_calculable` pour un actif donné.
+- **Contrôle qualité basique** (`quality.py`) : `analyze_quality()` calcule des `quality_flags`
+  (`duplicate_bar`, `invalid_ohlc`, `non_positive_price`, `missing_value`, `out_of_order`,
+  `empty_dataset`) et un score simple sur un DataFrame canonique, sans jamais modifier ni
+  "réparer" les données.
+- **Emplacement générique pour les futures clés API** (`provider_config.py`) : résout une clé
+  par variable d'environnement `BACKTEST_<PROVIDER>_API_KEY` en priorité, sinon
+  `settings/data_providers.json` (fichier local, **jamais versionné** — ajouté au
+  `.gitignore`). `credential_status()` ne renvoie jamais la valeur du secret, seulement son
+  origine. Aucun fournisseur réel ne consomme encore cette clé (aucun connecteur EODHD/
+  Dukascopy/FirstRate/IG/Binance/Alpaca n'existe à ce jour, voir plus bas).
+- **Assembleur "Data Center"** (`summary.py`) : `build_dataset_summary()` /
+  `build_data_center_summary()` combinent catalogue, statut des timeframes et qualité en une
+  structure unique, en lecture seule — fondation d'une future page Streamlit "Data Center"
+  (page non créée à cette étape).
+
+**Comment tu fourniras tes clés API plus tard** : quand tu auras une clé (EODHD, IG...), deux
+façons de la donner, sans jamais la coller dans un fichier suivi par Git :
+1. Variable d'environnement, ex. `$env:BACKTEST_EODHD_API_KEY = "..."` avant de lancer l'app ;
+2. Ou via `market_data.provider_config.save_api_key("eodhd", "...")`, qui écrit dans
+   `settings/data_providers.json` (ignoré par Git).
+Aucun de ces deux mécanismes n'est branché à un connecteur réel pour l'instant — ils servent à
+préparer l'emplacement, pas encore à télécharger quoi que ce soit.
 
 Prochaines étapes prévues (non commencées) : brancher ce port dans `engine.load_data()` (étape
-séparée, à valider explicitement vu le risque de régression sur le moteur), puis Phase 2 —
-fournisseur EODHD (nécessite clé API et validation du budget de téléchargement, voir la
-contrainte disque ci-dessous).
+séparée, à valider explicitement vu le risque de régression sur le moteur), une page Streamlit
+"Data Center" en lecture seule sur `summary.py`, puis Phase 2 — un vrai connecteur EODHD (ou
+autre fournisseur), qui nécessite une clé API réelle et une vérification de la documentation
+officielle du fournisseur avant d'écrire le moindre appel réseau (voir la contrainte disque
+ci-dessous).
 
 **Point d'attention disque** : au 2026-08-05, ≈3,0 Go libres sur C:. Avant toute Phase 2/3
 (téléchargement réel de données), il faudra soit libérer de l'espace, soit stocker les
@@ -296,7 +323,7 @@ pip install -r requirements-server.txt
 - [x] Seuils Champion configurables : formulaire Streamlit, sauvegarde globale, reset défaut et repli robuste
 - [x] Pipeline Champion : étapes visuelles, cartes par job, actions rapides et résumé Accueil
 - [x] Mode démo UI : jobs factices temporaires, bannière visible, liens Champion → retest simulés et lancements désactivés
-- [x] Data Center — socle local (2026-08-05) : schéma canonique (ADR 0002), port `MarketDataSource`, adaptateur CSV local, catalogue JSON, génération de timeframes dérivés (ADR 0003), cache disque des dérivés, statut source/calculable/en cache — rien encore branché dans `app.py`/`engine.py`
+- [x] Data Center — socle local (2026-08-05) : schéma canonique (ADR 0002), port `MarketDataSource`, adaptateur CSV local, catalogue JSON, génération de timeframes dérivés (ADR 0003), cache disque des dérivés, statut source/calculable/en cache, contrôle qualité basique, emplacement générique pour les futures clés API, assembleur de synthèse — rien encore branché dans `app.py`/`engine.py`
 
 ### Reste à faire (prochaines étapes suggérées)
 
@@ -306,8 +333,9 @@ pip install -r requirements-server.txt
 - [ ] Ajouter plus tard une gestion avancée des formats CSV exotiques si nécessaire (fuseaux horaires spécifiques, colonnes renommées non standards)
 - [ ] Éventuellement : déploiement serveur Linux avec `BACKTEST_BASE_DIR`
 - [ ] Data Center : brancher le port `MarketDataSource` dans `engine.load_data()` (étape à valider séparément, risque de régression sur le moteur)
-- [ ] Data Center : page Streamlit "Data Center" affichant le catalogue et le statut des timeframes (lecture seule pour commencer)
-- [ ] Data Center Phase 2 : fournisseur EODHD (clé API, budget de téléchargement, place disque)
+- [ ] Data Center : page Streamlit "Data Center" affichant `summary.py` (lecture seule pour commencer)
+- [ ] Data Center Phase 2 : premier vrai connecteur fournisseur (EODHD ou autre) — **bloqué en attente d'une clé API réelle et de la documentation officielle du fournisseur**, fournies par l'utilisateur ; aucun connecteur ne doit être écrit sur la base d'endpoints devinés
+- [ ] Data Center Phase 2 : valider le budget de téléchargement face à l'espace disque disponible avant tout premier téléchargement réel
 
 ---
 
