@@ -138,6 +138,7 @@ from report_generator import generate_report
 from data_validator import validate_market_csv_bytes
 from dashboard import build_dashboard_summary
 from ui_components import help_panel, page_header, return_home_button, step_title
+import ui_data_center
 from path_resolver import (
     DEFAULT_ASSET, DEFAULT_TIMEFRAME,
     data_csv_target_path,
@@ -5885,13 +5886,26 @@ def render_home_tab():
 
 
 def render_data_tab():
-    """Onglet d'import et validation des CSV de marche."""
+    """Onglet Données : import de CSV (comportement existant) + aperçu Data Center (lecture seule)."""
     page_header(
         "Données",
         "Importe un CSV, vérifie sa qualité, puis sauvegarde-le dans data/ACTIF/TIMEFRAME/.",
         "Préparation des historiques",
     )
     return_home_button(lambda: _switch_main_tab(MAIN_TAB_HOME), key="data_return_home")
+
+    tab_import, tab_data_center = st.tabs(["📥 Importer un CSV", "🗂️ Data Center (aperçu)"])
+
+    with tab_import:
+        _render_data_import_subtab()
+
+    with tab_data_center:
+        ui_data_center.render_data_center_tab()
+
+
+def _render_data_import_subtab():
+    """Import et validation d'un CSV de marché — logique inchangée, seulement déplacée dans
+    son propre sous-onglet (voir render_data_tab)."""
     help_panel(
         "Parcours conseillé",
         "1. Choisis l'actif et le timeframe. 2. Importe le CSV. "
