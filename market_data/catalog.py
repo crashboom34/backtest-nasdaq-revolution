@@ -18,10 +18,21 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional, Union
 
+from market_data.derived import DEFAULT_CACHE_DIR as DEFAULT_DERIVED_CACHE_DIR
+from market_data.derived import is_cached
 from market_data.ports import MarketDataSource
+from market_data.resample import is_derivable
 from market_data.schema import MarketDatasetInfo
 
 DEFAULT_CATALOG_PATH = Path(__file__).resolve().parent.parent / "settings" / "data_catalog.json"
+
+# Timeframes candidats "usuels" pour lesquels on affiche un statut (voir demande initiale,
+# section 2). Limité aux unités minute/heure/jour gérées par market_data.resample — pas encore
+# de semaine/mois (hors périmètre de l'ADR 0003 pour cette étape).
+DEFAULT_CANDIDATE_TIMEFRAMES: tuple[str, ...] = (
+    "M1", "M2", "M3", "M4", "M5", "M10", "M12", "M15", "M20", "M30", "M45",
+    "H1", "H2", "H4", "D1",
+)
 
 
 @dataclass(frozen=True)
@@ -117,3 +128,48 @@ def refresh_catalog(
     entries = build_catalog(source, compute_stats=compute_stats)
     save_catalog(entries, path)
     return entries
+
+
+@dataclass(frozen=True)
+class TimeframeStatus:
+    """Statut d'un timeframe candidat pour un actif/timeframe source donné.
+
+    status vaut :
+    - "source"               : c'est le timeframe déjà stocké tel quel ;
+    - "calculable_cached"    : dérivable depuis la source, et déjà généré/mis en cache ;
+    - "calculable_not_cached": dérivable depuis la source, mais pas encore généré ;
+    - "not_calculable"       : pas un multiple entier du timeframe source (voir ADR 0003).
+    """
+
+    timeframe: str
+    status: str
+
+
+def list_timeframe_status(
+    asset: str,
+    source_timeframe: str,
+    candidate_timeframes: tuple[str, ...] = DEFAULT_CANDIDATE_TIMEFRAMES,
+    cache_dir: Union[str, Path] = DEFAULT_DERIVED_CACHE_DIR,
+) -> list[TimeframeStatus]:
+    """Statut de chaque timeframe candidat pour un actif : source / calculable / en cache.
+
+    Ne calcule ni ne charge aucune donnée : vérifie seulement la présence de fichiers en cache
+    (market_data.derived.is_cached). La fraîcheur réelle n'est garantie qu'au moment d'appeler
+    market_data.derived.get_or_generate().
+    """
+    statuses: list[TimeframeStatus] = []
+    for timeframe in candidate_timeframes:
+        if timeframe == source_timeframe:
+            statuses.append(TimeframeStatus(timeframe=timeframe, status="source"))
+            continue
+        if not is_derivable(source_timeframe, timeframe):
+            statuses.append(TimeframeStatus(timeframe=timeframe, status="not_calculable"))
+            continue
+        cached = is_cached(cache_dir, asset, source_timeframe, timeframe)
+        statuses.append(
+            TimeframeStatus(
+                timeframe=timeframe,
+                status="calculable_cached" if cached else "calculable_not_cached",
+            )
+        )
+    return statuses

@@ -109,6 +109,19 @@ def get_or_generate(
     )
 
 
+def is_cached(
+    cache_dir: Union[str, Path], asset: str, source_timeframe: str, target_timeframe: str
+) -> bool:
+    """True si un timeframe dérivé a déjà un fichier en cache pour cet actif.
+
+    Vérifie uniquement la présence des fichiers, pas leur fraîcheur : la fraîcheur (signature
+    de la source) n'est contrôlée qu'au moment de get_or_generate(). Utilisé par
+    market_data.catalog pour distinguer "calculable" de "déjà en cache" (voir la demande
+    initiale, section 3 : unité source / calculable / en cache)."""
+    csv_path, meta_path = _cache_paths(Path(cache_dir), asset, source_timeframe, target_timeframe)
+    return csv_path.is_file() and meta_path.is_file()
+
+
 def _cache_paths(cache_dir: Path, asset: str, source_timeframe: str, target_timeframe: str) -> tuple[Path, Path]:
     folder = cache_dir / asset
     stem = f"{target_timeframe}__from_{source_timeframe}"
