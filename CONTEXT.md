@@ -11,6 +11,10 @@ Statut de ce document : première version, construite par lecture directe du cod
 marqué **Confirmé** (constaté dans le code) ou **À confirmer** (absent du code actuel, ou
 usage flou) — ne jamais traiter une entrée **À confirmer** comme une décision validée.
 
+Mise à jour du 2026-08-05 : ajout du vocabulaire du socle "Data Center" (`market_data/`),
+construit par lecture de `market_data/schema.py`, `ports.py`, `adapters/local_csv.py`,
+`catalog.py`, `resample.py`, `derived.py`, et des ADR 0002/0003.
+
 Dépôt mono-contexte : un seul `CONTEXT.md` à la racine, pas de `CONTEXT-MAP.md`.
 
 ## Langage
@@ -42,11 +46,61 @@ actif/timeframe (`path_resolver.py`), utilisées comme entrée du moteur de back
 Statut : **Confirmé**.
 
 **Fournisseur de données** :
-Aujourd'hui, un seul fournisseur : MetaTrader 5 (MT5), via le module `MetaTrader5`
-(`get_data.py`). Il n'y a pas d'abstraction multi-fournisseurs dans le code actuel.
+Aujourd'hui, un seul fournisseur réellement utilisé par le moteur : MetaTrader 5 (MT5), via le
+module `MetaTrader5` (`get_data.py`) et le CSV qu'il produit. Une abstraction multi-
+fournisseurs existe désormais dans `market_data/` (voir *Port de données de marché*) mais
+n'est **pas encore branchée** sur `engine.py` ni sur `get_data.py` : elle ne dessert pour
+l'instant qu'un adaptateur CSV local.
 _À ne pas confondre avec_ : un import CSV manuel, qui est une voie d'entrée de données
 distincte (voir *Import CSV*) et ne passe pas par MT5.
-Statut : **Confirmé** (fournisseur unique, pas d'abstraction générique).
+Statut : **Confirmé** (fournisseur unique réellement utilisé par le moteur ; abstraction de
+port créée mais non connectée — voir *Port de données de marché*).
+
+**Port de données de marché (`MarketDataSource`)** *(terme additionnel, socle Data Center)* :
+Interface définie dans `market_data/ports.py` (`list_available()`, `load(asset, timeframe)`)
+que tout futur adaptateur fournisseur (EODHD, Dukascopy, FirstRate, IG...) devra respecter.
+Un seul adaptateur existe à ce jour : `LocalCsvMarketDataSource`. Le moteur de backtest
+(`engine.load_data()`) ne consomme pas encore ce port — il continue de lire un chemin CSV
+directement. Décision documentée dans `docs/adr/0002-canonical-market-data-schema.md`.
+Statut : **Confirmé** (code existant), **À confirmer** (branchement effectif sur le moteur —
+étape future distincte, non réalisée).
+
+**Schéma canonique de données de marché** :
+Forme commune que doit respecter une bougie normalisée, indépendamment du fournisseur
+d'origine : `time, open, high, low, close, volume` (`market_data/schema.py`). Version
+volontairement réduite — pas encore de bid/ask, dividendes, splits ni options (voir
+`docs/adr/0002-...`).
+Statut : **Confirmé**.
+
+**Adaptateur de données de marché** :
+Implémentation concrète du port `MarketDataSource` pour un fournisseur donné. Le seul
+adaptateur existant est `LocalCsvMarketDataSource` (`market_data/adapters/local_csv.py`), qui
+réutilise `path_resolver.py` sans dupliquer sa logique de résolution de chemin.
+Statut : **Confirmé** (un seul adaptateur existant).
+
+**Catalogue de données** :
+Inventaire local des jeux de données disponibles (`market_data/catalog.py`), persisté en JSON
+dans `settings/data_catalog.json` (ignoré par Git, régénéré à la demande). Distingue aussi, par
+timeframe candidat, les statuts `source`, `calculable_cached`, `calculable_not_cached` et
+`not_calculable` (voir *Timeframe dérivé*). Pas encore affiché dans l'interface Streamlit.
+Statut : **Confirmé** (code et persistance existants), **À confirmer** (aucune page UI ne le
+consulte encore).
+
+**Timeframe dérivé (resampling)** :
+Unité de temps supérieure calculée à partir d'un timeframe source déjà présent en local (ex.
+M15 dérivé de M3), via `market_data/resample.py`. Un timeframe cible n'est calculable que s'il
+est un multiple entier du timeframe source ; l'ancrage est UTC uniquement pour l'instant, sans
+calendrier de marché (limitation documentée dans `docs/adr/0003-timeframe-resampling-rules.md`).
+_À ne pas confondre avec_ : *Split train/test*, qui est un sens totalement différent du mot
+"split" dans ce dépôt (voir plus haut).
+Statut : **Confirmé**.
+
+**Cache de timeframe dérivé** :
+Fichier CSV + métadonnées JSON stockés dans `derived_data/` (ignoré par Git), produits par
+`market_data/derived.get_or_generate()`. Le cache est invalidé automatiquement si le nombre de
+lignes ou le dernier timestamp de la source change ; il n'est pas encore consulté par le moteur
+de backtest.
+Statut : **Confirmé**.
 
 **Actif** :
 L'instrument tradé, identifié par un symbole (ex. `NASDAQ` / `US100`), utilisé pour organiser
