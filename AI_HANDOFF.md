@@ -50,6 +50,12 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `validation_settings.py` | Lit/écrit les seuils Champion globaux dans `settings/champion_validation.json` |
 | `ui_components.py`       | Petits helpers d'affichage Streamlit : en-têtes, panneaux d'aide, étapes |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
+| `market_data/schema.py`  | Schéma canonique minimal d'une bougie (socle Data Center, voir ADR 0002) |
+| `market_data/ports.py`   | Interface `MarketDataSource` (port hexagonal), pas encore branchée dans `engine.py` |
+| `market_data/adapters/local_csv.py` | Premier adaptateur : habillage de `path_resolver.py`, aucune logique dupliquée |
+| `market_data/catalog.py` | Catalogue local (JSON), statut source/calculable/en cache par timeframe |
+| `market_data/resample.py` | Génère un timeframe supérieur à partir d'un timeframe source (ADR 0003) |
+| `market_data/derived.py` | Cache disque des timeframes dérivés (`derived_data/`, invalidé si la source change) |
 
 ### Organisation des données de marché
 
@@ -75,6 +81,39 @@ data/
 - Aucun gros CSV n'a été déplacé automatiquement.
 - `.gitignore` ignore `data/**/*.csv`; seul le squelette vide avec `.gitkeep` peut être versionné.
 - MT5 n'est pas encore branché.
+
+### Data Center — socle local (Phase 1, depuis le 2026-08-05)
+
+Démarrage du futur "Data Center" multi-fournisseurs (voir la demande utilisateur du
+2026-08-05 et le rapport d'architecture associé). Portée volontairement réduite à un socle
+100% local, sans aucun appel réseau, sans nouvelle dépendance, et **sans rien brancher dans
+`app.py` ni `engine.py`** — le comportement existant de l'application n'est pas modifié.
+
+Ce qui existe dans `market_data/` :
+
+- **Schéma canonique minimal** (`schema.py`, ADR 0002) : `time, open, high, low, close, volume`.
+- **Port `MarketDataSource`** (`ports.py`) : interface que devra respecter tout futur
+  fournisseur (EODHD, Dukascopy, FirstRate, IG...).
+- **Premier adaptateur `LocalCsvMarketDataSource`** (`adapters/local_csv.py`) : réutilise
+  `path_resolver.py` et le comportement CSV existant, sans le dupliquer.
+- **Catalogue local** (`catalog.py`) : inventaire JSON (`settings/data_catalog.json`, ignoré
+  par Git) des datasets présents dans `data/`, avec `row_count`/`start`/`end` optionnels.
+- **Génération de timeframes dérivés** (`resample.py`, ADR 0003) : dérive un timeframe
+  supérieur multiple du timeframe source (ex. M3 → M15), ancrage UTC uniquement pour
+  l'instant (pas de calendrier de marché — limitation documentée).
+- **Cache disque des timeframes dérivés** (`derived.py`) : `derived_data/` (ignoré par Git),
+  invalidé automatiquement si les données source changent.
+- **Statut par timeframe** (`catalog.list_timeframe_status()`) : distingue `source`,
+  `calculable_cached`, `calculable_not_cached`, `not_calculable` pour un actif donné.
+
+Prochaines étapes prévues (non commencées) : brancher ce port dans `engine.load_data()` (étape
+séparée, à valider explicitement vu le risque de régression sur le moteur), puis Phase 2 —
+fournisseur EODHD (nécessite clé API et validation du budget de téléchargement, voir la
+contrainte disque ci-dessous).
+
+**Point d'attention disque** : au 2026-08-05, ≈3,0 Go libres sur C:. Avant toute Phase 2/3
+(téléchargement réel de données), il faudra soit libérer de l'espace, soit stocker les
+données de marché sur un autre disque.
 
 ---
 
@@ -257,6 +296,7 @@ pip install -r requirements-server.txt
 - [x] Seuils Champion configurables : formulaire Streamlit, sauvegarde globale, reset défaut et repli robuste
 - [x] Pipeline Champion : étapes visuelles, cartes par job, actions rapides et résumé Accueil
 - [x] Mode démo UI : jobs factices temporaires, bannière visible, liens Champion → retest simulés et lancements désactivés
+- [x] Data Center — socle local (2026-08-05) : schéma canonique (ADR 0002), port `MarketDataSource`, adaptateur CSV local, catalogue JSON, génération de timeframes dérivés (ADR 0003), cache disque des dérivés, statut source/calculable/en cache — rien encore branché dans `app.py`/`engine.py`
 
 ### Reste à faire (prochaines étapes suggérées)
 
@@ -265,6 +305,9 @@ pip install -r requirements-server.txt
 - [ ] Brancher plus tard MT5 ou une autre source d'import vers `data/{ASSET}/{TIMEFRAME}/`
 - [ ] Ajouter plus tard une gestion avancée des formats CSV exotiques si nécessaire (fuseaux horaires spécifiques, colonnes renommées non standards)
 - [ ] Éventuellement : déploiement serveur Linux avec `BACKTEST_BASE_DIR`
+- [ ] Data Center : brancher le port `MarketDataSource` dans `engine.load_data()` (étape à valider séparément, risque de régression sur le moteur)
+- [ ] Data Center : page Streamlit "Data Center" affichant le catalogue et le statut des timeframes (lecture seule pour commencer)
+- [ ] Data Center Phase 2 : fournisseur EODHD (clé API, budget de téléchargement, place disque)
 
 ---
 

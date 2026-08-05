@@ -98,6 +98,7 @@ Backtest Nasdaq revolution 3Mn/
 ├── path_resolver.py            # Résolution des chemins
 ├── strategies/
 │   └── perfect_revolution_v1.py   # Stratégie principale
+├── market_data/                 # Socle du futur Data Center (schéma, catalogue, resampling — voir AI_HANDOFF.md)
 ├── lancer_app.bat              # Démarrage Windows (double-clic)
 ├── requirements.txt            # Dépendances Windows
 ├── requirements-server.txt     # Dépendances Linux/serveur
