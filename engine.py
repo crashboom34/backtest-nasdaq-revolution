@@ -12,8 +12,14 @@ from scoring import compute_equity_r_squared
 PARIS = ZoneInfo("Europe/Paris")
 
 
-def load_data(csv_file: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_file, parse_dates=["time"])
+def _add_market_time_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Ajoute les colonnes dérivées (fuseau Paris) consommées par run_backtest().
+
+    Factorisé depuis load_data() pour être réutilisé par load_data_from_source() sans dupliquer
+    la logique de fuseau horaire. load_data() produit exactement le même résultat qu'avant
+    cette extraction (voir tests/test_engine_load_data_from_source.py).
+    """
+    df = df.copy()
     df["time_paris"] = df["time"].dt.tz_localize("UTC").dt.tz_convert(PARIS)
     df["date_p"] = df["time_paris"].dt.date
     df["h_p"]    = df["time_paris"].dt.hour
@@ -21,6 +27,33 @@ def load_data(csv_file: str) -> pd.DataFrame:
     df["dow_p"]  = df["time_paris"].dt.dayofweek
     df["hm_p"]   = list(zip(df["h_p"], df["m_p"]))
     return df
+
+
+def load_data(csv_file: str) -> pd.DataFrame:
+    df = pd.read_csv(csv_file, parse_dates=["time"])
+    return _add_market_time_columns(df)
+
+
+def load_data_from_source(source, asset: str, timeframe: str) -> pd.DataFrame:
+    """Charge un actif/timeframe via un market_data.ports.MarketDataSource (ex.
+    market_data.adapters.local_csv.LocalCsvMarketDataSource) plutôt que par un chemin CSV
+    direct.
+
+    Produit exactement les mêmes colonnes dérivées que load_data() — voir le test
+    d'équivalence dans tests/test_engine_load_data_from_source.py. N'est appelé nulle part
+    dans app.py ni run_job.py à cette étape : c'est une capacité additive, le chemin CSV
+    existant (load_data) reste inchangé et continue d'être celui réellement utilisé.
+
+    Lève ValueError si la source ne peut pas fournir les données (message explicite du port,
+    pas d'exception technique opaque).
+    """
+    result = source.load(asset, timeframe)
+    if not result.ok or result.dataframe is None:
+        raise ValueError(f"Impossible de charger {asset}/{timeframe} : {result.message}")
+
+    df = result.dataframe.copy()
+    df["time"] = pd.to_datetime(df["time"])
+    return _add_market_time_columns(df)
 
 
 def run_backtest(
