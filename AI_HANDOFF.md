@@ -49,6 +49,7 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `demo_data.py`           | Génère un jeu de jobs factices temporaire pour tester l'UI sans toucher aux vrais `results/` |
 | `validation_settings.py` | Lit/écrit les seuils Champion globaux dans `settings/champion_validation.json` |
 | `ui_components.py`       | Petits helpers d'affichage Streamlit : en-têtes, panneaux d'aide, étapes |
+| `ui_data_center.py`      | Sous-onglet Streamlit "Data Center (aperçu)" en lecture seule (onglet Données) |
 | `strategies/perfect_revolution_v1.py` | Stratégie principale avec ses paramètres                |
 | `market_data/schema.py`  | Schéma canonique minimal d'une bougie (socle Data Center, voir ADR 0002) |
 | `market_data/ports.py`   | Interface `MarketDataSource` (port hexagonal), pas encore branchée dans `engine.py` |
@@ -131,16 +132,36 @@ façons de la donner, sans jamais la coller dans un fichier suivi par Git :
 Aucun de ces deux mécanismes n'est branché à un connecteur réel pour l'instant — ils servent à
 préparer l'emplacement, pas encore à télécharger quoi que ce soit.
 
-Prochaines étapes prévues (non commencées) : brancher ce port dans `engine.load_data()` (étape
-séparée, à valider explicitement vu le risque de régression sur le moteur), une page Streamlit
-"Data Center" en lecture seule sur `summary.py`, puis Phase 2 — un vrai connecteur EODHD (ou
-autre fournisseur), qui nécessite une clé API réelle et une vérification de la documentation
-officielle du fournisseur avant d'écrire le moindre appel réseau (voir la contrainte disque
-ci-dessous).
+**Port branché (2026-08-05, suite)** :
+- `engine.load_data_from_source(source, asset, timeframe)` : nouvelle fonction additive qui
+  charge via un `MarketDataSource` au lieu d'un chemin CSV direct. Produit un résultat
+  strictement identique à `engine.load_data()` (vérifié par test d'équivalence, y compris
+  contre le vrai `nasdaq_3m.csv`). `load_data()` elle-même reste inchangée dans son
+  comportement — un refactor interne (`_add_market_time_columns()`) partage juste la logique
+  de fuseau horaire entre les deux fonctions. **`load_data_from_source()` n'est pas encore
+  appelée par `run_job.py` ni par le lancement d'optimisation** : le chemin réellement utilisé
+  pour tout backtest reste `load_data()` + CSV direct.
+- `ui_data_center.py` + sous-onglet **"Data Center (aperçu)"** dans l'onglet Données de
+  l'application (`app.py`) : lecture seule, affiche le catalogue local et le statut des futurs
+  fournisseurs. L'import CSV existant devient le sous-onglet "Importer un CSV", comportement
+  identique à avant (vérifié avec Playwright/Edge — capture d'écran identique au formulaire
+  d'origine, aucune erreur).
+- Validé en conditions réelles sur le vrai `nasdaq_3m.csv` (1 000 000 lignes) via le sous-onglet
+  Data Center : catalogue, qualité (100 %) et statut des timeframes corrects, sans modifier le
+  fichier.
+- Playwright (Python, canal `msedge`, pas de Chromium téléchargé) a été installé dans `.venv`
+  pour cette validation ponctuelle. Il n'est pas ajouté à `requirements.txt` ni à une suite de
+  tests permanente à ce stade — à décider si une validation UI automatisée récurrente est
+  souhaitée.
 
-**Point d'attention disque** : au 2026-08-05, ≈3,0 Go libres sur C:. Avant toute Phase 2/3
-(téléchargement réel de données), il faudra soit libérer de l'espace, soit stocker les
-données de marché sur un autre disque.
+Prochaine étape restante : Phase 2 — un vrai connecteur EODHD (ou autre fournisseur), qui
+nécessite une clé API réelle et une vérification de la documentation officielle du fournisseur
+avant d'écrire le moindre appel réseau (voir la contrainte disque ci-dessous).
+
+**Point d'attention disque** : ≈3,0 Go libres sur C: au début de la session du 2026-08-05,
+≈6,3 Go plus tard dans la même session (espace libéré entre-temps, en dehors de ce projet).
+Avant toute Phase 2/3 (téléchargement réel de données), vérifier l'espace disponible au moment
+voulu et prévoir, si besoin, de stocker les données de marché sur un autre disque.
 
 ---
 
@@ -323,7 +344,8 @@ pip install -r requirements-server.txt
 - [x] Seuils Champion configurables : formulaire Streamlit, sauvegarde globale, reset défaut et repli robuste
 - [x] Pipeline Champion : étapes visuelles, cartes par job, actions rapides et résumé Accueil
 - [x] Mode démo UI : jobs factices temporaires, bannière visible, liens Champion → retest simulés et lancements désactivés
-- [x] Data Center — socle local (2026-08-05) : schéma canonique (ADR 0002), port `MarketDataSource`, adaptateur CSV local, catalogue JSON, génération de timeframes dérivés (ADR 0003), cache disque des dérivés, statut source/calculable/en cache, contrôle qualité basique, emplacement générique pour les futures clés API, assembleur de synthèse — rien encore branché dans `app.py`/`engine.py`
+- [x] Data Center — socle local (2026-08-05) : schéma canonique (ADR 0002), port `MarketDataSource`, adaptateur CSV local, catalogue JSON, génération de timeframes dérivés (ADR 0003), cache disque des dérivés, statut source/calculable/en cache, contrôle qualité basique, emplacement générique pour les futures clés API, assembleur de synthèse
+- [x] Data Center — port branché (2026-08-05, suite) : `engine.load_data_from_source()` additif (résultat identique à `load_data()`, vérifié y compris sur le vrai `nasdaq_3m.csv`), sous-onglet Streamlit "Data Center (aperçu)" dans l'onglet Données, validé avec Playwright/Edge sur les vraies données locales sans erreur ni modification
 
 ### Reste à faire (prochaines étapes suggérées)
 
@@ -332,10 +354,10 @@ pip install -r requirements-server.txt
 - [ ] Brancher plus tard MT5 ou une autre source d'import vers `data/{ASSET}/{TIMEFRAME}/`
 - [ ] Ajouter plus tard une gestion avancée des formats CSV exotiques si nécessaire (fuseaux horaires spécifiques, colonnes renommées non standards)
 - [ ] Éventuellement : déploiement serveur Linux avec `BACKTEST_BASE_DIR`
-- [ ] Data Center : brancher le port `MarketDataSource` dans `engine.load_data()` (étape à valider séparément, risque de régression sur le moteur)
-- [ ] Data Center : page Streamlit "Data Center" affichant `summary.py` (lecture seule pour commencer)
+- [ ] Data Center : faire réellement passer `run_job.py`/le lancement d'optimisation par `engine.load_data_from_source()` (actuellement disponible mais pas utilisé par le chemin réel de backtest — décision à prendre explicitement, pas automatique)
 - [ ] Data Center Phase 2 : premier vrai connecteur fournisseur (EODHD ou autre) — **bloqué en attente d'une clé API réelle et de la documentation officielle du fournisseur**, fournies par l'utilisateur ; aucun connecteur ne doit être écrit sur la base d'endpoints devinés
 - [ ] Data Center Phase 2 : valider le budget de téléchargement face à l'espace disque disponible avant tout premier téléchargement réel
+- [ ] Décider si Playwright (installé localement dans `.venv` pour la validation du 2026-08-05) doit devenir une dépendance permanente (`requirements.txt`) avec une suite de tests UI récurrente
 
 ---
 

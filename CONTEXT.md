@@ -46,24 +46,29 @@ actif/timeframe (`path_resolver.py`), utilisées comme entrée du moteur de back
 Statut : **Confirmé**.
 
 **Fournisseur de données** :
-Aujourd'hui, un seul fournisseur réellement utilisé par le moteur : MetaTrader 5 (MT5), via le
-module `MetaTrader5` (`get_data.py`) et le CSV qu'il produit. Une abstraction multi-
-fournisseurs existe désormais dans `market_data/` (voir *Port de données de marché*) mais
-n'est **pas encore branchée** sur `engine.py` ni sur `get_data.py` : elle ne dessert pour
-l'instant qu'un adaptateur CSV local.
+Aujourd'hui, un seul fournisseur réellement utilisé pour produire `nasdaq_3m.csv` : MetaTrader 5
+(MT5), via le module `MetaTrader5` (`get_data.py`). Une abstraction multi-fournisseurs existe
+dans `market_data/` (voir *Port de données de marché*), avec un seul adaptateur réel
+(`LocalCsvMarketDataSource`, CSV local) — aucun connecteur EODHD/Dukascopy/FirstRate/IG/
+Binance/Alpaca n'existe encore. Le chemin de backtest réellement utilisé (`run_job.py`,
+lancement d'optimisation) reste `engine.load_data()` + CSV direct, pas le port.
 _À ne pas confondre avec_ : un import CSV manuel, qui est une voie d'entrée de données
 distincte (voir *Import CSV*) et ne passe pas par MT5.
-Statut : **Confirmé** (fournisseur unique réellement utilisé par le moteur ; abstraction de
-port créée mais non connectée — voir *Port de données de marché*).
+Statut : **Confirmé** (fournisseur unique réellement utilisé pour la donnée MT5 ; port et
+adaptateur CSV local existants mais toujours pas le chemin par défaut du moteur).
 
 **Port de données de marché (`MarketDataSource`)** *(terme additionnel, socle Data Center)* :
 Interface définie dans `market_data/ports.py` (`list_available()`, `load(asset, timeframe)`)
 que tout futur adaptateur fournisseur (EODHD, Dukascopy, FirstRate, IG...) devra respecter.
-Un seul adaptateur existe à ce jour : `LocalCsvMarketDataSource`. Le moteur de backtest
-(`engine.load_data()`) ne consomme pas encore ce port — il continue de lire un chemin CSV
-directement. Décision documentée dans `docs/adr/0002-canonical-market-data-schema.md`.
-Statut : **Confirmé** (code existant), **À confirmer** (branchement effectif sur le moteur —
-étape future distincte, non réalisée).
+Un seul adaptateur existe à ce jour : `LocalCsvMarketDataSource`. Décision documentée dans
+`docs/adr/0002-canonical-market-data-schema.md`.
+_Branchement (2026-08-05)_ : `engine.load_data_from_source()` consomme ce port et produit un
+résultat identique à `engine.load_data()` (vérifié par test, y compris sur le vrai
+`nasdaq_3m.csv`). Le chemin réellement utilisé par `run_job.py` et le lancement d'optimisation
+reste toutefois `load_data()` + CSV direct — `load_data_from_source()` existe mais n'est pas
+encore le chemin par défaut.
+Statut : **Confirmé** (port existant, consommé par le moteur via une fonction additive et par
+l'UI Data Center), **À confirmer** (adoption comme chemin par défaut du moteur — non décidée).
 
 **Schéma canonique de données de marché** :
 Forme commune que doit respecter une bougie normalisée, indépendamment du fournisseur
@@ -82,9 +87,9 @@ Statut : **Confirmé** (un seul adaptateur existant).
 Inventaire local des jeux de données disponibles (`market_data/catalog.py`), persisté en JSON
 dans `settings/data_catalog.json` (ignoré par Git, régénéré à la demande). Distingue aussi, par
 timeframe candidat, les statuts `source`, `calculable_cached`, `calculable_not_cached` et
-`not_calculable` (voir *Timeframe dérivé*). Pas encore affiché dans l'interface Streamlit.
-Statut : **Confirmé** (code et persistance existants), **À confirmer** (aucune page UI ne le
-consulte encore).
+`not_calculable` (voir *Timeframe dérivé*). Affiché en lecture seule dans le sous-onglet
+Streamlit "Data Center (aperçu)" (`ui_data_center.py`, onglet Données) depuis le 2026-08-05.
+Statut : **Confirmé**.
 
 **Timeframe dérivé (resampling)** :
 Unité de temps supérieure calculée à partir d'un timeframe source déjà présent en local (ex.
@@ -120,9 +125,10 @@ dessus à ce jour).
 
 **Synthèse Data Center (`DatasetSummary`)** :
 Structure assemblée par `market_data/summary.py`, combinant une entrée de catalogue, le statut
-des timeframes candidats et un rapport de qualité pour un actif/timeframe donné. Fondation
-prévue pour une future page Streamlit "Data Center" ; aucune page de ce type n'existe encore.
-Statut : **Confirmé** (code existant), **À confirmer** (aucune UI ne le consomme).
+des timeframes candidats et un rapport de qualité pour un actif/timeframe donné. Consommée par
+`ui_data_center.py` (sous-onglet "Data Center (aperçu)" de l'onglet Données) depuis le
+2026-08-05.
+Statut : **Confirmé**.
 
 **Actif** :
 L'instrument tradé, identifié par un symbole (ex. `NASDAQ` / `US100`), utilisé pour organiser
