@@ -54,3 +54,6 @@ history/
 settings/champion_validation.json
 settings/data_catalog.json
 derived_data/
+
+# === Secrets fournisseurs de données (clés API) — jamais versionné ===
+settings/data_providers.json
