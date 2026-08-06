@@ -1,7 +1,7 @@
 ---
 name: improve-codebase-architecture
-description: Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick.
-disable-model-invocation: true
+description: Scan an EXISTING codebase (or a named module/subsystem) for deepening/refactoring opportunities, present them as a visual HTML report, then grill through whichever one is picked. Use for "this module is hard to change/test", broad architectural-debt reviews, or refactor requests on code that already exists. Not for designing a brand-new subsystem from scratch (codebase-design), and not a substitute for /code-review.
+disable-model-invocation: false
 ---
 
 # Improve Codebase Architecture

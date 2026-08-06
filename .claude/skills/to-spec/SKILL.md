@@ -1,7 +1,7 @@
 ---
 name: to-spec
-description: Turn the current conversation into a spec and publish it to the project issue tracker — no interview, just synthesis of what you've already discussed.
-disable-model-invocation: true
+description: Turn an already-discussed need/feature into a written specification (problem, solution, user stories, implementation/testing decisions) and publish it to the issue tracker — synthesis of what was already said, no interview. Use for requests like "turn this into a spec" / "write up what we just discussed", once a feature has been discussed enough to write down but isn't a spec yet. Not for pinning down domain terminology (domain-modeling) or splitting an already-agreed spec into tasks (to-tickets).
+disable-model-invocation: false
 ---
 
 This skill takes the current conversation context and codebase understanding and produces a spec. Do NOT interview the user — just synthesize what you already know.
