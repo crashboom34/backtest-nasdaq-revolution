@@ -723,9 +723,17 @@ def _worker_run_single(params: dict, config: OptimizationConfig,
     else:
         # Fallback (appel direct sans initializer, ou n_workers=1 séquentiel)
         import pandas as pd
-        from engine import load_data
+        from engine import load_data_from_source
+        from market_data.adapters.single_file_csv import (
+            SingleFileCsvMarketDataSource, PLACEHOLDER_ASSET, PLACEHOLDER_TIMEFRAME,
+        )
 
-        df = load_data(config.data_file)
+        # Façade de compatibilité (Data Center Phase 11), même swap que optimizer_process.py —
+        # résultat strictement identique à l'ancien load_data(config.data_file), voir
+        # tests/test_engine_load_data_from_source.py.
+        df = load_data_from_source(
+            SingleFileCsvMarketDataSource(config.data_file), PLACEHOLDER_ASSET, PLACEHOLDER_TIMEFRAME
+        )
 
         if config.opt_start_date:
             ts_start = pd.Timestamp(config.opt_start_date, tz="Europe/Paris")

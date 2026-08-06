@@ -27,11 +27,11 @@ from market_data.schema import MarketDatasetInfo
 DEFAULT_CATALOG_PATH = Path(__file__).resolve().parent.parent / "settings" / "data_catalog.json"
 
 # Timeframes candidats "usuels" pour lesquels on affiche un statut (voir demande initiale,
-# section 2). Limité aux unités minute/heure/jour gérées par market_data.resample — pas encore
-# de semaine/mois (hors périmètre de l'ADR 0003 pour cette étape).
+# section 2). Unités minute/heure/jour gérées par market_data.resample (ADR 0003) plus les
+# unités calendaires W1/MO1 (ADR 0004, dérivables uniquement depuis une source D1).
 DEFAULT_CANDIDATE_TIMEFRAMES: tuple[str, ...] = (
     "M1", "M2", "M3", "M4", "M5", "M10", "M12", "M15", "M20", "M30", "M45",
-    "H1", "H2", "H4", "D1",
+    "H1", "H2", "H4", "H6", "H12", "D1", "W1", "MO1",
 )
 
 

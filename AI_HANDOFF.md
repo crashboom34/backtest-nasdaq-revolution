@@ -58,8 +58,13 @@ Plateforme de backtesting et d'optimisation de stratégies de trading sur le NAS
 | `market_data/resample.py` | Génère un timeframe supérieur à partir d'un timeframe source (ADR 0003) |
 | `market_data/derived.py` | Cache disque des timeframes dérivés (`derived_data/`, invalidé si la source change) |
 | `market_data/quality.py` | Contrôle qualité basique en lecture seule (`quality_flags`, score) |
-| `market_data/provider_config.py` | Emplacement générique des futures clés API fournisseurs (jamais versionné) |
+| `market_data/provider_config.py` | Clés/identifiants fournisseurs (EODHD + IG typés), jamais versionné, jamais de secret dans repr/logs |
 | `market_data/summary.py` | Assemble catalogue + statut timeframes + qualité (fondation future page Data Center) |
+| `market_data/eodhd/`     | Connecteur REST EODHD (config, HTTP retry/backoff, fenêtrage, normalisation, stockage, adaptateur `MarketDataSource`) — voir section Data Center ci-dessous |
+| `market_data/ig/`        | Connecteur IG démo lecture seule (config, session CST/token, client) — aucune fonction de trading |
+| `market_data/backtest_manifest.py` | Manifeste reproductible d'un backtest — additif, pas encore branché dans `run_job.py` |
+| `scripts/test_eodhd_connection.py` | Script de test de connexion EODHD pour débutant (aucun secret affiché, réseau désactivé par défaut) |
+| `scripts/test_ig_connection.py` | Script de test de connexion IG démo pour débutant (même contrat, environnement live toujours refusé) |
 
 ### Organisation des données de marché
 
@@ -154,14 +159,177 @@ préparer l'emplacement, pas encore à télécharger quoi que ce soit.
   tests permanente à ce stade — à décider si une validation UI automatisée récurrente est
   souhaitée.
 
-Prochaine étape restante : Phase 2 — un vrai connecteur EODHD (ou autre fournisseur), qui
-nécessite une clé API réelle et une vérification de la documentation officielle du fournisseur
-avant d'écrire le moindre appel réseau (voir la contrainte disque ci-dessous).
-
 **Point d'attention disque** : ≈3,0 Go libres sur C: au début de la session du 2026-08-05,
 ≈6,3 Go plus tard dans la même session (espace libéré entre-temps, en dehors de ce projet).
-Avant toute Phase 2/3 (téléchargement réel de données), vérifier l'espace disponible au moment
-voulu et prévoir, si besoin, de stocker les données de marché sur un autre disque.
+≈5,2 Go libres au début de la session du 2026-08-06. Avant tout téléchargement réel de données,
+vérifier l'espace disponible au moment voulu et prévoir, si besoin, de stocker les données de
+marché sur un autre disque.
+
+### Data Center — identifiants IG typés + connecteur REST EODHD (2026-08-06)
+
+**Sécurité des identifiants (Phase 2)** — `market_data/provider_config.py` étendu sans casser le
+mécanisme EODHD existant :
+- `EodhdCredentials`, `IgCredentials`, `ProviderCredentialStatus` : dataclasses dédiées, `repr()`/
+  `str()` ne révèlent jamais un secret (seulement "set"/"unset" par champ).
+- `get_ig_credentials()` / `save_ig_credentials()` / `ig_credential_status()` : api_key,
+  identifier, environment, account_id suivent la même priorité que EODHD (env puis
+  `settings/data_providers.json["ig"]`) ; **`password` est résolu UNIQUEMENT depuis
+  `BACKTEST_IG_PASSWORD`, jamais depuis le fichier** — `save_ig_credentials()` n'a
+  structurellement aucun paramètre `password`, donc ne peut pas l'écrire par erreur.
+- `tests/conftest.py` (nouveau) : fixture autouse qui neutralise les variables sensibles
+  (`BACKTEST_EODHD_API_KEY`, `BACKTEST_IG_*`, `BACKTEST_RUN_LIVE_PROVIDER_TESTS`) avant chaque
+  test — corrige un bug préexistant où 4 tests de `provider_config` lisaient la vraie clé EODHD
+  de la machine de développement dès qu'elle était configurée.
+
+**MCP EODHD (Phase 3)** : vérifié connecté (`get_user_details` — compte payant, quota
+100 000 appels/jour + 500 extra). Utilisé uniquement pour confirmer format de réponse et
+endpoints (`/eod`, `/intraday`, `/div`, `/splits`, `/search`, `/exchanges-list`,
+`/exchange-symbol-list`, `/user`) avant d'écrire le connecteur — endpoints et limites
+recoupés avec la documentation officielle eodhd.com (jamais devinés). Aucune dépendance runtime
+au MCP : le connecteur ci-dessous appelle directement l'API REST.
+
+**Connecteur REST EODHD (Phase 4)** — nouveau package `market_data/eodhd/`, aucun appel réseau à
+l'import, 100% testé hors ligne (fixtures/faux client HTTP, 67 tests) :
+- `errors.py` : hiérarchie d'exceptions (`EodhdAuthError` 401, `EodhdForbiddenError` 403,
+  `EodhdNotFoundError` 404, `EodhdRateLimitError` 429, `EodhdServerError` 5xx,
+  `EodhdResponseError`, `EodhdNetworkError`, `EodhdWindowLimitError`) ; `redact_url()` retire
+  toujours `api_token` d'une URL avant tout message d'erreur.
+- `config.py` : `EodhdConfig` (timeouts, retries, backoff, User-Agent explicite, taille de
+  réponse plafonnée) résolu via `provider_config.get_api_key("eodhd", ...)` — mécanisme EODHD
+  historique conservé tel quel.
+- `http_client.py` : un seul point d'entrée réseau, retry/backoff sur erreurs réseau/429/5xx
+  (respecte `Retry-After` si présent), mapping HTTP -> exceptions explicites, garde-fou taille de
+  réponse.
+- `windowing.py` : découpe un téléchargement intraday selon les limites EODHD confirmées (1m ->
+  120 j, 5m -> 600 j, 1h -> 7200 j), lève une erreur explicite plutôt qu'un téléchargement
+  silencieusement énorme si trop de fenêtres seraient nécessaires.
+- `normalize.py` : EOD/intraday -> schéma canonique (`time` tz-naive représentant l'UTC, même
+  convention que `local_csv`/`engine.py`) ; dividendes/splits normalisés séparément, hors du
+  schéma canonique OHLCV (voir ADR 0002 — pas encore de colonnes dividendes/splits).
+- `client.py` (`EodhdClient`) : `test_connection()`, `get_account_status()` (quota, jamais
+  nom/email), `search_instruments()`, `list_exchanges()`, `list_exchange_symbols()` (dont
+  `delisted=True` pour les titres radiés), `download_eod()`, `download_intraday()` (fenêtré
+  automatiquement, déduplique les timestamps en bord de fenêtre), `download_dividends()`,
+  `download_splits()`. Échecs réseau/HTTP renvoyés comme résultat `ok=False` explicite plutôt
+  qu'une exception technique, sauf le garde-fou "trop de fenêtres" qui lève avant tout appel.
+- `storage.py` : stockage sous `BACKTEST_DATA_DIR` — `raw/eodhd/{ticker}/{kind}/{hash}.json`
+  (immuable, idempotent par hash de contenu) + manifeste sidecar ; `normalized/{asset}/
+  {timeframe}/{hash}.parquet` (schéma canonique uniquement) + manifeste dans `manifests/`
+  (qualité via `market_data.quality`, période couverte, timezone UTC, hash, date de synchro).
+  Redaction défensive : toute clé `api_token`/`api_key`/`token`/`password` est retirée des
+  manifestes même si transmise par erreur. `ensure_free_disk_space()` bloque toute écriture si
+  moins de 2 Go libres.
+- `scripts/test_eodhd_connection.py` (nouveau dossier `scripts/`) : script pour débutant,
+  affiche uniquement configuré/non configuré/connexion réussie/échouée, aucun appel réseau sauf
+  si `BACKTEST_RUN_LIVE_PROVIDER_TESTS=1`. Test réel limité à `AAPL.US`, 5 derniers jours, EOD.
+- `requirements.txt`/`requirements-server.txt` : ajout de `requests==2.34.2` et
+  `pyarrow==24.0.0` (déjà présents dans `.venv`, désormais épinglés pour la reproductibilité).
+
+### Data Center — Phases 5 à 11 (2026-08-06, suite même session)
+
+**Phase 6 — unités calendaires (ADR 0004)** : `market_data/resample.py` gère désormais W1
+(semaine, ancrage lundi-dimanche UTC) et MO1 (mois civil UTC), dérivables uniquement depuis une
+source D1 (jamais directement depuis un timeframe intraday). Détection d'incomplétude basée sur
+la comparaison à la dernière donnée disponible (pas un comptage de barres attendues, qui
+donnerait un faux "incomplet" chaque semaine à cause des week-ends). `DEFAULT_CANDIDATE_TIMEFRAMES`
+étendu avec H6, H12, W1, MO1. Le petit test réel EODHD (Phase 9) et toutes les unités déjà
+supportées (2m/3m/5m/10m/15m/4h/6h/12h) fonctionnaient déjà via le mécanisme générique existant.
+
+**Phase 5 — catalogue/stockage EODHD** : `market_data/eodhd/storage.py` complété avec
+`list_normalized_snapshots()`, `list_raw_snapshots()`, `disk_usage_summary()`, et un journal de
+synchronisation (`record_sync_event()`/`load_sync_log()`/`last_successful_sync()`/
+`last_failed_sync()`, plafonné à 200 événements, sous `manifests/sync_log.json`). Correction
+d'un bug de collision de hash découvert par les tests : le hash de contenu d'un snapshot
+normalisé inclut désormais `asset|timeframe|ticker|source`, pas seulement les valeurs OHLCV
+(deux instruments différents avec des prix identiques auraient sinon partagé le même manifeste).
+
+**Phase 7 — connecteur IG démo, lecture seule** (`market_data/ig/`) : endpoints confirmés par
+recoupement documentation officielle IG Labs + bibliothèque de référence `trading-ig`
+(2026-08-06) — `POST /session` (v2, login), `DELETE /session` (v1, logout), `GET /accounts`
+(v1), `GET /markets?searchTerm=` (v1, recherche), `GET /markets/{epic}` (v3, détails),
+`GET /prices/{epic}/{resolution}/{start}/{end}` (v2, historique — résolutions confirmées :
+SECOND, MINUTE(_2/3/5/10/15/30), HOUR(_2/3/4), DAY, WEEK, MONTH ; format date
+`"%Y/%m/%d %H:%M:%S"`). Base URL démo (`https://demo-api.ig.com/gateway/deal`) codée en dur,
+non paramétrable — `IgConfig.__post_init__()` refuse toute autre URL, y compris la live. Session
+CST/X-SECURITY-TOKEN en mémoire uniquement (`IgHttpClient`), jamais écrite sur disque. Aucune
+méthode de trading n'existe (vérifié par un test qui énumère les méthodes publiques d'`IgClient`
+et refuse toute mention position/order/deal/trade/close/otc/confirm). Identifiants IG absents
+sur cette machine : tout construit et testé avec des fixtures/mocks (52 tests), 0 appel réseau
+réel effectué. `scripts/test_ig_connection.py` reporte "non configuré" proprement.
+
+**Phase 9 — test réel EODHD exécuté** (autorisation explicite utilisateur, 2026-08-06) :
+`scripts\test_eodhd_connection.py` avec `BACKTEST_RUN_LIVE_PROVIDER_TESTS=1` (flag scopé à la
+commande, jamais persisté) → connexion réussie, téléchargement de 3 bougies EOD réelles pour
+`AAPL.US` (5 derniers jours). Confirme que le connecteur REST fonctionne de bout en bout contre
+la vraie API, indépendamment de Claude Code/MCP.
+
+**Phase 10 — page Data Center étendue** : `ui_data_center.py` (module existant, pas de refonte
+d'`app.py`) complété avec 3 nouvelles sections : connecteur REST EODHD (statut, bouton de test
+réel, catalogue des snapshots déjà téléchargés, journal de synchro, avertissement avant gros
+téléchargement), connecteur IG démo (statut, bouton de test réel — jamais la valeur brute de
+`BACKTEST_IG_ENVIRONMENT`, seulement "demo (autorisé)" ou un refus générique), stockage local
+(espace disque). Validé avec Playwright (Edge, headless) : clic réel sur "Tester la connexion
+EODHD" → bannière verte "Connexion EODHD réussie." après ~8 s (vrai appel réseau), aucune erreur
+console, aucun secret visible dans le texte ni les captures. Note statique expliquant que le MCP
+EODHD est un outil de développement Claude Code, non interrogeable depuis l'app en cours
+d'exécution (processus différent).
+
+**Phase 11 — façade de compatibilité + manifeste** :
+- `market_data/eodhd/adapter.py` (`EodhdMarketDataSource`) : implémente le port
+  `MarketDataSource` en relisant les snapshots normalisés déjà stockés localement (aucun
+  téléchargement déclenché dans `list_available()`/`load()`, même contrat que
+  `LocalCsvMarketDataSource`). Test clé : `engine.load_data_from_source()` fonctionne à
+  l'identique avec cet adaptateur qu'avec le CSV local, sans qu'`engine.py` connaisse EODHD —
+  c'est la façade de compatibilité demandée.
+- `market_data/backtest_manifest.py` (`BacktestManifest`/`build_backtest_manifest()`/
+  `save_backtest_manifest()`/`load_backtest_manifest()`) : manifeste reproductible avec tous les
+  champs minimaux requis (fournisseur, instrument, symbole fournisseur, type d'actif, snapshot,
+  hash, période, unité source/dérivée, timezone, séance, gestion des barres partielles, options
+  de rééchantillonnage, version stratégie/moteur, commit Git si disponible, date de lancement).
+  Écriture atomique, immuable (`FileExistsError` si le chemin existe déjà).
+- **Branchement réel effectué (2026-08-06, autorisation explicite de l'utilisateur après
+  disclosure du risque)** : `optimizer_process.py` et `optimizer.py` (fallback séquentiel)
+  chargent désormais leurs données via `engine.load_data_from_source(SingleFileCsvMarketDataSource
+  (config.data_file), ...)` au lieu d'un appel direct à `engine.load_data(config.data_file)`.
+  `engine.load_data()` elle-même reste inchangée (toujours utilisée ailleurs, ex. `app.py`).
+  - **Découverte critique pendant la caractérisation** : le vrai `nasdaq_3m.csv` a des colonnes
+    non canoniques (`tick_volume`, `spread`) en plus des colonnes canoniques. Une première
+    version de l'adaptateur (basée sur `LocalCsvMarketDataSource`, qui restreint au schéma
+    canonique) aurait silencieusement perdu ces deux colonnes. Confirmé inoffensif par grep
+    (aucun code de `engine.py`/`strategies/`/`scoring.py`/`optimizer.py` ne les lit), mais
+    corrigé quand même par principe : nouveau module `market_data/csv_reading.py` avec deux
+    fonctions distinctes — `read_canonical_csv()` (restreint + synthétise "volume", utilisé par
+    `LocalCsvMarketDataSource`, comportement inchangé) et `read_raw_validated_csv()` (passage
+    strictement transparent, utilisé par le nouvel adaptateur `SingleFileCsvMarketDataSource`
+    dans `market_data/adapters/single_file_csv.py`).
+  - **Preuve d'équivalence** : `tests/test_engine_load_data_from_source.py::
+    test_single_file_csv_source_matches_load_data_on_the_real_nasdaq_csv` compare
+    `pd.testing.assert_frame_equal` sur le vrai fichier (1 000 000 lignes) — vert.
+  - **Validation end-to-end réelle** : deux jobs réels lancés avec `run_job.py` (preset
+    équivalent "Test rapide local", 12 combinaisons, `max_rows=50000`) après le swap :
+    `job_phase11_facade_check_001` et `job_phase11_manifest_check_001`, tous deux `completed`,
+    12/12 testées, 7 fichiers générés. Laissés dans `results/` (jamais supprimés sans
+    autorisation) — supprimables via l'onglet Maintenance si souhaité.
+- **Manifeste branché** : `job_store.write_data_manifest()` écrit `data_manifest.json` dans
+  chaque job (appelé depuis `finalize_job()`, après `write_archive()`). Champs disponibles avec
+  les métadonnées actuelles du pipeline (`provider="local_csv"`, `instrument`/`provider_symbol`
+  dérivés du nom de fichier, `strategy_version` depuis `meta`, `git_commit` auto-détecté,
+  `launched_at`) ; `source_timeframe`/`period_start`/`period_end`/`snapshot_id`/`content_hash`
+  restent `"unknown"`/`None` tant que le pipeline ne track pas ces informations plus finement
+  (honnête plutôt que deviné). **Vérifié que `data_manifest.json` n'apparaît jamais dans
+  `archive.zip`** (toujours exactement les 7 fichiers historiques — `ARCHIVE_SOURCE_FILES` est
+  une liste explicite, jamais un scan de dossier).
+- **Calendrier de marché (amorce)** : `EodhdClient.get_exchange_details()` (endpoint confirmé :
+  `/exchange-details/{EXCHANGE_CODE}`) + nouveau module `market_data/eodhd/calendar.py`
+  (`ExchangeCalendar`, `parse_exchange_calendar()`, `is_trading_day()`). Basé sur l'échantillon
+  réel capturé via le MCP EODHD (exchange "US" : fuseau, heures UTC, jours ouvrés, jours fériés,
+  fermetures anticipées). Pas encore consommé par `market_data.resample` (qui reste ancré UTC
+  sans calendrier de marché, limitation documentée depuis l'ADR 0003) — c'est la brique de base,
+  l'intégration dans le resampling reste à faire.
+- **Catalogue unifié** : nouveau `market_data/unified_catalog.py`
+  (`build_unified_catalog(local_source, eodhd_data_dir)`) combine le catalogue CSV local et les
+  snapshots EODHD en une liste unique, sans dupliquer ni modifier `market_data.catalog` ou
+  `market_data.eodhd.storage`. Nouvelle section "6. Catalogue unifié" dans `ui_data_center.py`.
 
 ---
 
@@ -346,18 +514,29 @@ pip install -r requirements-server.txt
 - [x] Mode démo UI : jobs factices temporaires, bannière visible, liens Champion → retest simulés et lancements désactivés
 - [x] Data Center — socle local (2026-08-05) : schéma canonique (ADR 0002), port `MarketDataSource`, adaptateur CSV local, catalogue JSON, génération de timeframes dérivés (ADR 0003), cache disque des dérivés, statut source/calculable/en cache, contrôle qualité basique, emplacement générique pour les futures clés API, assembleur de synthèse
 - [x] Data Center — port branché (2026-08-05, suite) : `engine.load_data_from_source()` additif (résultat identique à `load_data()`, vérifié y compris sur le vrai `nasdaq_3m.csv`), sous-onglet Streamlit "Data Center (aperçu)" dans l'onglet Données, validé avec Playwright/Edge sur les vraies données locales sans erreur ni modification
+- [x] Data Center — identifiants IG typés (2026-08-06) : `EodhdCredentials`/`IgCredentials`/`ProviderCredentialStatus`, mot de passe IG env-only, `tests/conftest.py` isole la suite des vraies variables d'environnement
+- [x] Data Center — connecteur REST EODHD (2026-08-06) : package `market_data/eodhd/` complet (config, client HTTP retry/backoff, fenêtrage intraday, normalisation, stockage brut+Parquet sous `BACKTEST_DATA_DIR`), 67 tests hors ligne, `scripts/test_eodhd_connection.py`. Endpoints/limites confirmés via le MCP EODHD + documentation officielle, jamais devinés.
+- [x] Data Center — unités calendaires W1/MO1 (2026-08-06, ADR 0004) : `market_data.resample` dérive semaine/mois depuis une source D1 uniquement, ancrage lundi-dimanche/mois civil UTC.
+- [x] Data Center — catalogue/journal de synchro EODHD (2026-08-06) : `list_normalized_snapshots()`, `list_raw_snapshots()`, `disk_usage_summary()`, journal de synchronisation plafonné.
+- [x] Data Center — connecteur IG démo lecture seule (2026-08-06) : package `market_data/ig/` complet, base URL démo non paramétrable, aucune fonction de trading, 52 tests hors ligne (identifiants IG absents sur cette machine, tout testé via fixtures), `scripts/test_ig_connection.py`.
+- [x] Data Center — test réel EODHD exécuté (2026-08-06) : connexion + téléchargement de 3 bougies AAPL.US réussis contre la vraie API.
+- [x] Data Center — page Streamlit étendue (2026-08-06) : sections EODHD/IG/stockage dans `ui_data_center.py`, boutons de test réels, validés avec Playwright/Edge (clic réel → "Connexion EODHD réussie.", aucune erreur console, aucun secret affiché).
+- [x] Data Center — façade de compatibilité + manifeste, branchement réel (2026-08-06, autorisation explicite) : `optimizer_process.py`/`optimizer.py` chargent via `engine.load_data_from_source(SingleFileCsvMarketDataSource(...))`, équivalence prouvée sur le vrai `nasdaq_3m.csv` (`pd.testing.assert_frame_equal`), 2 jobs réels exécutés avec succès. `job_store.write_data_manifest()` branché dans `finalize_job()` — chaque nouveau job écrit désormais `data_manifest.json`, sans casser l'invariant 7-fichiers d'`archive.zip`.
+- [x] Data Center — calendrier de marché, amorce (2026-08-06) : `EodhdClient.get_exchange_details()` + `market_data/eodhd/calendar.py` (`ExchangeCalendar`, `is_trading_day()`), basé sur un échantillon réel. Pas encore consommé par `market_data.resample`.
+- [x] Data Center — catalogue unifié (2026-08-06) : `market_data/unified_catalog.py` combine CSV local + EODHD, nouvelle section dans `ui_data_center.py`.
 
 ### Reste à faire (prochaines étapes suggérées)
 
 - [ ] Tester manuellement le lancement complet depuis Streamlit avec le nouveau système de jobs
-- [ ] Documenter la source / format exact de `nasdaq_3m.csv`
+- [ ] Documenter la source / format exact de `nasdaq_3m.csv` (inclure la présence des colonnes `tick_volume`/`spread`, découverte le 2026-08-06)
 - [ ] Brancher plus tard MT5 ou une autre source d'import vers `data/{ASSET}/{TIMEFRAME}/`
 - [ ] Ajouter plus tard une gestion avancée des formats CSV exotiques si nécessaire (fuseaux horaires spécifiques, colonnes renommées non standards)
 - [ ] Éventuellement : déploiement serveur Linux avec `BACKTEST_BASE_DIR`
-- [ ] Data Center : faire réellement passer `run_job.py`/le lancement d'optimisation par `engine.load_data_from_source()` (actuellement disponible mais pas utilisé par le chemin réel de backtest — décision à prendre explicitement, pas automatique)
-- [ ] Data Center Phase 2 : premier vrai connecteur fournisseur (EODHD ou autre) — **bloqué en attente d'une clé API réelle et de la documentation officielle du fournisseur**, fournies par l'utilisateur ; aucun connecteur ne doit être écrit sur la base d'endpoints devinés
-- [ ] Data Center Phase 2 : valider le budget de téléchargement face à l'espace disque disponible avant tout premier téléchargement réel
-- [ ] Décider si Playwright (installé localement dans `.venv` pour la validation du 2026-08-05) doit devenir une dépendance permanente (`requirements.txt`) avec une suite de tests UI récurrente
+- [ ] Enrichir `data_manifest.json` avec asset/timeframe/snapshot/hash/période réels dès que le pipeline de jobs trackera ces informations structurées (aujourd'hui `source_timeframe="unknown"`, `snapshot_id`/`content_hash`/`period_*` = `None` — honnête plutôt que deviné, voir job_store.write_data_manifest())
+- [ ] Intégrer le calendrier de marché (`market_data.eodhd.calendar`) dans `market_data.resample` pour un ancrage réel sur les séances (au lieu d'UTC pur)
+- [ ] Identifiants IG réels : dès qu'ils seront fournis, exécuter `scripts\test_ig_connection.py` avec `BACKTEST_RUN_LIVE_PROVIDER_TESTS=1` pour la première validation réelle (jamais fait à ce jour, IG reste entièrement validé hors ligne)
+- [ ] Décider si Playwright doit devenir une dépendance permanente (`requirements.txt`) avec une suite de tests UI récurrente (utilisé ponctuellement pour la validation du 2026-08-05 et du 2026-08-06)
+- [ ] Nettoyer (ou laisser, au choix) les jobs de test `results/job_phase11_facade_check_001/` et `results/job_phase11_manifest_check_001/` générés le 2026-08-06 pour valider le branchement réel — non supprimés automatiquement (voir Maintenance)
 
 ---
 

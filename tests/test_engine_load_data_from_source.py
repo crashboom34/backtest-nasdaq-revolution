@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import path_resolver
 from engine import load_data, load_data_from_source
 from market_data.adapters.local_csv import LocalCsvMarketDataSource
+from market_data.adapters.single_file_csv import SingleFileCsvMarketDataSource
 from market_data.schema import MarketDataResult, MarketDatasetInfo
 
 _CSV_CONTENT = (
@@ -91,3 +92,33 @@ def test_load_data_from_source_works_with_any_conforming_source():
 
     assert len(result) == 2
     assert "time_paris" in result.columns
+
+
+def test_single_file_csv_source_matches_load_data_exactly(tmp_path):
+    """Même équivalence que LocalCsvMarketDataSource ci-dessus, pour l'adaptateur utilisé par
+    optimizer_process.py/optimizer.py (Phase 11, façade de compatibilité) — prouve que le swap
+    load_data(config.data_file) -> load_data_from_source(SingleFileCsvMarketDataSource(...))
+    est strictement transparent."""
+    csv_path = tmp_path / "any_path.csv"
+    _write_csv(csv_path, _CSV_CONTENT)
+
+    via_direct_path = load_data(str(csv_path))
+    via_port = load_data_from_source(SingleFileCsvMarketDataSource(csv_path), "job", "job")
+
+    pd.testing.assert_frame_equal(via_direct_path, via_port)
+
+
+@pytest.mark.skipif(
+    not os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "nasdaq_3m.csv")),
+    reason="nasdaq_3m.csv absent (fichier volumineux non versionné) — test seulement possible en local",
+)
+def test_single_file_csv_source_matches_load_data_on_the_real_nasdaq_csv():
+    """Caractérisation la plus forte possible (Phase 11) : équivalence vérifiée sur le vrai
+    fichier de production, lu en lecture seule, jamais modifié."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    real_csv = os.path.join(repo_root, "nasdaq_3m.csv")
+
+    via_direct_path = load_data(real_csv)
+    via_port = load_data_from_source(SingleFileCsvMarketDataSource(real_csv), "job", "job")
+
+    pd.testing.assert_frame_equal(via_direct_path, via_port)

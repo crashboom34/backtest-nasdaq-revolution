@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from job_artifacts import ARCHIVE_SOURCE_FILES, build_job_archive
+from market_data.backtest_manifest import build_backtest_manifest, save_backtest_manifest
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -437,6 +438,43 @@ def write_archive(job_dir: str) -> Optional[str]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MANIFESTE REPRODUCTIBLE (Data Center Phase 11 — additif)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def write_data_manifest(job_dir: str, config_dict: dict, meta: dict) -> None:
+    """Écrit data_manifest.json — manifeste reproductible additif (voir
+    market_data.backtest_manifest, CLAUDE.md Phase 11).
+
+    Best-effort avec les métadonnées aujourd'hui disponibles dans config_dict/meta : ce pipeline
+    ne track pas encore explicitement asset/timeframe/snapshot structurés (data_file est un
+    chemin CSV brut, pas un couple provider/asset/timeframe) — ces champs restent "unknown"/None
+    tant que ce suivi n'existe pas plus finement. Jamais inclus dans archive.zip (voir
+    ARCHIVE_SOURCE_FILES, liste explicite non affectée par ce nouveau fichier).
+
+    N'écrase jamais un manifeste existant (immuable — FileExistsError silencieusement ignorée).
+    Une erreur d'écriture ne fait jamais échouer la génération des artefacts du job : ce fichier
+    est additif, les 5 artefacts historiques restent prioritaires.
+    """
+    data_file = config_dict.get("data_file", "") or ""
+    instrument = os.path.splitext(os.path.basename(data_file))[0] or "unknown"
+
+    try:
+        manifest = build_backtest_manifest(
+            provider="local_csv",
+            instrument=instrument,
+            provider_symbol=instrument,
+            source_timeframe="unknown",
+            strategy_version=meta.get("strategy_name", "unknown"),
+            repo_dir=os.path.dirname(os.path.abspath(__file__)),
+        )
+        save_backtest_manifest(os.path.join(job_dir, "data_manifest.json"), manifest)
+    except FileExistsError:
+        pass  # déjà écrit pour ce job (ex. deuxième appel) — jamais écrasé
+    except Exception as exc:  # noqa: BLE001 — additif, ne doit jamais casser le job
+        print(f"[job_store] data_manifest.json non généré (non bloquant) : {exc}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # FINALIZATION (point d'entrée unique pour optimizer_process)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -461,6 +499,7 @@ def finalize_job(
     write_report_html(job_dir, meta, config_dict)
     write_logs(job_dir, log_lines)
     write_archive(job_dir)
+    write_data_manifest(job_dir, config_dict, meta)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -46,21 +46,67 @@ actif/timeframe (`path_resolver.py`), utilisées comme entrée du moteur de back
 Statut : **Confirmé**.
 
 **Fournisseur de données** :
-Aujourd'hui, un seul fournisseur réellement utilisé pour produire `nasdaq_3m.csv` : MetaTrader 5
-(MT5), via le module `MetaTrader5` (`get_data.py`). Une abstraction multi-fournisseurs existe
-dans `market_data/` (voir *Port de données de marché*), avec un seul adaptateur réel
-(`LocalCsvMarketDataSource`, CSV local) — aucun connecteur EODHD/Dukascopy/FirstRate/IG/
-Binance/Alpaca n'existe encore. Le chemin de backtest réellement utilisé (`run_job.py`,
-lancement d'optimisation) reste `engine.load_data()` + CSV direct, pas le port.
+Pour le backtest réel (`run_job.py`, lancement d'optimisation), un seul fournisseur utilisé :
+MetaTrader 5 (MT5), via le module `MetaTrader5` (`get_data.py`), qui produit `nasdaq_3m.csv`.
+Une abstraction multi-fournisseurs existe dans `market_data/` (voir *Port de données de
+marché*), avec un adaptateur CSV local (`LocalCsvMarketDataSource`) et, depuis 2026-08-06, un
+connecteur REST EODHD complet (`market_data/eodhd/`, voir *Connecteur REST EODHD*) — mais ce
+dernier n'est pas encore un adaptateur `MarketDataSource` et n'est pas branché à `engine.py`/
+`app.py`. Aucun connecteur Dukascopy/FirstRate/IG/Binance/Alpaca n'existe encore.
 _À ne pas confondre avec_ : un import CSV manuel, qui est une voie d'entrée de données
 distincte (voir *Import CSV*) et ne passe pas par MT5.
-Statut : **Confirmé** (fournisseur unique réellement utilisé pour la donnée MT5 ; port et
-adaptateur CSV local existants mais toujours pas le chemin par défaut du moteur).
+Statut : **Confirmé** (fournisseur unique réellement utilisé pour la donnée MT5 ; port,
+adaptateur CSV local et connecteur REST EODHD existants mais toujours pas le chemin par défaut
+du moteur).
+
+**Connecteur REST EODHD** *(terme additionnel, Phase 4 Data Center, 2026-08-06)* :
+Package `market_data/eodhd/` : client HTTP direct vers l'API REST publique d'EODHD
+(`https://eodhd.com/api`, endpoints confirmés via documentation officielle et le MCP EODHD, ne
+dépend jamais de ce MCP à l'exécution). Expose `EodhdClient` avec `test_connection()`,
+`get_account_status()`, `search_instruments()`, `list_exchanges()`, `list_exchange_symbols()`,
+`download_eod()`, `download_intraday()` (fenêtré selon les limites EODHD : 1m/120j, 5m/600j,
+1h/7200j), `download_dividends()`, `download_splits()`. Stocke sous `BACKTEST_DATA_DIR`
+(`raw/eodhd/...` immuable par hash de contenu, `normalized/.../*.parquet` pour le schéma
+canonique OHLCV, `manifests/...`). Lecture seule, aucune fonction d'écriture/trading.
+Un vrai test réseau a été exécuté le 2026-08-06 (autorisation explicite) : connexion + 3
+bougies EOD réelles pour `AAPL.US`.
+_À ne pas confondre avec_ : `EodhdMarketDataSource` (`market_data/eodhd/adapter.py`, depuis
+2026-08-06) — un adaptateur distinct qui, lui, implémente le port `MarketDataSource` en
+relisant les snapshots déjà stockés localement (jamais de téléchargement dans `load()`) ; le
+client REST ci-dessus est ce qui produit ces snapshots en amont, via un appel explicite.
+Statut : **Confirmé** (existant, testé hors ligne et en conditions réelles) ; **À confirmer**
+(branchement au moteur de backtest réel — décision explicite non prise à ce jour, voir
+`EodhdMarketDataSource`).
+
+**Connecteur IG** *(terme additionnel, Phase 7 Data Center, 2026-08-06)* :
+Package `market_data/ig/`, strictement environnement démo (refus de "live"/"prod"/vide avant
+tout appel réseau, base URL démo `https://demo-api.ig.com/gateway/deal` non paramétrable) et
+strictement lecture seule (aucune méthode de trading n'existe, structurellement). Endpoints
+confirmés par recoupement documentation officielle IG Labs + bibliothèque de référence
+`trading-ig`. `IgClient` expose `login()`/`logout()`/`test_connection()`/`get_accounts()`/
+`discover_account_id()`/`search_markets()`/`get_market_details()`/`get_prices()`. Session
+(CST/X-SECURITY-TOKEN) en mémoire uniquement. Identifiants IG absents sur cette machine : testé
+entièrement hors ligne (fixtures), aucun appel réseau réel effectué à ce jour.
+Statut : **Confirmé** (existant, testé hors ligne uniquement — pas de validation réseau réelle
+à ce jour, contrairement à EODHD).
+
+**Manifeste de backtest (`BacktestManifest`)** *(terme additionnel, Phase 11 Data Center,
+2026-08-06)* :
+`market_data/backtest_manifest.py` : structure reproductible (fournisseur, instrument, symbole
+fournisseur, type d'actif, snapshot, hash, période, unité source/dérivée, timezone, séance,
+gestion des barres partielles, options de rééchantillonnage, version stratégie/moteur, commit
+Git, date de lancement), écriture atomique et immuable. Capacité additive, pas branchée dans
+`job_store.py`/`run_job.py` — décision explicite distincte requise avant adoption (risque de
+régression sur le pipeline de jobs réel).
+Statut : **Confirmé** (existant, testé) ; **À confirmer** (adoption dans le pipeline de jobs
+réel — non fait à ce jour, décision explicite requise).
 
 **Port de données de marché (`MarketDataSource`)** *(terme additionnel, socle Data Center)* :
 Interface définie dans `market_data/ports.py` (`list_available()`, `load(asset, timeframe)`)
 que tout futur adaptateur fournisseur (EODHD, Dukascopy, FirstRate, IG...) devra respecter.
-Un seul adaptateur existe à ce jour : `LocalCsvMarketDataSource`. Décision documentée dans
+Deux adaptateurs existent à ce jour : `LocalCsvMarketDataSource` et, depuis 2026-08-06,
+`EodhdMarketDataSource` (relit des snapshots EODHD déjà stockés localement). Décision documentée
+dans
 `docs/adr/0002-canonical-market-data-schema.md`.
 _Branchement (2026-08-05)_ : `engine.load_data_from_source()` consomme ce port et produit un
 résultat identique à `engine.load_data()` (vérifié par test, y compris sur le vrai
@@ -116,12 +162,15 @@ heures de séance (nécessite un calendrier de marché absent du dépôt).
 Statut : **Confirmé**.
 
 **Configuration fournisseur (clé API)** :
-Emplacement générique (`market_data/provider_config.py`) où une future clé API de fournisseur
-(EODHD, IG...) sera lue : variable d'environnement `BACKTEST_<PROVIDER>_API_KEY` en priorité,
-sinon `settings/data_providers.json` (fichier local, jamais versionné). Aucun connecteur réel
-ne consomme encore cette clé.
-Statut : **Confirmé** (mécanisme existant), **À confirmer** (aucun fournisseur réel branché
-dessus à ce jour).
+`market_data/provider_config.py` : variable d'environnement `BACKTEST_<PROVIDER>_API_KEY` en
+priorité, sinon `settings/data_providers.json` (fichier local, jamais versionné). Consommé
+réellement par le connecteur REST EODHD (`market_data.eodhd.config.load_eodhd_config()`) depuis
+2026-08-06. IG a un mécanisme dédié multi-champs (`get_ig_credentials()`/`IgCredentials`) : le
+mot de passe (`BACKTEST_IG_PASSWORD`) est résolu uniquement depuis l'environnement, jamais depuis
+le fichier local, contrairement aux autres champs IG (api_key, identifier, environment,
+account_id) qui suivent la même priorité que EODHD.
+Statut : **Confirmé** (mécanisme existant, consommé par le connecteur EODHD ; IG configuré mais
+sans connecteur réel branché dessus à ce jour).
 
 **Synthèse Data Center (`DatasetSummary`)** :
 Structure assemblée par `market_data/summary.py`, combinant une entrée de catalogue, le statut

@@ -78,4 +78,24 @@ def test_timeframe_becomes_cached_after_get_or_generate(monkeypatch, tmp_path):
 def test_default_candidate_timeframes_cover_common_units(tmp_path):
     statuses = list_timeframe_status("NASDAQ", "M3", cache_dir=tmp_path / "derived_data")
     timeframes = {s.timeframe for s in statuses}
-    assert {"M3", "M15", "H1", "H4", "D1"}.issubset(timeframes)
+    assert {"M3", "M15", "H1", "H4", "H6", "H12", "D1", "W1", "MO1"}.issubset(timeframes)
+
+
+def test_weekly_and_monthly_are_not_calculable_from_a_non_daily_source(tmp_path):
+    # Source M3 (ex. NASDAQ) : W1/MO1 ne sont dérivables que depuis D1 (voir ADR 0004).
+    statuses = list_timeframe_status(
+        "NASDAQ", "M3", candidate_timeframes=("W1", "MO1"), cache_dir=tmp_path / "derived_data"
+    )
+    by_tf = {s.timeframe: s.status for s in statuses}
+    assert by_tf["W1"] == "not_calculable"
+    assert by_tf["MO1"] == "not_calculable"
+
+
+def test_weekly_and_monthly_are_calculable_from_a_daily_source(tmp_path):
+    statuses = list_timeframe_status(
+        "NASDAQ", "D1", candidate_timeframes=("D1", "W1", "MO1"), cache_dir=tmp_path / "derived_data"
+    )
+    by_tf = {s.timeframe: s.status for s in statuses}
+    assert by_tf["D1"] == "source"
+    assert by_tf["W1"] == "calculable_not_cached"
+    assert by_tf["MO1"] == "calculable_not_cached"

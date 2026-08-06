@@ -57,7 +57,8 @@ if __name__ == "__main__":
         normalize_max_combinations,
     )
     from report_generator import generate_report
-    from engine import load_data
+    from engine import load_data_from_source
+    from market_data.adapters.single_file_csv import SingleFileCsvMarketDataSource, PLACEHOLDER_ASSET, PLACEHOLDER_TIMEFRAME
 
     # ════════════════════════════════════════════════════════════
     # COLLECTE DE LOGS
@@ -197,7 +198,14 @@ if __name__ == "__main__":
     # ════════════════════════════════════════════════════════════
 
     _log(f"Chargement des données : {_abs_data}")
-    df = load_data(config.data_file)
+    # Façade de compatibilité (Data Center Phase 11) : passe par le port MarketDataSource au
+    # lieu d'un appel direct à engine.load_data(chemin_brut). SingleFileCsvMarketDataSource
+    # enveloppe le même chemin déjà résolu (config.data_file) et produit un résultat strictement
+    # identique — vérifié par test contre le vrai nasdaq_3m.csv, voir
+    # tests/test_engine_load_data_from_source.py::test_single_file_csv_source_matches_load_data_on_the_real_nasdaq_csv.
+    df = load_data_from_source(
+        SingleFileCsvMarketDataSource(config.data_file), PLACEHOLDER_ASSET, PLACEHOLDER_TIMEFRAME
+    )
     _log(f"DataFrame chargé : {len(df)} lignes")
 
     # ════════════════════════════════════════════════════════════

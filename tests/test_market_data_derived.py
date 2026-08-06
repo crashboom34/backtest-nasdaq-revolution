@@ -109,6 +109,38 @@ def test_incompatible_target_timeframe_returns_explicit_failure(monkeypatch, tmp
     assert "multiple entier" in result.message
 
 
+_D1_9_DAYS = (
+    "time,open,high,low,close,volume\n"
+    "2024-01-01,100,105,99,101,10\n"
+    "2024-01-02,101,106,100,103,11\n"
+    "2024-01-03,103,107,102,104,12\n"
+    "2024-01-04,104,108,103,105,13\n"
+    "2024-01-05,105,109,104,106,14\n"
+    "2024-01-06,106,110,105,107,15\n"
+    "2024-01-07,107,111,106,108,16\n"
+    "2024-01-08,108,112,107,109,17\n"
+    "2024-01-09,109,113,108,110,18\n"
+)
+
+
+def test_weekly_timeframe_is_generated_and_cached_from_daily_source(monkeypatch, tmp_path):
+    # Voir docs/adr/0004-calendar-timeframe-resampling.md : W1 dérivable depuis D1.
+    monkeypatch.setattr(path_resolver, "BASE_DIR", tmp_path)
+    _write_csv(tmp_path / "data" / "NASDAQ" / "D1" / "nasdaq_d1.csv", _D1_9_DAYS)
+    cache_dir = tmp_path / "derived_data"
+    source = LocalCsvMarketDataSource()
+
+    first = get_or_generate(source, "NASDAQ", "D1", "W1", cache_dir=cache_dir)
+    assert first.ok is True
+    assert first.from_cache is False
+    assert len(first.dataframe) == 2  # semaine du 1er (lun->dim) + semaine du 8 (partielle)
+    assert (cache_dir / "NASDAQ" / "W1__from_D1.csv").is_file()
+
+    second = get_or_generate(source, "NASDAQ", "D1", "W1", cache_dir=cache_dir)
+    assert second.from_cache is True
+    assert list(second.dataframe["close"]) == list(first.dataframe["close"])
+
+
 def test_corrupted_cache_metadata_falls_back_to_regeneration(monkeypatch, tmp_path):
     monkeypatch.setattr(path_resolver, "BASE_DIR", tmp_path)
     _write_csv(tmp_path / "data" / "NASDAQ" / "M3" / "nasdaq_m3.csv", _M3_5_BARS)

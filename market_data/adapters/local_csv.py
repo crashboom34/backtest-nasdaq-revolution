@@ -11,15 +11,9 @@ local, exactement comme le fait aujourd'hui l'onglet Streamlit "Données".
 
 from __future__ import annotations
 
-import pandas as pd
-
 import path_resolver
-from market_data.schema import (
-    CANONICAL_COLUMNS,
-    MarketDataResult,
-    MarketDatasetInfo,
-    validate_canonical_columns,
-)
+from market_data.csv_reading import read_canonical_csv
+from market_data.schema import MarketDataResult, MarketDatasetInfo
 
 
 class LocalCsvMarketDataSource:
@@ -42,29 +36,14 @@ class LocalCsvMarketDataSource:
         if not resolution.exists:
             return MarketDataResult(info=info, dataframe=None, ok=False, message=resolution.message)
 
-        try:
-            df = pd.read_csv(resolution.path, parse_dates=["time"])
-        except Exception as exc:
-            message = f"CSV illisible ({resolution.relative_path}) : {exc}"
+        outcome = read_canonical_csv(resolution.path)
+        if not outcome.ok:
+            # Même message que l'ancienne implémentation inline, juste reformaté via le chemin
+            # relatif (plus lisible pour l'utilisateur) plutôt que le chemin absolu du helper.
+            message = outcome.message.replace(str(resolution.path), resolution.relative_path)
             return MarketDataResult(info=info, dataframe=None, ok=False, message=message)
 
-        missing = validate_canonical_columns(df)
-        if missing:
-            message = (
-                f"Colonnes canoniques manquantes dans {resolution.relative_path} : "
-                + ", ".join(missing)
-                + "."
-            )
-            return MarketDataResult(info=info, dataframe=None, ok=False, message=message)
-
-        df = df.copy()
-        if "volume" not in df.columns:
-            df["volume"] = pd.NA
-
-        ordered_cols = [c for c in CANONICAL_COLUMNS if c in df.columns]
-        df = df[ordered_cols]
-
-        return MarketDataResult(info=info, dataframe=df, ok=True, message="OK")
+        return MarketDataResult(info=info, dataframe=outcome.dataframe, ok=True, message="OK")
 
     @staticmethod
     def _info_from_resolution(resolution: "path_resolver.DataFileResolution") -> MarketDatasetInfo:
