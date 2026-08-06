@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from market_data.ig.client import IgClient
 from market_data.ig.config import IgConfig
-from market_data.ig.errors import IgAuthError, IgError
+from market_data.ig.errors import IgAuthError, IgBadRequestError, IgError
 
 
 class FakeIgHttpClient:
@@ -174,28 +174,73 @@ def test_get_market_details_calls_correct_endpoint():
     assert http.calls[0]["version"] == "3"
 
 
-def test_get_prices_calls_correct_endpoint_and_normalizes():
-    start, end = "2026/08/01 00:00:00", "2026/08/02 00:00:00"
-    # Les dates IG contiennent "/" et ":" : elles doivent être encodées en segments d'URL
-    # (RFC 3986), sinon elles casseraient le routage du chemin — voir client.py.
-    encoded_path = f"/prices/{quote('IX.D.NASDAQ.IFE.IP', safe='')}/{quote('DAY', safe='')}/{quote(start, safe='')}/{quote(end, safe='')}"
-    http = FakeIgHttpClient(
-        {
-            ("GET", encoded_path): (
-                {"prices": [
-                    {"snapshotTime": "2026/08/01 00:00:00", "openPrice": {"bid": 1, "ask": 1.1},
-                     "highPrice": {"bid": 2, "ask": 2.1}, "lowPrice": {"bid": 0.5, "ask": 0.6},
-                     "closePrice": {"bid": 1.5, "ask": 1.6}, "lastTradedVolume": 10}
-                ]}, {}
-            )
-        }
-    )
+# ═══════════════════════════════════════════════════════════════════════════════
+# get_prices() — GET /prices/{epic}, VERSION 3, paramètres de requête (2026-08-06, suite au
+# diagnostic HTTP 400 : l'ancienne forme VERSION 2 /prices/{epic}/{resolution}/{start}/{end}
+# n'est pas la forme actuellement documentée par IG, voir AI_HANDOFF.md).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_SAMPLE_PRICES_BODY = {
+    "prices": [
+        {"snapshotTime": "2026/08/01 00:00:00", "openPrice": {"bid": 1, "ask": 1.1},
+         "highPrice": {"bid": 2, "ask": 2.1}, "lowPrice": {"bid": 0.5, "ask": 0.6},
+         "closePrice": {"bid": 1.5, "ask": 1.6}, "lastTradedVolume": 10}
+    ]
+}
+
+
+def test_get_prices_calls_v3_endpoint_with_query_params():
+    http = FakeIgHttpClient({("GET", "/prices/IX.D.NASDAQ.IFD.IP"): (_SAMPLE_PRICES_BODY, {})})
     http.set_session_tokens("c", "s")
     client = IgClient(_config(), http_client=http)
 
-    result = client.get_prices("IX.D.NASDAQ.IFE.IP", "DAY", start, end)
+    result = client.get_prices(
+        "IX.D.NASDAQ.IFD.IP", "MINUTE", start="2026-08-01T00:00:00", end="2026-08-01T01:00:00"
+    )
+
     assert result.ok is True
     assert len(result.dataframe) == 1
+    call = http.calls[0]
+    assert call["path"] == "/prices/IX.D.NASDAQ.IFD.IP"
+    assert call["version"] == "3"
+    assert call["params"]["resolution"] == "MINUTE"
+    assert call["params"]["from"] == "2026-08-01T00:00:00"
+    assert call["params"]["to"] == "2026-08-01T01:00:00"
+
+
+def test_get_prices_epic_is_quoted_in_the_path():
+    http = FakeIgHttpClient({("GET", f"/prices/{quote('WEIRD EPIC/1', safe='')}"): (_SAMPLE_PRICES_BODY, {})})
+    http.set_session_tokens("c", "s")
+    client = IgClient(_config(), http_client=http)
+
+    result = client.get_prices("WEIRD EPIC/1", "MINUTE", max_points=5)
+    assert result.ok is True
+
+
+def test_get_prices_without_dates_uses_max_points_only():
+    http = FakeIgHttpClient({("GET", "/prices/IX.D.NASDAQ.IFD.IP"): (_SAMPLE_PRICES_BODY, {})})
+    http.set_session_tokens("c", "s")
+    client = IgClient(_config(), http_client=http)
+
+    result = client.get_prices("IX.D.NASDAQ.IFD.IP", "MINUTE", max_points=5)
+
+    assert result.ok is True
+    call = http.calls[0]
+    assert call["params"]["max"] == 5
+    assert "from" not in call["params"]
+    assert "to" not in call["params"]
+
+
+def test_get_prices_never_sends_none_valued_params():
+    http = FakeIgHttpClient({("GET", "/prices/IX.D.NASDAQ.IFD.IP"): (_SAMPLE_PRICES_BODY, {})})
+    http.set_session_tokens("c", "s")
+    client = IgClient(_config(), http_client=http)
+
+    client.get_prices("IX.D.NASDAQ.IFD.IP", "MINUTE")  # ni dates, ni max_points
+
+    call = http.calls[0]
+    assert None not in call["params"].values()
+    assert set(call["params"].keys()) == {"resolution"}
 
 
 def test_get_prices_rejects_invalid_resolution_before_any_network_call():
@@ -204,20 +249,77 @@ def test_get_prices_rejects_invalid_resolution_before_any_network_call():
     client = IgClient(_config(), http_client=http)
 
     with pytest.raises(ValueError):
-        client.get_prices("IX.D.NASDAQ.IFE.IP", "FORTNIGHT", "2026/08/01 00:00:00", "2026/08/02 00:00:00")
+        client.get_prices("IX.D.NASDAQ.IFE.IP", "FORTNIGHT", max_points=5)
+    assert http.calls == []
+
+
+def test_get_prices_rejects_non_positive_max_points_before_any_network_call():
+    http = FakeIgHttpClient({})
+    http.set_session_tokens("c", "s")
+    client = IgClient(_config(), http_client=http)
+
+    with pytest.raises(ValueError):
+        client.get_prices("IX.D.NASDAQ.IFE.IP", "MINUTE", max_points=0)
+    with pytest.raises(ValueError):
+        client.get_prices("IX.D.NASDAQ.IFE.IP", "MINUTE", max_points=-5)
+    assert http.calls == []
+
+
+def test_get_prices_rejects_reversed_date_range_before_any_network_call():
+    http = FakeIgHttpClient({})
+    http.set_session_tokens("c", "s")
+    client = IgClient(_config(), http_client=http)
+
+    with pytest.raises(ValueError):
+        client.get_prices(
+            "IX.D.NASDAQ.IFE.IP", "MINUTE",
+            start="2026-08-01T12:00:00", end="2026-08-01T00:00:00",
+        )
+    assert http.calls == []
+
+
+def test_get_prices_rejects_future_end_date_before_any_network_call():
+    http = FakeIgHttpClient({})
+    http.set_session_tokens("c", "s")
+    client = IgClient(_config(), http_client=http)
+
+    with pytest.raises(ValueError):
+        client.get_prices("IX.D.NASDAQ.IFE.IP", "MINUTE", end="2999-01-01T00:00:00")
     assert http.calls == []
 
 
 def test_get_prices_reports_http_failure_without_raising():
-    start, end = "2026/08/01 00:00:00", "2026/08/02 00:00:00"
-    encoded_path = f"/prices/{quote('BOGUS', safe='')}/{quote('DAY', safe='')}/{quote(start, safe='')}/{quote(end, safe='')}"
-    http = FakeIgHttpClient({("GET", encoded_path): IgAuthError("401", 401)})
+    http = FakeIgHttpClient({("GET", "/prices/BOGUS"): IgBadRequestError("400", 400, "error.request.date-range-invalid")})
     http.set_session_tokens("c", "s")
     client = IgClient(_config(), http_client=http)
 
-    result = client.get_prices("BOGUS", "DAY", start, end)
+    result = client.get_prices("BOGUS", "MINUTE", max_points=5)
     assert result.ok is False
     assert result.dataframe is None
+    # IgPricesResult doit exposer status_code/error_code, comme IgLoginResult/ConnectionTestResult
+    # — c'est justement get_prices() qui a motivé l'extraction d'errorCode (diagnostic HTTP 400).
+    assert result.status_code == 400
+    assert result.error_code == "error.request.date-range-invalid"
+    assert result.message  # message non vide
+
+
+def test_get_prices_failure_never_leaks_secrets_even_with_a_contaminated_error_body():
+    http = FakeIgHttpClient(
+        {
+            ("GET", "/prices/BOGUS"): IgBadRequestError(
+                "400", 400, "error.request.date-range-invalid"
+            )
+        }
+    )
+    http.set_session_tokens("c", "s")
+    client = IgClient(_config(), http_client=http)
+
+    result = client.get_prices("BOGUS", "MINUTE", max_points=5)
+
+    dump = f"{result.message} {result.status_code} {result.error_code}"
+    assert "super-secret-pw" not in dump
+    assert "CST" not in dump
+    assert "X-SECURITY-TOKEN" not in dump
 
 
 def test_igclient_has_no_trading_endpoints_whatsoever():

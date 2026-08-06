@@ -2,13 +2,15 @@
 market_data/ig/client.py — IgClient : point d'entrée public du connecteur IG (démo, lecture seule).
 
 Endpoints, en-têtes VERSION et formats confirmés par recoupement documentation officielle IG
-Labs + bibliothèque de référence trading-ig le 2026-08-06 (voir AI_HANDOFF.md) :
+Labs + bibliothèque de référence trading-ig (voir AI_HANDOFF.md) :
   - POST /session (VERSION 2)                          — connexion, renvoie CST/X-SECURITY-TOKEN
   - DELETE /session (VERSION 1)                        — déconnexion
   - GET /accounts (VERSION 1)                           — liste des comptes
   - GET /markets?searchTerm=... (VERSION 1)             — recherche de marchés
   - GET /markets/{epic} (VERSION 3)                     — détails d'un marché
-  - GET /prices/{epic}/{resolution}/{start}/{end} (VERSION 2) — historique de prix
+  - GET /prices/{epic} (VERSION 3), params resolution/from/to/max — historique de prix
+    (2026-08-06 : corrige l'ancienne forme VERSION 2 /prices/{epic}/{resolution}/{start}/{end},
+    qui produisait un HTTP 400 — voir AI_HANDOFF.md pour le diagnostic complet)
 
 AUCUNE fonction de trading n'existe ici, structurellement : /positions, /workingorders et toute
 autre route d'écriture IG ne sont tout simplement pas câblées dans ce module (voir
@@ -22,15 +24,22 @@ Les tokens de session (CST, X-SECURITY-TOKEN) restent en mémoire via IgHttpClie
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
 
 import pandas as pd
 
 from .config import IgConfig
-from .errors import IgError
+from .errors import IgError, IgHttpError
 from .http_client import IgHttpClient
 from .normalize import normalize_price_records
+
+# Format de date exigé par IG pour les paramètres de requête from/to de GET /prices/{epic}
+# (VERSION 3) : yyyy-MM-dd'T'HH:mm:ss — confirmé par la documentation officielle IG et
+# recoupement indépendant (2026-08-06, voir AI_HANDOFF.md). Ne pas confondre avec le format de
+# snapshotTime dans la RÉPONSE (voir market_data.ig.normalize, inchangé).
+_REQUEST_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 # Résolutions IG confirmées (bibliothèque de référence trading-ig, voir AI_HANDOFF.md) — toute
 # autre valeur est refusée avant le moindre appel réseau (pas de résolution devinée).
@@ -44,15 +53,26 @@ VALID_RESOLUTIONS: frozenset = frozenset(
 
 @dataclass(frozen=True)
 class ConnectionTestResult:
+    """`status_code`/`error_code` : uniquement le statut HTTP et le champ IG "errorCode" déjà
+    extrait (voir market_data.ig.http_client.extract_ig_error_code()) — jamais un secret, jamais
+    le corps de réponse complet. Absents (None) si l'échec n'est pas une erreur HTTP IG (ex.
+    identifiants manquants, environnement refusé, timeout réseau)."""
+
     ok: bool
     message: str
+    status_code: Optional[int] = None
+    error_code: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class IgLoginResult:
+    """Voir ConnectionTestResult pour la portée de status_code/error_code."""
+
     ok: bool
     message: str
     account_id: Optional[str]
+    status_code: Optional[int] = None
+    error_code: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -65,17 +85,47 @@ class IgAccount:
 
 @dataclass(frozen=True)
 class IgPricesResult:
+    """Voir ConnectionTestResult pour la portée de status_code/error_code."""
+
     epic: str
     dataframe: Optional[pd.DataFrame]
     raw_records: Optional[list]
     ok: bool
     message: str
+    status_code: Optional[int] = None
+    error_code: Optional[str] = None
 
 
 def _quote(value: str) -> str:
-    """Encodage RFC 3986 d'un segment de chemin. Nécessaire pour les dates IG (contiennent '/'
-    et ':') afin de ne pas corrompre le routage du chemin — voir tests/test_ig_client.py."""
+    """Encodage RFC 3986 d'un segment de chemin (ex. l'EPIC dans /prices/{epic})."""
     return quote(str(value), safe="")
+
+
+def _is_positive_int(value) -> bool:
+    """True si `value` est un entier strictement positif (bool exclu : `isinstance(True, int)`
+    vaut True en Python, ce qui accepterait silencieusement max_points=True)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _error_details(exc: IgError) -> tuple:
+    """(status_code, error_code) d'une IgError si c'est une IgHttpError, sinon (None, None) —
+    factorise la lecture répétée dans login()/test_connection()/get_prices(). Vérifie le type
+    explicitement (pas de duck-typing par attribut) : seule IgHttpError et ses sous-classes
+    portent status_code/error_code (voir errors.py)."""
+    if isinstance(exc, IgHttpError):
+        return exc.status_code, exc.error_code
+    return None, None
+
+
+def _parse_request_date(value: str) -> Optional[datetime]:
+    """Parse une date de requête IG (format _REQUEST_DATE_FORMAT). Retourne None si `value` ne
+    respecte pas exactement ce format — la validation de format elle-même reste la
+    responsabilité d'IG (HTTP 400 explicite) ; ce parseur ne sert qu'aux contrôles applicatifs
+    (plage inversée, date future) quand le format est bien celui attendu."""
+    try:
+        return datetime.strptime(value, _REQUEST_DATE_FORMAT)
+    except (ValueError, TypeError):
+        return None
 
 
 class IgClient:
@@ -95,7 +145,14 @@ class IgClient:
                 "POST", "/session", version="2", json_body=body, include_auth=False
             )
         except IgError as exc:
-            return IgLoginResult(ok=False, message=f"Connexion IG démo échouée : {exc}", account_id=None)
+            status_code, error_code = _error_details(exc)
+            return IgLoginResult(
+                ok=False,
+                message=f"Connexion IG démo échouée : {exc}",
+                account_id=None,
+                status_code=status_code,
+                error_code=error_code,
+            )
 
         cst = response_headers.get("CST")
         token = response_headers.get("X-SECURITY-TOKEN")
@@ -126,12 +183,21 @@ class IgClient:
         """login() puis un appel de lecture minimal (GET /accounts), puis logout() systématique."""
         login = self.login()
         if not login.ok:
-            return ConnectionTestResult(ok=False, message=login.message)
+            return ConnectionTestResult(
+                ok=False, message=login.message,
+                status_code=login.status_code, error_code=login.error_code,
+            )
         try:
             self.get_accounts()
         except IgError as exc:
             self.logout()
-            return ConnectionTestResult(ok=False, message=f"Connexion IG démo échouée : {exc}")
+            status_code, error_code = _error_details(exc)
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connexion IG démo échouée : {exc}",
+                status_code=status_code,
+                error_code=error_code,
+            )
         self.logout()
         return ConnectionTestResult(ok=True, message="Connexion IG démo réussie.")
 
@@ -162,25 +228,66 @@ class IgClient:
         body, _ = self._http.request("GET", f"/markets/{_quote(epic)}", version="3")
         return body
 
-    def get_prices(self, epic: str, resolution: str, start: str, end: str) -> IgPricesResult:
+    def get_prices(
+        self,
+        epic: str,
+        resolution: str,
+        *,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        max_points: Optional[int] = None,
+    ) -> IgPricesResult:
         """Historique de prix en lecture seule pour une petite période récente.
 
+        Utilise `GET /prices/{epic}` (VERSION 3), confirmé par la documentation officielle IG
+        (voir AI_HANDOFF.md, 2026-08-06) — remplace l'ancienne forme VERSION 2
+        `/prices/{epic}/{resolution}/{start}/{end}`, qui produisait un HTTP 400.
+
         `resolution` doit être l'une des valeurs IG confirmées (voir VALID_RESOLUTIONS) — une
-        valeur inconnue est refusée avant tout appel réseau. `start`/`end` au format IG
-        "%Y/%m/%d %H:%M:%S" (voir market_data.ig.normalize).
+        valeur inconnue est refusée avant tout appel réseau.
+
+        `start`/`end` sont optionnels, au format IG "%Y-%m-%dT%H:%M:%S" (yyyy-MM-dd'T'HH:mm:ss —
+        différent du format de snapshotTime dans la réponse, voir market_data.ig.normalize).
+        `max_points` (optionnel) limite le nombre de bougies retournées — utile pour une requête
+        minimale sans plage de dates. Toutes les validations ci-dessous s'exécutent avant le
+        moindre appel réseau :
+          - résolution reconnue ;
+          - max_points entier strictement positif si fourni ;
+          - start < end si les deux sont fournis et au format attendu ;
+          - end n'est pas dans le futur, si fourni et au format attendu.
         """
         if resolution not in VALID_RESOLUTIONS:
             raise ValueError(
                 f"Résolution IG non reconnue : {resolution!r} (valides : {sorted(VALID_RESOLUTIONS)})."
             )
+        if max_points is not None and not _is_positive_int(max_points):
+            raise ValueError(f"max_points doit être un entier strictement positif, reçu : {max_points!r}.")
 
-        path = f"/prices/{_quote(epic)}/{_quote(resolution)}/{_quote(start)}/{_quote(end)}"
+        parsed_start = _parse_request_date(start) if start else None
+        parsed_end = _parse_request_date(end) if end else None
+        if parsed_start and parsed_end and parsed_start >= parsed_end:
+            raise ValueError(f"Plage de dates invalide : start ({start!r}) doit être strictement antérieur à end ({end!r}).")
+        if parsed_end and parsed_end > datetime.now(timezone.utc).replace(tzinfo=None):
+            raise ValueError(f"end ({end!r}) ne peut pas être dans le futur.")
+
+        params = {"resolution": resolution}
+        if start is not None:
+            params["from"] = start
+        if end is not None:
+            params["to"] = end
+        if max_points is not None:
+            params["max"] = max_points
+
         try:
-            body, _ = self._http.request("GET", path, version="2")
+            body, _ = self._http.request("GET", f"/prices/{_quote(epic)}", version="3", params=params)
             records = body.get("prices") or []
             dataframe = normalize_price_records(records)
         except IgError as exc:
-            return IgPricesResult(epic=epic, dataframe=None, raw_records=None, ok=False, message=str(exc))
+            status_code, error_code = _error_details(exc)
+            return IgPricesResult(
+                epic=epic, dataframe=None, raw_records=None, ok=False, message=str(exc),
+                status_code=status_code, error_code=error_code,
+            )
 
         return IgPricesResult(
             epic=epic,

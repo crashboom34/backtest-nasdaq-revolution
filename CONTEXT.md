@@ -85,10 +85,19 @@ strictement lecture seule (aucune méthode de trading n'existe, structurellement
 confirmés par recoupement documentation officielle IG Labs + bibliothèque de référence
 `trading-ig`. `IgClient` expose `login()`/`logout()`/`test_connection()`/`get_accounts()`/
 `discover_account_id()`/`search_markets()`/`get_market_details()`/`get_prices()`. Session
-(CST/X-SECURITY-TOKEN) en mémoire uniquement. Identifiants IG absents sur cette machine : testé
-entièrement hors ligne (fixtures), aucun appel réseau réel effectué à ce jour.
-Statut : **Confirmé** (existant, testé hors ligne uniquement — pas de validation réseau réelle
-à ce jour, contrairement à EODHD).
+(CST/X-SECURITY-TOKEN) en mémoire uniquement, jamais écrite sur disque.
+`IgHttpError` porte un `error_code` optionnel (uniquement le champ `errorCode` IG, jamais le
+reste du corps de réponse — voir `market_data.ig.error_codes.explain_ig_error_code()`) pour
+diagnostiquer sûrement toute réponse d'erreur (400/401/403/404/429/5xx/autres) sans jamais
+exposer un secret. `get_prices()` utilise `GET /prices/{epic}` (VERSION 3, paramètres
+resolution/from/to/max) — corrige une forme VERSION 2 antérieure incompatible avec l'API IG
+actuelle (diagnostiquée le 2026-08-06 : HTTP 400).
+**Validé en conditions réelles le 2026-08-06** (identifiants démo fournis par l'utilisateur), les
+7 fonctions de lecture : connexion, liste des comptes (CFD démo détecté), découverte automatique
+de l'account ID, recherche de marché, détails de marché, et `get_prices()` (5 bougies réelles
+reçues et normalisées après correction de la forme d'endpoint).
+Statut : **Confirmé** (existant, testé hors ligne ET validé en conditions réelles démo pour
+l'ensemble des 7 fonctions de lecture).
 
 **Manifeste de backtest (`BacktestManifest`)** *(terme additionnel, Phase 11 Data Center,
 2026-08-06)* :

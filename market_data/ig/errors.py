@@ -2,10 +2,16 @@
 market_data/ig/errors.py — Hiérarchie d'erreurs du connecteur IG.
 
 Règle absolue : aucun message d'erreur ne doit jamais contenir api_key, identifier, password,
-CST ou X-SECURITY-TOKEN.
+CST, X-SECURITY-TOKEN ou un token OAuth — ni le corps complet d'une requête ou d'une réponse.
+
+IgHttpError porte un `error_code` optionnel : uniquement le champ "errorCode" du corps de
+réponse IG, déjà isolé par market_data.ig.http_client.extract_ig_error_code() — jamais le reste
+du corps. Voir market_data.ig.error_codes.explain_ig_error_code() pour son explication lisible.
 """
 
 from __future__ import annotations
+
+from typing import Optional
 
 
 class IgError(Exception):
@@ -28,11 +34,22 @@ class IgNetworkError(IgError):
 
 
 class IgHttpError(IgError):
-    """Base des erreurs HTTP avec code de statut."""
+    """Base des erreurs HTTP avec code de statut.
 
-    def __init__(self, message: str, status_code: int):
+    `error_code` : uniquement le champ "errorCode" isolé du corps de réponse IG (jamais le
+    reste du corps) — voir market_data.ig.http_client.extract_ig_error_code(). Absent (None) si
+    la réponse n'a pas de corps JSON exploitable ou pas de champ "errorCode".
+    """
+
+    def __init__(self, message: str, status_code: int, error_code: Optional[str] = None):
         super().__init__(message)
         self.status_code = status_code
+        self.error_code = error_code
+
+
+class IgBadRequestError(IgHttpError):
+    """HTTP 400 — requête malformée (paramètre invalide, format de date incorrect, plage de
+    dates ou combinaison de paramètres non acceptée par IG...)."""
 
 
 class IgAuthError(IgHttpError):
@@ -53,6 +70,11 @@ class IgRateLimitError(IgHttpError):
 
 class IgServerError(IgHttpError):
     """HTTP 5xx — erreur côté serveur IG, potentiellement transitoire."""
+
+
+class IgUnexpectedStatusError(IgHttpError):
+    """Tout code HTTP d'erreur non spécifiquement géré par les classes ci-dessus — toujours
+    accompagné du statut et, si disponible, de errorCode (voir extract_ig_error_code())."""
 
 
 class IgResponseError(IgError):

@@ -350,10 +350,102 @@ travail ci-dessus (Phases 2-11). Pas de push.
   (`job_phase11_timeframe_check_001`, `data_manifest.json` contient bien `"source_timeframe":
   "M3"`). `snapshot_id`/`content_hash`/`period_start`/`period_end` restent `None` — nécessitent
   un suivi structuré du provenance des données que ce pipeline (CSV brut) n'a pas encore.
-- **Test réseau IG réel : toujours bloqué**, pas par choix mais par absence d'identifiants sur
-  cette machine (`BACKTEST_IG_API_KEY`/`IDENTIFIER`/`PASSWORD` non définis). Tout le reste est
-  fait et testé hors ligne. Dès que des identifiants IG démo seront fournis :
-  `BACKTEST_RUN_LIVE_PROVIDER_TESTS=1 .\.venv\Scripts\python.exe scripts\test_ig_connection.py`.
+### Data Center — diagnostic HTTP 403 IG puis validation réelle complète (2026-08-06, suite)
+
+**Diagnostic sûr des erreurs IG (403 rencontré par l'utilisateur)** :
+- `IgHttpError` porte désormais un `error_code` optionnel (uniquement le champ `errorCode` du
+  corps de réponse IG, jamais le reste du corps — voir `market_data.ig.http_client.
+  extract_ig_error_code()`, appliqué à TOUTES les réponses d'erreur : 400 (nouvelle
+  `IgBadRequestError`), 401/403/404/429/5xx, et tout statut non listé (nouvelle
+  `IgUnexpectedStatusError`, remplace l'ancien fallback `IgResponseError` qui n'avait pas de
+  `status_code` — voir section dédiée ci-dessous, suite au diagnostic du HTTP 400 de `get_prices()`).
+- `market_data/ig/error_codes.py` (nouveau) : `explain_ig_error_code()`, explications lisibles
+  pour les codes confirmés (`error.security.api-key-invalid`, `error.security.invalid-details`,
+  `error.public-api.exceeded-api-key-allowance`), message générique honnête pour tout code
+  inconnu (jamais une explication devinée).
+- `IgLoginResult`/`ConnectionTestResult` exposent `status_code`/`error_code`.
+- `scripts/test_ig_connection.py` affiche désormais, en cas d'échec : `Statut HTTP`, `Code IG
+  (errorCode)`, `Explication`, en plus du message existant — jamais un secret.
+- 18 nouveaux tests (`tests/test_ig_error_codes.py`), y compris une preuve qu'un corps de
+  réponse contaminé avec de faux CST/X-SECURITY-TOKEN ne laisse fuiter que `errorCode`.
+- **Non commité à cette étape** (demande explicite de l'utilisateur : diagnostic d'abord).
+
+**Validation réelle complète du connecteur IG démo, lecture seule (identifiants maintenant
+configurés par l'utilisateur)** — `BACKTEST_IG_ENVIRONMENT=demo` vérifié avant tout appel,
+`BACKTEST_RUN_LIVE_PROVIDER_TESTS=1` utilisé uniquement le temps du script (jamais persisté) :
+- **Connexion** : réussie (`login()` OK, tokens CST/X-SECURITY-TOKEN en mémoire uniquement).
+- **Comptes** (`get_accounts()`) : 3 comptes détectés — un compte **CFD préféré** (celui utilisé
+  par défaut), un second CFD ("Barrières et Options"), un compte PHYSICAL ("Turbo24"). Compte
+  CFD démo confirmé présent.
+- **Account ID** : `BACKTEST_IG_ACCOUNT_ID` n'était pas configuré explicitement → découverte
+  automatique réussie depuis la réponse de session (compte CFD préféré), conforme à
+  `discover_account_id()`.
+- **Recherche de marché** (`search_markets("Nasdaq 100")`) : 15 résultats, tous `instrumentType:
+  INDICES`. EPIC retenu : `IX.D.NASDAQ.IFD.IP` ("US Tech 100 au comptant (100$)").
+- **Détails de marché** (`get_market_details()`) : récupérés avec succès — nom, type `INDICES`,
+  devise `USD`, statut `TRADEABLE`.
+- **Historique récent** (`get_prices()`) : premier essai (`MINUTE_30`, fenêtre de 2h) en échec
+  HTTP 400 — **cause identifiée et corrigée, voir section dédiée ci-dessous**.
+- **Aucune écriture disque** : confirmé — aucun nouveau fichier dans le dépôt après la session
+  (le connecteur IG ne contient aucun code d'écriture disque, conception déjà sans état
+  persistant pour les tokens).
+- **Tests hors ligne re-exécutés après la validation réelle** : 80/80 passent, aucune régression.
+
+### Data Center — diagnostic et correction du HTTP 400 sur get_prices() (2026-08-06, suite)
+
+**Cause exacte identifiée** : `get_prices()` utilisait `GET /prices/{epic}/{resolution}/{start}/
+{end}` avec `VERSION: 2` — une forme historiquement documentée par la bibliothèque `trading-ig`
+mais qui n'est pas la forme actuellement supportée par l'API IG (recoupement documentation
+officielle + plusieurs sources indépendantes, voir plus haut : la forme actuelle est `GET
+/prices/{epic}` avec `VERSION: 3` et des paramètres de requête `resolution`/`from`/`to`/`max`/
+`pageSize`/`pageNumber`, dates au format `yyyy-MM-dd'T'HH:mm:ss`).
+
+**Diagnostic méthodique** (`/superpowers` → `/debug`, `/grill-with-docs` — voir note sur ce
+dernier ci-dessous) : Phase 1 (investigation) a comparé `get_prices()` (échoue) aux endpoints
+`get_market_details()`/`search_markets()` (fonctionnent, tous deux en chemin simple sans
+segments de date) ; Phase 2 a confronté la forme actuelle du code à la documentation officielle
+IG (bloquée par 403/429 côté labs.ig.com, contournée via recherche web ciblée + code source de
+la bibliothèque de référence `trading-ig`) ; Phase 3 a formé une hypothèse unique (forme
+d'endpoint obsolète) testée par le plus petit changement possible.
+
+**Correction (TDD, `/tdd`)** :
+- `get_prices()` (`market_data/ig/client.py`) utilise désormais `GET /prices/{epic}` (VERSION 3).
+  Signature devenue `get_prices(epic, resolution, *, start=None, end=None, max_points=None)` —
+  `start`/`end` optionnels (nécessaire pour permettre une requête sans plage de dates, comme
+  demandé pour le premier test réel), format de date changé de `%Y/%m/%d %H:%M:%S` (ancien,
+  toujours utilisé pour PARSER `snapshotTime` dans la réponse, inchangé) à `%Y-%m-%dT%H:%M:%S`
+  pour les paramètres `from`/`to` de la REQUÊTE (jamais mélangés, deux constantes distinctes).
+- Validations ajoutées avant tout appel réseau : résolution reconnue (déjà présent),
+  `max_points` entier strictement positif, `start < end` si les deux fournis, `end` pas dans le
+  futur.
+- `IgPricesResult` expose désormais `status_code`/`error_code` (comme `IgLoginResult`/
+  `ConnectionTestResult`) — corrige un gap trouvé par `/code-review` (deux sous-agents parallèles
+  Standards/Spec) : la fonction même à l'origine du diagnostic HTTP 400 n'exposait pas ces
+  champs à son appelant, et le test associé était tautologique (`"x" in msg or msg`, toujours
+  vrai) — corrigé avec une assertion réelle sur `status_code`/`error_code`.
+- `/simplify` (substitut de `/kaizenkaizen`, non reconnu dans cette installation — voir note) :
+  `_error_details()` généralisé en `isinstance(exc, IgHttpError)` plutôt qu'un `getattr` par nom
+  d'attribut ; validation `max_points` extraite en `_is_positive_int()` nommé et lisible.
+- **27 nouveaux tests** (`tests/test_ig_http_client.py` : extraction `errorCode` sur 400 et tout
+  statut non listé ; `tests/test_ig_client.py` : nouvelle forme v3, validations, non-fuite de
+  secrets pour `get_prices()` spécifiquement).
+
+**Validation réelle (une seule tentative, comme demandé)** : `get_prices("IX.D.NASDAQ.IFD.IP",
+"MINUTE", max_points=5)` → **succès, 5 bougies reçues**, colonnes canoniques
+(`time/open/high/low/close/volume`) + `open_bid/open_ask/high_bid/high_ask/low_bid/low_ask/
+close_bid/close_ask` conservés séparément, timestamps chronologiques croissants, aucune valeur
+fabriquée. `BACKTEST_RUN_LIVE_PROVIDER_TESTS` scopé à cette seule commande, jamais persisté.
+
+**Note sur les skills demandés** : `/grill-with-docs` s'est révélé conçu pour une interview
+interactive de modélisation de domaine (`/domain-modeling`, production d'ADR), pas pour une
+vérification autonome de documentation API externe — utilisé tel quel puis complété directement
+par recherche web ciblée (WebFetch/WebSearch) pour obtenir la confirmation documentaire réelle.
+`/kaizenkaizen` n'est pas reconnu dans cette installation ; `/simplify` (skill disponible, même
+finalité) a été utilisé à la place.
+
+Le connecteur IG est maintenant validé en conditions réelles pour les 7 fonctions de lecture :
+`login()`, `logout()`, `get_accounts()`, `discover_account_id()`, `search_markets()`,
+`get_market_details()`, `get_prices()`.
 
 ---
 
@@ -550,6 +642,8 @@ pip install -r requirements-server.txt
 - [x] Data Center — catalogue unifié (2026-08-06) : `market_data/unified_catalog.py` combine CSV local + EODHD, nouvelle section dans `ui_data_center.py`.
 - [x] Data Center — détection de trous calendaire (2026-08-06) : `market_data.quality.detect_missing_trading_days()`, additif, basé sur `market_data.eodhd.calendar`.
 - [x] Data Center — manifeste enrichi avec le timeframe réel (2026-08-06) : `market_data.resample.infer_timeframe_from_series()`, branché dans `optimizer_process.py`, validé sur le vrai `nasdaq_3m.csv` et par job réel (`source_timeframe: "M3"` dans `data_manifest.json`).
+- [x] Data Center — diagnostic sûr des erreurs IG (2026-08-06) : `IgHttpError.error_code`, `extract_ig_error_code()`, `market_data/ig/error_codes.py`, script enrichi. Non commité (diagnostic demandé avant commit).
+- [x] Data Center — **validation réelle complète du connecteur IG démo, les 7 fonctions de lecture** (2026-08-06) : connexion, comptes (CFD détecté), account ID auto-découvert, recherche "Nasdaq 100" → EPIC `IX.D.NASDAQ.IFD.IP`, détails de marché, **et `get_prices()` corrigé (v3) puis validé avec 5 bougies réelles reçues et normalisées**. Aucune écriture disque, aucun ordre, 99 tests hors ligne toujours verts.
 
 ### Reste à faire (prochaines étapes suggérées)
 
@@ -560,7 +654,8 @@ pip install -r requirements-server.txt
 - [ ] Éventuellement : déploiement serveur Linux avec `BACKTEST_BASE_DIR`
 - [ ] `snapshot_id`/`content_hash`/`period_start`/`period_end` restent `None` dans `data_manifest.json` — nécessitent un suivi structuré de la provenance des données (asset/timeframe/snapshot), hors de portée sans redesign du format de config des jobs (aujourd'hui un chemin CSV brut)
 - [ ] Intégrer le calendrier de marché (`market_data.eodhd.calendar`) dans `market_data.resample` pour un ancrage réel sur les séances (au lieu d'UTC pur) — la détection de trous existe déjà (`quality.detect_missing_trading_days`), l'ancrage du resampling lui-même reste à faire
-- [ ] **Identifiants IG réels toujours absents** : dès qu'ils seront fournis, exécuter `scripts\test_ig_connection.py` avec `BACKTEST_RUN_LIVE_PROVIDER_TESTS=1` pour la première validation réelle (jamais fait à ce jour, IG reste entièrement validé hors ligne — seul point du plan Data Center non finalisable sans action de l'utilisateur)
+- [x] ~~`get_prices()` IG renvoie HTTP 400~~ — **corrigé le 2026-08-06** (voir section dédiée : mauvaise version d'endpoint, passage à `/prices/{epic}` VERSION 3, validé avec 5 bougies réelles).
+- [ ] Committer le diagnostic HTTP 403/error_code IG et la correction get_prices() (2026-08-06) — laissé en attente à la demande explicite de l'utilisateur
 - [ ] Décider si Playwright doit devenir une dépendance permanente (`requirements.txt`) avec une suite de tests UI récurrente (utilisé ponctuellement pour la validation du 2026-08-05 et du 2026-08-06)
 - [ ] Nettoyer (ou laisser, au choix) les jobs de test `results/job_phase11_facade_check_001/` et `results/job_phase11_manifest_check_001/` générés le 2026-08-06 pour valider le branchement réel — non supprimés automatiquement (voir Maintenance)
 

@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from market_data.ig.config import IgConfig
 from market_data.ig.errors import (
     IgAuthError,
+    IgBadRequestError,
     IgForbiddenError,
     IgNetworkError,
     IgNotFoundError,
@@ -28,6 +29,7 @@ from market_data.ig.errors import (
     IgResponseError,
     IgServerError,
     IgSessionError,
+    IgUnexpectedStatusError,
 )
 from market_data.ig.http_client import IgHttpClient
 
@@ -139,6 +141,132 @@ def test_404_raises_not_found_error():
     client.set_session_tokens("cst-token", "sec-token")
     with pytest.raises(IgNotFoundError):
         client.request("GET", "/markets/BOGUS", version="3")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# errorCode IG — extension à TOUTES les réponses HTTP non réussies (2026-08-06, suite au
+# diagnostic HTTP 400 sur get_prices()).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_400_raises_bad_request_error_with_error_code():
+    client, session, _ = _client(
+        [FakeResponse(400, json_body={"errorCode": "error.request.date-range-invalid"})]
+    )
+    client.set_session_tokens("cst-token", "sec-token")
+    with pytest.raises(IgBadRequestError) as exc_info:
+        client.request("GET", "/prices/IX.D.NASDAQ.IFD.IP", version="3")
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.error_code == "error.request.date-range-invalid"
+
+
+def test_400_raises_without_retry():
+    client, session, _ = _client([FakeResponse(400)])
+    client.set_session_tokens("cst-token", "sec-token")
+    with pytest.raises(IgBadRequestError):
+        client.request("GET", "/prices/EPIC", version="3")
+    assert len(session.calls) == 1  # 400 n'est jamais retenté
+
+
+def test_400_error_code_is_none_when_body_has_no_error_code():
+    client, session, _ = _client([FakeResponse(400, json_body={"somethingElse": "value"})])
+    client.set_session_tokens("cst-token", "sec-token")
+    with pytest.raises(IgBadRequestError) as exc_info:
+        client.request("GET", "/prices/EPIC", version="3")
+    assert exc_info.value.error_code is None
+
+
+def test_400_error_code_is_none_on_invalid_json_body():
+    client, session, _ = _client([FakeResponse(400, content=b"{not valid json")])
+    client.set_session_tokens("cst-token", "sec-token")
+    with pytest.raises(IgBadRequestError) as exc_info:
+        client.request("GET", "/prices/EPIC", version="3")
+    assert exc_info.value.error_code is None
+
+
+def test_400_error_code_is_none_on_empty_body():
+    client, session, _ = _client([FakeResponse(400, content=b"")])
+    client.set_session_tokens("cst-token", "sec-token")
+    with pytest.raises(IgBadRequestError) as exc_info:
+        client.request("GET", "/prices/EPIC", version="3")
+    assert exc_info.value.error_code is None
+
+
+def test_401_carries_error_code_when_present():
+    client, session, _ = _client([FakeResponse(401, json_body={"errorCode": "error.security.invalid-details"})])
+    client.set_session_tokens("cst-token", "sec-token")
+    with pytest.raises(IgAuthError) as exc_info:
+        client.request("GET", "/accounts", version="1")
+    assert exc_info.value.error_code == "error.security.invalid-details"
+
+
+def test_403_carries_error_code_when_present():
+    client, session, _ = _client([FakeResponse(403, json_body={"errorCode": "error.security.api-key-invalid"})])
+    client.set_session_tokens("cst-token", "sec-token")
+    with pytest.raises(IgForbiddenError) as exc_info:
+        client.request("GET", "/accounts", version="1")
+    assert exc_info.value.error_code == "error.security.api-key-invalid"
+
+
+def test_404_carries_error_code_when_present():
+    client, session, _ = _client([FakeResponse(404, json_body={"errorCode": "error.request.epic-not-found"})])
+    client.set_session_tokens("cst-token", "sec-token")
+    with pytest.raises(IgNotFoundError) as exc_info:
+        client.request("GET", "/markets/BOGUS", version="3")
+    assert exc_info.value.error_code == "error.request.epic-not-found"
+
+
+def test_429_carries_error_code_when_present():
+    client, session, _ = _client([FakeResponse(429, json_body={"errorCode": "error.public-api.exceeded-api-key-allowance"})] * 3)
+    client.set_session_tokens("cst-token", "sec-token")
+    with pytest.raises(IgRateLimitError) as exc_info:
+        client.request("GET", "/accounts", version="1")
+    assert exc_info.value.error_code == "error.public-api.exceeded-api-key-allowance"
+
+
+def test_5xx_carries_error_code_when_present():
+    client, session, _ = _client([FakeResponse(503, json_body={"errorCode": "error.server.busy"})] * 3)
+    client.set_session_tokens("cst-token", "sec-token")
+    with pytest.raises(IgServerError) as exc_info:
+        client.request("GET", "/accounts", version="1")
+    assert exc_info.value.error_code == "error.server.busy"
+
+
+def test_unexpected_status_still_carries_status_code_and_error_code():
+    client, session, _ = _client([FakeResponse(418, json_body={"errorCode": "error.teapot"})])
+    client.set_session_tokens("cst-token", "sec-token")
+    with pytest.raises(IgUnexpectedStatusError) as exc_info:
+        client.request("GET", "/accounts", version="1")
+    assert exc_info.value.status_code == 418
+    assert exc_info.value.error_code == "error.teapot"
+
+
+def test_error_code_extraction_never_leaks_other_body_fields_through_the_exception():
+    """Un corps de réponse contaminé (faux CST/mot de passe) ne doit jamais atteindre
+    l'exception au-delà du champ errorCode lui-même."""
+    client, session, _ = _client(
+        [
+            FakeResponse(
+                403,
+                json_body={
+                    "errorCode": "error.security.api-key-invalid",
+                    "CST": "should-never-leak",
+                    "password": "should-never-leak-either",
+                    "debug": "full stack trace with secrets",
+                },
+            )
+        ]
+    )
+    client.set_session_tokens("cst-token", "sec-token")
+    with pytest.raises(IgForbiddenError) as exc_info:
+        client.request("GET", "/accounts", version="1")
+
+    exc = exc_info.value
+    assert exc.error_code == "error.security.api-key-invalid"
+    dump = f"{exc} {exc.status_code} {exc.error_code} {exc.__dict__}"
+    assert "should-never-leak" not in dump
+    assert "should-never-leak-either" not in dump
+    assert "full stack trace" not in dump
 
 
 def test_429_retries_then_succeeds():

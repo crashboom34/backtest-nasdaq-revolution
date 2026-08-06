@@ -27,6 +27,7 @@ import requests
 from .config import IgConfig
 from .errors import (
     IgAuthError,
+    IgBadRequestError,
     IgForbiddenError,
     IgNetworkError,
     IgNotFoundError,
@@ -34,7 +35,25 @@ from .errors import (
     IgResponseError,
     IgServerError,
     IgSessionError,
+    IgUnexpectedStatusError,
 )
+
+
+def extract_ig_error_code(response: requests.Response) -> Optional[str]:
+    """Extrait UNIQUEMENT le champ "errorCode" du corps de réponse IG (ex. {"errorCode":
+    "error.security.api-key-invalid"}), sans jamais conserver ni retourner le reste du corps.
+
+    Retourne None si le corps est absent, illisible, n'est pas un objet JSON, ou n'a pas de
+    champ "errorCode" de type chaîne — jamais d'exception, jamais de fuite du corps complet.
+    """
+    try:
+        payload = json.loads(response.content)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error_code = payload.get("errorCode")
+    return error_code if isinstance(error_code, str) else None
 
 
 class IgHttpClient:
@@ -142,24 +161,32 @@ class IgHttpClient:
             except json.JSONDecodeError as exc:
                 return _Outcome(error=IgResponseError(f"JSON invalide reçu depuis l'API IG : {exc}"))
 
+        # Erreurs HTTP : on extrait UNIQUEMENT le champ "errorCode" du corps de réponse, jamais
+        # le corps complet (voir extract_ig_error_code()) — satisfait l'interdiction absolue
+        # d'afficher/conserver une réponse IG entière. Appliqué à TOUTE réponse non réussie,
+        # y compris 400 et tout statut non spécifiquement listé (voir IgUnexpectedStatusError).
+        error_code = extract_ig_error_code(response)
+
+        if status == 400:
+            return _Outcome(error=IgBadRequestError("Requête IG invalide (400).", status, error_code))
         if status == 401:
-            return _Outcome(error=IgAuthError("Authentification IG refusée (401).", status))
+            return _Outcome(error=IgAuthError("Authentification IG refusée (401).", status, error_code))
         if status == 403:
-            return _Outcome(error=IgForbiddenError("Action IG refusée (403).", status))
+            return _Outcome(error=IgForbiddenError("Action IG refusée (403).", status, error_code))
         if status == 404:
-            return _Outcome(error=IgNotFoundError("Ressource IG introuvable (404).", status))
+            return _Outcome(error=IgNotFoundError("Ressource IG introuvable (404).", status, error_code))
         if status == 429:
-            error = IgRateLimitError("Quota ou débit IG dépassé (429).", status)
+            error = IgRateLimitError("Quota ou débit IG dépassé (429).", status, error_code)
             if attempt < self._config.max_retries:
                 return _Outcome(retry=True, error=error)
             return _Outcome(error=error)
         if 500 <= status < 600:
-            error = IgServerError(f"Erreur serveur IG ({status}).", status)
+            error = IgServerError(f"Erreur serveur IG ({status}).", status, error_code)
             if attempt < self._config.max_retries:
                 return _Outcome(retry=True, error=error)
             return _Outcome(error=error)
 
-        return _Outcome(error=IgResponseError(f"Code HTTP IG inattendu ({status})."))
+        return _Outcome(error=IgUnexpectedStatusError(f"Code HTTP IG inattendu ({status}).", status, error_code))
 
     def _backoff_delay(self, attempt: int) -> float:
         return self._config.backoff_factor * (2 ** (attempt - 1))

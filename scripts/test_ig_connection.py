@@ -32,8 +32,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from market_data.ig.client import IgClient
 from market_data.ig.config import load_ig_config
+from market_data.ig.error_codes import explain_ig_error_code
 from market_data.ig.errors import IgConfigError, IgEnvironmentRefusedError, IgError
 from market_data.provider_config import get_ig_credentials
+
+
+def _print_failure_details(status_code, error_code, message) -> None:
+    """Affiche uniquement : statut HTTP, errorCode IG s'il existe, explication lisible, et le
+    message déjà sûr du connecteur. Ne montre jamais une clé, un identifiant, un mot de passe,
+    un header, CST/X-SECURITY-TOKEN/OAuth, ni le corps complet d'une requête ou réponse."""
+    if status_code is not None:
+        print(f"Statut HTTP : {status_code}")
+    if error_code:
+        print(f"Code IG (errorCode) : {error_code}")
+        print(f"Explication : {explain_ig_error_code(error_code)}")
+    print(f"Détail (non sensible) : {message}")
 
 LIVE_TEST_ENV_VAR = "BACKTEST_RUN_LIVE_PROVIDER_TESTS"
 
@@ -77,12 +90,12 @@ def main() -> int:
         result = client.test_connection()
     except IgError as exc:
         print("Connexion échouée.")
-        print(f"Détail (non sensible) : {exc}")
+        _print_failure_details(getattr(exc, "status_code", None), getattr(exc, "error_code", None), exc)
         return 1
 
     if not result.ok:
         print("Connexion échouée.")
-        print(f"Détail (non sensible) : {result.message}")
+        _print_failure_details(result.status_code, result.error_code, result.message)
         return 1
 
     print("Connexion réussie.")
