@@ -6,11 +6,18 @@ Calcule des indicateurs simples sur un DataFrame déjà normalisé au schéma ca
 uniquement des constats chiffrés et des quality_flags explicites (voir la demande initiale,
 section 11 : "ne jamais interpoler silencieusement les prix sans indiquer que la donnée a été
 reconstruite" — ce module n'interpole rien du tout).
+
+analyze_quality() reste volontairement sans connaissance d'un calendrier de marché (limitation
+documentée depuis la Phase 1). detect_missing_trading_days() ci-dessous lève cette limitation de
+façon additive, optionnelle : elle a besoin d'un market_data.eodhd.calendar.ExchangeCalendar
+(donc d'un fournisseur qui en expose un, aujourd'hui EODHD) — jamais appelée automatiquement par
+analyze_quality(), qui reste utilisable sans aucune dépendance à un fournisseur.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 
 import pandas as pd
 
@@ -95,3 +102,32 @@ def analyze_quality(df: pd.DataFrame) -> QualityReport:
         quality_flags=tuple(flags),
         quality_score_pct=quality_score_pct,
     )
+
+
+def detect_missing_trading_days(df: pd.DataFrame, calendar) -> tuple:
+    """Jours de séance (selon `calendar`, un market_data.eodhd.calendar.ExchangeCalendar) situés
+    entre la première et la dernière date de `df`, mais sans aucune bougie ce jour-là.
+
+    Additif et optionnel : contrairement à analyze_quality(), nécessite un calendrier de marché
+    réel (voir market_data.eodhd.calendar.parse_exchange_calendar()). Ne modifie jamais `df`.
+    Lève ValueError si la colonne "time" est absente. DataFrame vide -> tuple vide (rien à
+    détecter faute de plage connue).
+    """
+    if "time" not in df.columns:
+        raise ValueError("Colonne 'time' manquante pour la détection de trous calendaire.")
+    if df.empty:
+        return ()
+
+    from market_data.eodhd.calendar import is_trading_day
+
+    times = pd.to_datetime(df["time"])
+    present_days = set(times.dt.date)
+    start, end = times.min().date(), times.max().date()
+
+    missing = []
+    current = start
+    while current <= end:
+        if is_trading_day(calendar, current) and current not in present_days:
+            missing.append(current)
+        current += timedelta(days=1)
+    return tuple(missing)

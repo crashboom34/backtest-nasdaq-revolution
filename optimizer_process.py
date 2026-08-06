@@ -208,6 +208,11 @@ if __name__ == "__main__":
     )
     _log(f"DataFrame chargé : {len(df)} lignes")
 
+    # Inférence honnête du timeframe source depuis les données réellement chargées (jamais
+    # deviné) — utilisée uniquement pour enrichir data_manifest.json, voir job_store.finalize_job.
+    from market_data.resample import infer_timeframe_from_series
+    _inferred_source_timeframe = infer_timeframe_from_series(df["time"])
+
     # ════════════════════════════════════════════════════════════
     # FILTRAGE PÉRIODE RÉDUITE (opt_start_date / opt_end_date / max_rows)
     # ════════════════════════════════════════════════════════════
@@ -502,6 +507,7 @@ if __name__ == "__main__":
                 benchmark_ms=benchmark_ms,
                 df_rows_used=df_rows_used,
                 log_lines=log_lines,
+                source_timeframe=_inferred_source_timeframe,
             )
             _log("Artefacts job générés avec succès.")
         except Exception as e:

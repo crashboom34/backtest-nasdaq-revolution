@@ -441,14 +441,18 @@ def write_archive(job_dir: str) -> Optional[str]:
 # MANIFESTE REPRODUCTIBLE (Data Center Phase 11 — additif)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def write_data_manifest(job_dir: str, config_dict: dict, meta: dict) -> None:
+def write_data_manifest(
+    job_dir: str, config_dict: dict, meta: dict, source_timeframe: Optional[str] = None
+) -> None:
     """Écrit data_manifest.json — manifeste reproductible additif (voir
     market_data.backtest_manifest, CLAUDE.md Phase 11).
 
     Best-effort avec les métadonnées aujourd'hui disponibles dans config_dict/meta : ce pipeline
     ne track pas encore explicitement asset/timeframe/snapshot structurés (data_file est un
-    chemin CSV brut, pas un couple provider/asset/timeframe) — ces champs restent "unknown"/None
-    tant que ce suivi n'existe pas plus finement. Jamais inclus dans archive.zip (voir
+    chemin CSV brut, pas un couple provider/asset/timeframe). `source_timeframe`, s'il est
+    fourni, vient d'une inférence sur les données réellement chargées (voir
+    market_data.resample.infer_timeframe_from_series(), appelée par optimizer_process.py) —
+    jamais deviné ici. Reste "unknown" si non fourni. Jamais inclus dans archive.zip (voir
     ARCHIVE_SOURCE_FILES, liste explicite non affectée par ce nouveau fichier).
 
     N'écrase jamais un manifeste existant (immuable — FileExistsError silencieusement ignorée).
@@ -463,7 +467,7 @@ def write_data_manifest(job_dir: str, config_dict: dict, meta: dict) -> None:
             provider="local_csv",
             instrument=instrument,
             provider_symbol=instrument,
-            source_timeframe="unknown",
+            source_timeframe=source_timeframe or "unknown",
             strategy_version=meta.get("strategy_name", "unknown"),
             repo_dir=os.path.dirname(os.path.abspath(__file__)),
         )
@@ -486,10 +490,14 @@ def finalize_job(
     benchmark_ms: float,
     df_rows_used: int,
     log_lines: List[str],
+    source_timeframe: Optional[str] = None,
 ) -> None:
     """
     Génère tous les artefacts finaux du job dans job_dir.
     Appelé à la fin d'optimizer_process.py quand job_dir est fourni.
+
+    `source_timeframe` : code inféré depuis les données réelles (voir
+    market_data.resample.infer_timeframe_from_series()), transmis à write_data_manifest().
     """
     top_results = [r for r in all_results if r.get("score", 0) > 0]
     top_results.sort(key=lambda r: r["score"], reverse=True)
@@ -499,7 +507,7 @@ def finalize_job(
     write_report_html(job_dir, meta, config_dict)
     write_logs(job_dir, log_lines)
     write_archive(job_dir)
-    write_data_manifest(job_dir, config_dict, meta)
+    write_data_manifest(job_dir, config_dict, meta, source_timeframe=source_timeframe)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

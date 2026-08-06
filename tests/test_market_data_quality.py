@@ -13,7 +13,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from market_data.quality import analyze_quality
+from market_data.eodhd.calendar import parse_exchange_calendar
+from market_data.quality import analyze_quality, detect_missing_trading_days
 
 
 def _clean_df():
@@ -113,5 +114,74 @@ def test_analyze_quality_never_mutates_input_dataframe():
     original = df.copy()
 
     analyze_quality(df)
+
+    pd.testing.assert_frame_equal(df, original)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# detect_missing_trading_days() — additif, nécessite un calendrier (voir Phase 11 suite,
+# market_data.eodhd.calendar), lève la limitation documentée depuis Phase 1.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_US_CALENDAR_SAMPLE = {
+    "Code": "US", "Timezone": "America/New_York",
+    "TradingHours": {"OpenUTC": "13:30:00", "CloseUTC": "20:00:00", "WorkingDays": "Mon,Tue,Wed,Thu,Fri"},
+    # Le jour férié (2026-08-10, lundi) est délibérément distinct du "trou" testé plus bas
+    # (2026-08-05) : un jour férié n'est jamais un jour de séance, donc jamais un "trou".
+    "ExchangeHolidays": {"0": {"Date": "2026-08-10", "Holiday": "Test Holiday", "Type": "official"}},
+}
+
+
+def _daily_df(dates):
+    return pd.DataFrame(
+        {
+            "time": pd.to_datetime(dates),
+            "open": [1.0] * len(dates), "high": [1.0] * len(dates),
+            "low": [1.0] * len(dates), "close": [1.0] * len(dates), "volume": [1] * len(dates),
+        }
+    )
+
+
+def test_detect_missing_trading_days_finds_a_gap():
+    calendar = parse_exchange_calendar(_US_CALENDAR_SAMPLE)
+    # Lundi 2026-08-03, mardi 04, JEUDI 06 (mercredi 05 manque - pas un jour férié ici).
+    df = _daily_df(["2026-08-03", "2026-08-04", "2026-08-06"])
+
+    missing = detect_missing_trading_days(df, calendar)
+
+    from datetime import date
+    assert date(2026, 8, 5) in missing
+    assert len(missing) == 1
+
+
+def test_detect_missing_trading_days_ignores_weekends_and_holidays():
+    calendar = parse_exchange_calendar(_US_CALENDAR_SAMPLE)
+    # Lun 03 -> ven 07 présents, puis week-end (08-09) et lundi férié (10) absents mais PAS des
+    # trous (ni jours ouvrés, ni jour de séance), puis mardi 11 présent.
+    df = _daily_df(["2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-11"])
+
+    missing = detect_missing_trading_days(df, calendar)
+    assert missing == ()
+
+
+def test_detect_missing_trading_days_empty_dataframe_returns_empty_tuple():
+    calendar = parse_exchange_calendar(_US_CALENDAR_SAMPLE)
+    df = _clean_df().iloc[0:0]
+    assert detect_missing_trading_days(df, calendar) == ()
+
+
+def test_detect_missing_trading_days_requires_time_column():
+    calendar = parse_exchange_calendar(_US_CALENDAR_SAMPLE)
+    df = pd.DataFrame({"open": [1.0]})
+    with pytest.raises(ValueError):
+        detect_missing_trading_days(df, calendar)
+
+
+def test_detect_missing_trading_days_never_mutates_input():
+    calendar = parse_exchange_calendar(_US_CALENDAR_SAMPLE)
+    df = _daily_df(["2026-08-03", "2026-08-06"])
+    original = df.copy()
+
+    detect_missing_trading_days(df, calendar)
 
     pd.testing.assert_frame_equal(df, original)

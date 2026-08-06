@@ -18,7 +18,13 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from market_data.resample import ResampleError, is_derivable, resample_ohlcv, timeframe_to_minutes
+from market_data.resample import (
+    ResampleError,
+    infer_timeframe_from_series,
+    is_derivable,
+    resample_ohlcv,
+    timeframe_to_minutes,
+)
 
 
 def test_timeframe_to_minutes_parses_known_units():
@@ -216,3 +222,53 @@ def test_resample_ohlcv_rejects_weekly_target_from_non_daily_source():
     df = _m3_dataframe()
     with pytest.raises(ResampleError):
         resample_ohlcv(df, source_timeframe="M3", target_timeframe="W1")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# infer_timeframe_from_series() — inférence honnête depuis les données réelles (Phase 11 suite,
+# enrichissement du manifeste de backtest), jamais une valeur devinée.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_infer_timeframe_detects_m3():
+    series = pd.date_range("2024-01-01", periods=10, freq="3min")
+    assert infer_timeframe_from_series(series) == "M3"
+
+
+def test_infer_timeframe_detects_h1():
+    series = pd.date_range("2024-01-01", periods=10, freq="1h")
+    assert infer_timeframe_from_series(series) == "H1"
+
+
+def test_infer_timeframe_detects_d1():
+    series = pd.date_range("2024-01-01", periods=10, freq="1D")
+    assert infer_timeframe_from_series(series) == "D1"
+
+
+def test_infer_timeframe_on_the_real_nasdaq_csv_bars():
+    """Caractérisation la plus forte : le vrai nasdaq_3m.csv doit être détecté comme M3."""
+    import os
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    real_csv = os.path.join(repo_root, "nasdaq_3m.csv")
+    if not os.path.isfile(real_csv):
+        pytest.skip("nasdaq_3m.csv absent (fichier volumineux non versionné)")
+
+    df = pd.read_csv(real_csv, parse_dates=["time"], nrows=1000)
+    assert infer_timeframe_from_series(df["time"]) == "M3"
+
+
+def test_infer_timeframe_returns_none_for_irregular_series():
+    series = pd.to_datetime(["2024-01-01 00:00:00", "2024-01-01 00:01:00", "2024-01-01 00:07:00"])
+    assert infer_timeframe_from_series(series) is None
+
+
+def test_infer_timeframe_returns_none_for_too_few_points():
+    assert infer_timeframe_from_series(pd.to_datetime(["2024-01-01"])) is None
+    assert infer_timeframe_from_series(pd.to_datetime([])) is None
+
+
+def test_infer_timeframe_is_order_independent():
+    series = pd.date_range("2024-01-01", periods=10, freq="5min")
+    shuffled = series.to_series().sample(frac=1, random_state=0).reset_index(drop=True)
+    assert infer_timeframe_from_series(shuffled) == "M5"

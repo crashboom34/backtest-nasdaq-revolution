@@ -268,3 +268,32 @@ def _resample_calendar(
         incomplete_last_bar=incomplete_last_bar,
         message=message,
     )
+
+
+def infer_timeframe_from_series(time_series) -> str | None:
+    """Infère un code timeframe (ex. 'M3', 'H1', 'D1') à partir de l'écart médian entre bougies
+    consécutives d'une série de temps. Utilisée pour enrichir un manifeste de backtest avec des
+    données réellement observées plutôt qu'une valeur devinée (voir market_data.backtest_manifest).
+
+    Retourne None si la série a moins de 2 points, ou si l'écart médian ne correspond pas
+    exactement à un multiple entier de minutes — jamais une approximation. La médiane (plutôt
+    que la moyenne) résiste aux quelques trous ou barres dupliquées d'une série réelle.
+    """
+    times = pd.to_datetime(pd.Series(list(time_series))).sort_values().reset_index(drop=True)
+    if len(times) < 2:
+        return None
+
+    diffs = times.diff().dropna()
+    if diffs.empty:
+        return None
+
+    median_minutes = diffs.median().total_seconds() / 60
+    if median_minutes <= 0 or median_minutes != int(median_minutes):
+        return None
+    median_minutes = int(median_minutes)
+
+    if median_minutes % 1440 == 0:
+        return f"D{median_minutes // 1440}"
+    if median_minutes % 60 == 0:
+        return f"H{median_minutes // 60}"
+    return f"M{median_minutes}"

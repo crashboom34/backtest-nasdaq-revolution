@@ -49,6 +49,18 @@ def test_write_data_manifest_does_not_overwrite_an_existing_manifest(tmp_path):
     assert first == second  # immuable : le second appel n'a rien changé
 
 
+def test_write_data_manifest_uses_provided_source_timeframe(tmp_path):
+    job_store.write_data_manifest(str(tmp_path), {"data_file": "nasdaq_3m.csv"}, {}, source_timeframe="M3")
+    manifest = load_backtest_manifest(tmp_path / "data_manifest.json")
+    assert manifest.source_timeframe == "M3"
+
+
+def test_write_data_manifest_defaults_to_unknown_without_source_timeframe(tmp_path):
+    job_store.write_data_manifest(str(tmp_path), {"data_file": "nasdaq_3m.csv"}, {})
+    manifest = load_backtest_manifest(tmp_path / "data_manifest.json")
+    assert manifest.source_timeframe == "unknown"
+
+
 def test_write_data_manifest_never_contains_a_secret(tmp_path):
     job_store.write_data_manifest(str(tmp_path), {"data_file": "nasdaq_3m.csv"}, {})
     dump = (tmp_path / "data_manifest.json").read_text(encoding="utf-8")

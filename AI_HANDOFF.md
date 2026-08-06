@@ -331,6 +331,30 @@ d'exécution (processus différent).
   snapshots EODHD en une liste unique, sans dupliquer ni modifier `market_data.catalog` ou
   `market_data.eodhd.storage`. Nouvelle section "6. Catalogue unifié" dans `ui_data_center.py`.
 
+**Commit effectué (2026-08-06, autorisation explicite)** : `51a35c2` — 59 fichiers, tout le
+travail ci-dessus (Phases 2-11). Pas de push.
+
+### Data Center — finalisation (2026-08-06, suite, "finalise tout ce qui reste à faire")
+
+- **Détection de trous calendaire** : `market_data.quality.detect_missing_trading_days(df,
+  calendar)` — additive, à côté d'`analyze_quality()` (qui reste sans dépendance fournisseur).
+  Lève la limitation documentée depuis la Phase 1 ("pas de détection de trous pendant les heures
+  de séance... nécessite un calendrier de marché absent du dépôt") maintenant que
+  `market_data.eodhd.calendar` existe. Distingue jour férié (jamais un "trou") de fermeture
+  anticipée (reste un jour de séance).
+- **Manifeste enrichi avec le vrai timeframe** : `market_data.resample.infer_timeframe_from_series()`
+  calcule le code timeframe (ex. "M3") depuis l'écart médian entre bougies réellement chargées —
+  jamais deviné, dérivé des données. Branché dans `optimizer_process.py` juste après le
+  chargement, transmis à `job_store.finalize_job()`/`write_data_manifest()`. Validé sur le vrai
+  `nasdaq_3m.csv` (détecte "M3" exactement) et par un troisième job réel
+  (`job_phase11_timeframe_check_001`, `data_manifest.json` contient bien `"source_timeframe":
+  "M3"`). `snapshot_id`/`content_hash`/`period_start`/`period_end` restent `None` — nécessitent
+  un suivi structuré du provenance des données que ce pipeline (CSV brut) n'a pas encore.
+- **Test réseau IG réel : toujours bloqué**, pas par choix mais par absence d'identifiants sur
+  cette machine (`BACKTEST_IG_API_KEY`/`IDENTIFIER`/`PASSWORD` non définis). Tout le reste est
+  fait et testé hors ligne. Dès que des identifiants IG démo seront fournis :
+  `BACKTEST_RUN_LIVE_PROVIDER_TESTS=1 .\.venv\Scripts\python.exe scripts\test_ig_connection.py`.
+
 ---
 
 ## 3. Système de job directory (implémenté)
@@ -524,6 +548,8 @@ pip install -r requirements-server.txt
 - [x] Data Center — façade de compatibilité + manifeste, branchement réel (2026-08-06, autorisation explicite) : `optimizer_process.py`/`optimizer.py` chargent via `engine.load_data_from_source(SingleFileCsvMarketDataSource(...))`, équivalence prouvée sur le vrai `nasdaq_3m.csv` (`pd.testing.assert_frame_equal`), 2 jobs réels exécutés avec succès. `job_store.write_data_manifest()` branché dans `finalize_job()` — chaque nouveau job écrit désormais `data_manifest.json`, sans casser l'invariant 7-fichiers d'`archive.zip`.
 - [x] Data Center — calendrier de marché, amorce (2026-08-06) : `EodhdClient.get_exchange_details()` + `market_data/eodhd/calendar.py` (`ExchangeCalendar`, `is_trading_day()`), basé sur un échantillon réel. Pas encore consommé par `market_data.resample`.
 - [x] Data Center — catalogue unifié (2026-08-06) : `market_data/unified_catalog.py` combine CSV local + EODHD, nouvelle section dans `ui_data_center.py`.
+- [x] Data Center — détection de trous calendaire (2026-08-06) : `market_data.quality.detect_missing_trading_days()`, additif, basé sur `market_data.eodhd.calendar`.
+- [x] Data Center — manifeste enrichi avec le timeframe réel (2026-08-06) : `market_data.resample.infer_timeframe_from_series()`, branché dans `optimizer_process.py`, validé sur le vrai `nasdaq_3m.csv` et par job réel (`source_timeframe: "M3"` dans `data_manifest.json`).
 
 ### Reste à faire (prochaines étapes suggérées)
 
@@ -532,9 +558,9 @@ pip install -r requirements-server.txt
 - [ ] Brancher plus tard MT5 ou une autre source d'import vers `data/{ASSET}/{TIMEFRAME}/`
 - [ ] Ajouter plus tard une gestion avancée des formats CSV exotiques si nécessaire (fuseaux horaires spécifiques, colonnes renommées non standards)
 - [ ] Éventuellement : déploiement serveur Linux avec `BACKTEST_BASE_DIR`
-- [ ] Enrichir `data_manifest.json` avec asset/timeframe/snapshot/hash/période réels dès que le pipeline de jobs trackera ces informations structurées (aujourd'hui `source_timeframe="unknown"`, `snapshot_id`/`content_hash`/`period_*` = `None` — honnête plutôt que deviné, voir job_store.write_data_manifest())
-- [ ] Intégrer le calendrier de marché (`market_data.eodhd.calendar`) dans `market_data.resample` pour un ancrage réel sur les séances (au lieu d'UTC pur)
-- [ ] Identifiants IG réels : dès qu'ils seront fournis, exécuter `scripts\test_ig_connection.py` avec `BACKTEST_RUN_LIVE_PROVIDER_TESTS=1` pour la première validation réelle (jamais fait à ce jour, IG reste entièrement validé hors ligne)
+- [ ] `snapshot_id`/`content_hash`/`period_start`/`period_end` restent `None` dans `data_manifest.json` — nécessitent un suivi structuré de la provenance des données (asset/timeframe/snapshot), hors de portée sans redesign du format de config des jobs (aujourd'hui un chemin CSV brut)
+- [ ] Intégrer le calendrier de marché (`market_data.eodhd.calendar`) dans `market_data.resample` pour un ancrage réel sur les séances (au lieu d'UTC pur) — la détection de trous existe déjà (`quality.detect_missing_trading_days`), l'ancrage du resampling lui-même reste à faire
+- [ ] **Identifiants IG réels toujours absents** : dès qu'ils seront fournis, exécuter `scripts\test_ig_connection.py` avec `BACKTEST_RUN_LIVE_PROVIDER_TESTS=1` pour la première validation réelle (jamais fait à ce jour, IG reste entièrement validé hors ligne — seul point du plan Data Center non finalisable sans action de l'utilisateur)
 - [ ] Décider si Playwright doit devenir une dépendance permanente (`requirements.txt`) avec une suite de tests UI récurrente (utilisé ponctuellement pour la validation du 2026-08-05 et du 2026-08-06)
 - [ ] Nettoyer (ou laisser, au choix) les jobs de test `results/job_phase11_facade_check_001/` et `results/job_phase11_manifest_check_001/` générés le 2026-08-06 pour valider le branchement réel — non supprimés automatiquement (voir Maintenance)
 
