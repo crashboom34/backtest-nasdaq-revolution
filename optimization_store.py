@@ -116,6 +116,28 @@ def _path(run_id: str, suffix: str, job_dir: Optional[str] = None) -> str:
     return os.path.join(_history_dir(), f"{run_id}{suffix}")
 
 
+def resolve_sibling_job_dir(job_dir: Optional[str], run_id: str) -> Optional[str]:
+    """
+    Résout le job_dir à utiliser pour lire les fichiers d'un AUTRE run_id (ex. le job source
+    d'une reprise, resume_run_id), à partir du job_dir du run courant.
+
+    V1 : run_id == job_id, et tous les jobs vivent côte à côte sous results/ — le job désigné
+    par `run_id` a donc pour dossier le FRÈRE de `job_dir` portant ce nom, jamais `job_dir`
+    lui-même (qui est celui du run courant, pas de la source).
+
+    - job_dir=None → mode classique (le run courant n'est pas un job) : retourne None, donc
+      l'appelant retombe sur la résolution classique existante `optimization_history/{run_id}...`
+      — comportement inchangé.
+    - job_dir=str  → mode job : retourne `os.path.dirname(job_dir)/{run_id}`.
+
+    Ne crée aucun répertoire (contrairement à get_job_dir()) : si le run_id source n'existe pas
+    réellement, load_tested_hashes() sur le chemin retourné renverra simplement un set() vide.
+    """
+    if job_dir is None:
+        return None
+    return os.path.join(os.path.dirname(job_dir), run_id)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ÉCRITURE ATOMIQUE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -235,7 +257,7 @@ def write_stop_flag(run_id: str, job_dir: Optional[str] = None) -> None:
     """Demande l'arrêt propre d'un run en cours."""
     path = _path(run_id, "_stop.flag", job_dir)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write("stop")
 
 

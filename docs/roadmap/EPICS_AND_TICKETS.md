@@ -72,19 +72,83 @@ Windows dure dans le pipeline applicatif (seuls `get_data.py`/`check_mt5.py`, no
 l'app, et `metatrader5` dans `requirements.txt`, déjà absent de `requirements-server.txt`) — ce
 ticket **vérifie** cette conclusion en conditions réelles, il ne repart pas de zéro.
 
-**Fichiers/modules concernés** : aucun changement de code prévu ; si un blocage réel est trouvé,
-il devient un ticket séparé (ne pas corriger à la volée dans ce ticket de validation).
+**Fichiers/modules concernés** : initialement, aucun changement de code prévu (audit seul). Un
+bug réel trouvé pendant l'audit a été traité séparément, comme prévu, dans le ticket dédié
+`PH0-OCI-01-BUG` ci-dessous (`optimization_store.py`, `optimizer_process.py`) — autorisé
+explicitement dans une session ultérieure. Corrections de portabilité A-E dans `.streamlit/
+config.toml`, `lancer_app.bat`, `pytest.ini` (nouveau), `lancer_app.sh` (nouveau),
+`.gitattributes` (nouveau).
 
-- [ ] `pip install -r requirements-server.txt` réussit sur l'instance OCI.
-- [ ] `app.py` démarre et sert l'interface (mode `headless=true`).
-- [ ] Un backtest simple s'exécute et produit un résultat identique (aux flottants près) à
-      l'exécution locale Windows de référence.
+**Statut : Implémentation corrective terminée — validation Linux réelle OCI restante.**
 
-**Tests attendus** : comparaison du résultat OCI vs résultat Windows de référence sur le même
-`nasdaq_3m.csv`/config.
-**Risques** : un blocage Linux non anticipé retarderait la Phase 0 — mitigé par l'audit déjà
-favorable de `CURRENT_STATE.md`.
-**Rollback** : sans objet (validation, pas de changement).
+**État (audit du 2026-08-06, corrections du 2026-08-07, voir [`LINUX_PORTABILITY_REPORT.md`](../architecture/LINUX_PORTABILITY_REPORT.md))** :
+Docker/WSL2/CI se sont révélés indisponibles sur le poste de développement — l'exécution réelle
+sur instance Linux n'a toujours pas pu avoir lieu (aucune ressource OCI créée, hors périmètre des
+deux sessions). Réalisé à la place : audit statique exhaustif (32 catégories, aucun bloquant),
+vérification réelle de résolution des wheels Linux via `pip download --platform` (tous les
+paquets de `requirements-server.txt` résolvent), 14 tests dynamiques légers sous Windows
+(14/14), **puis correction et validation d'un bug réel trouvé pendant l'audit** (reprise de job
+`resume_run_id` silencieusement cassée en mode job-directory — voir `PH0-OCI-01-BUG` ci-dessous)
+et des 4 corrections de portabilité applicables sans machine Linux (Streamlit headless,
+encodage explicite, configuration pytest, lanceur `.sh`, `.gitattributes`). Décision : **Go
+conditionnel, inchangée** — reste uniquement l'exécution réelle sur instance OCI.
+
+- [x] Portabilité confirmée par audit statique + résolution réelle des dépendances Linux
+      (`pip download --platform`) — voir rapport, aucun bloquant.
+- [x] Tests légers exécutés (import, chemins, job directory, JSON, backtest, optimisation,
+      Streamlit headless, secrets, chemins absolus) — 14/14, sous Windows (limite documentée).
+- [x] **Bug de reprise de job (`resume_run_id`) corrigé et testé** (`tests/test_job_resume.py`,
+      11 tests, rouge avant/vert après) — voir ticket `PH0-OCI-01-BUG` ci-dessous.
+- [x] Corrections de portabilité A-D appliquées (Streamlit headless, encodage UTF-8 explicite,
+      `pytest.ini`, `lancer_app.sh`) + E (`.gitattributes`) — suite complète 546/546 verte.
+- [ ] `pip install -r requirements-server.txt` réussit **réellement** sur une instance OCI —
+      **non exécuté**, aucune ressource OCI créée (hors périmètre des deux sessions).
+- [ ] `app.py` démarre et sert l'interface (mode `headless=true`) **réellement sur OCI** — non
+      exécuté.
+- [ ] Un backtest simple s'exécute sur OCI et produit un résultat identique (aux flottants près)
+      à l'exécution locale Windows de référence — non exécuté.
+- [ ] `lancer_app.sh` exécuté réellement sous Linux (droit d'exécution à positionner au commit,
+      Windows ne peut pas écrire le bit Unix) — non exécuté.
+
+**Tests attendus** : comparaison du résultat OCI vs résultat Windows de référence, procédure
+détaillée en section 11 du rapport de portabilité.
+**Risques** : un blocage Linux non anticipé retarderait la Phase 0 — risque réduit par l'audit
+statique, la vérification réelle des dépendances et la correction du bug de reprise (aucun signal
+négatif restant), mais pas éliminé tant que l'exécution réelle sur OCI n'a pas eu lieu.
+**Rollback** : sans objet pour la partie validation. Pour les corrections de code : `git diff`
+localisé (2 fichiers de code modifiés, voir compte rendu), aucun format de fichier historique
+changé.
+
+### PH0-OCI-01-BUG — Reprise de job (`resume_run_id`) cassée en mode job-directory
+
+**What to build** : `resume_run_id` doit retrouver les combinaisons déjà testées d'un job source
+(`results/{resume_run_id}/tested.json`) et ne pas les recalculer.
+
+**Blocked by** : PH0-OCI-01 (audit, qui a découvert ce bug).
+
+**Contexte** : trouvé pendant l'audit de portabilité, pas une régression de cette session — le
+mécanisme existait mais n'avait jamais été testé en conditions réelles du pipeline
+`results/job_xxx/` avant `LINUX_PORTABILITY_REPORT.md`.
+
+- [x] Test de reproduction écrit et rouge avant correction
+      (`tests/test_job_resume.py::TestJobResumeEndToEnd::test_resume_finds_combinations_already_tested_by_a_prior_job`).
+- [x] Cause exacte identifiée : `load_tested_hashes(config.resume_run_id)` sans `job_dir`
+      résolvait vers `optimization_history/` au lieu du dossier frère `results/{resume_run_id}/`.
+- [x] Correction minimale appliquée : `optimization_store.resolve_sibling_job_dir()` (nouvelle
+      fonction pure, ne crée aucun répertoire) + un appel modifié dans `optimizer_process.py`.
+- [x] Test vert après correction, 11/11 tests du fichier passent, aucune régression sur les 535
+      tests préexistants (546/546 au total).
+
+**Tests attendus** : `tests/test_job_resume.py` (11 tests, dont reproduction bout en bout via
+subprocess réel, cas négatifs — inexistant/sans résultat/partiel/pas de collision — et
+non-régression du mode classique).
+**Risques** : aucun risque résiduel identifié — correction localisée, testée, comportement hors
+reprise inchangé (test dédié).
+**Rollback** : `git diff optimization_store.py optimizer_process.py` — 2 fichiers, changement
+minimal, facilement réversible si besoin.
+**Skills utilisés** : `tdd`, `implement`, `code-review`.
+**Autorisations manuelles requises** : aucune supplémentaire — correction couverte par
+l'autorisation explicite donnée pour cette session.
 **Estimation** : S.
 **Skills recommandés** : aucun skill Claude Code spécifique — exécution manuelle supervisée.
 **Autorisations manuelles requises** : création d'une instance OCI (palier Always Free) —

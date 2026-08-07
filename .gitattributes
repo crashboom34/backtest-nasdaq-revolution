@@ -1,0 +1,14 @@
+# Normalise les fichiers texte en LF dans le dépôt, indépendamment de la config Git locale de
+# chaque contributeur (core.autocrlf). L'audit PH0-OCI-01 a confirmé que tout le contenu déjà
+# indexé est LF (git ls-files --eol) — cette règle rend ce fait explicite et garanti pour l'avenir
+# plutôt qu'implicite et dépendant de chaque poste.
+* text=auto eol=lf
+
+# Les scripts shell DOIVENT rester en LF : un CRLF casse leur exécution sous Linux (le shebang
+# "#!/usr/bin/env bash" est alors interprété avec un '\r' final invalide).
+*.sh text eol=lf
+
+# lancer_app.bat est un script Windows-only, jamais exécuté sous Linux — CRLF est la convention
+# native de cmd.exe, conservée explicitement pour éviter toute ambiguïté avec la règle générale
+# ci-dessus.
+*.bat text eol=crlf

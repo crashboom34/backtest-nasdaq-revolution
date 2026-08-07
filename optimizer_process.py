@@ -47,7 +47,7 @@ if __name__ == "__main__":
     from optimization_store import (
         write_progress, load_tested_hashes, save_tested_hashes,
         append_results_csv, save_meta, save_config, build_meta,
-        check_and_clear_stop_flag, delete_progress,
+        check_and_clear_stop_flag, delete_progress, resolve_sibling_job_dir,
     )
     from optimizer import (
         OptimizationConfig, ParamRange, TrainTestConfig,
@@ -277,7 +277,12 @@ if __name__ == "__main__":
 
     already_tested = set()
     if config.resume_run_id:
-        already_tested = load_tested_hashes(config.resume_run_id)
+        # V1 : run_id == job_id — le job source d'une reprise vit dans un dossier FRÈRE de
+        # job_dir (results/{resume_run_id}/), jamais dans job_dir lui-même (celui du run
+        # courant). resolve_sibling_job_dir() retourne None en mode classique (job_dir=None),
+        # préservant la résolution optimization_history/ existante.
+        resume_job_dir = resolve_sibling_job_dir(job_dir, config.resume_run_id)
+        already_tested = load_tested_hashes(config.resume_run_id, job_dir=resume_job_dir)
         _log(f"Reprise : {len(already_tested)} combinaisons déjà testées")
 
     n_total = effective_total_combinations

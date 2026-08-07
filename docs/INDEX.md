@@ -21,6 +21,7 @@ sessions de développement), `CONTEXT.md` (glossaire métier confirmé), `AGENTS
 | [`UI_UX_ARCHITECTURE.md`](architecture/UI_UX_ARCHITECTURE.md) | Architecture de l'information, navigation cible, design system, migration progressive |
 | [`TEST_AND_VALIDATION_ARCHITECTURE.md`](architecture/TEST_AND_VALIDATION_ARCHITECTURE.md) | Walk-forward, Monte-Carlo, out-of-sample, modèle d'exécution, règles Champion |
 | [`DOMAIN_MODEL.md`](architecture/DOMAIN_MODEL.md) | Modèle de domaine cible (complète `CONTEXT.md` sans le dupliquer — concepts futurs, pas encore confirmés) |
+| [`LINUX_PORTABILITY_REPORT.md`](architecture/LINUX_PORTABILITY_REPORT.md) | Audit de portabilité Linux (PH0-OCI-01) : compatibilité par catégorie, tests exécutés, corrections proposées, décision Go/No-Go |
 
 ## Roadmap (`docs/roadmap/`)
 
