@@ -46,6 +46,22 @@ Dix skills installés : `setup-matt-pocock-skills`, `grill-with-docs`, `domain-m
   ne pas bloquer la tâche : continuer sans lui, mais signaler clairement son indisponibilité à
   l'utilisateur.
 
+**Politique d'orchestration multi-skills (2026-08-06)** : pour toute évolution non triviale, la
+hiérarchie est **Spec Kit = gouvernance/WHAT** (specs, plan, tâches, critères d'acceptation) →
+**skills Matt Pocock = HOW** (domaine, architecture, exécution) → **Superpowers = discipline**
+→ **UI/UX Pro Max = interfaces** → **Playwright = preuve de fonctionnement réel** →
+**`simplify` = amélioration continue ciblée**. **Les skills Spec Kit (`speckit-*`) sont
+installés au niveau personnel de cet utilisateur** (`~/.claude/skills/speckit-*`, invocables via
+`/speckit-specify`, `/speckit-plan`, etc.) **mais ce dépôt lui-même n'est pas initialisé pour
+Spec Kit** (pas de `.specify/` ni `specs/` — vérifier avant de s'y fier, ça peut changer).
+Ne jamais invoquer une commande `/speckit-*` sans avoir vérifié qu'elle est bien listée comme
+disponible dans la session. Tant que le projet n'est pas initialisé, GitHub Issues via
+`to-spec`/`to-tickets` reste la source canonique des specs/tâches. Détail complet (couches,
+chaînes de workflow par type de demande, Definition of Done, méta-règle de démarrage,
+garde-fous anti-doublons/anti-sur-ingénierie) :
+`docs/adr/0016-spec-kit-and-skill-orchestration-policy.md` et
+`docs/agents/skills-usage.md`.
+
 Détail complet des workflows, de l'invocation par agent et des documents liés :
 [`docs/agents/skills-usage.md`](docs/agents/skills-usage.md).
 
@@ -70,11 +86,28 @@ devenir obsolète — revérifier au doute) et ne choisir que celles utiles. Gé
 trois capacités ; plus pour une mission complexe, jamais par défaut ni par redondance (pas deux
 skills au même rôle sans raison, pas de skill sur une tâche triviale).
 
+**Exception permanente — `development-orchestrator` systématique (décision explicite de
+l'utilisateur, 2026-08-14)** : contrairement à la règle ci-dessus, le skill personnel
+`development-orchestrator` (`~/.claude/skills/development-orchestrator/`) doit être invoqué au
+début du traitement de **chaque message utilisateur** dans ce dépôt, sans exception de
+trivialité — y compris pour des messages courts ou apparemment simples. Ce n'est pas un skill à
+« considérer si pertinent » ici : son invocation elle-même est la politique, indépendamment de
+ce qu'il recommande ensuite (il peut légitimement conclure qu'aucun autre skill n'est
+nécessaire — c'est son rôle habituel d'orchestration qui reste inchangé, voir
+`~/.claude/CLAUDE.md` § Development orchestration). Si le skill n'est pas détecté dans la
+session, appliquer la règle générale de la section 6 (signaler, ne pas bloquer) plutôt que de
+supposer son invocation.
+
 ### 2. Invoquer réellement
 
 Une capacité retenue doit être réellement appelée avec son nom exact — jamais seulement
-mentionnée ou annoncée sans appel. Aucune commande slash inventée (`/playwright`,
-`/superpowers`, `/kaizenkaizen`, "Codex Orchestrator" n'existent pas ici).
+mentionnée ou annoncée sans appel. Aucune commande slash inventée : `/playwright`,
+`/superpowers` (le skill s'appelle `superpower`, singulier), `/kaizenkaizen` (utiliser
+`simplify`), `/figma-use` (non utilisé sur ce projet), "Codex Orchestrator"/`/codex-orchestrator`
+(concept Codex, pas un skill Claude Code — utiliser `Agent`/`Workflow`) n'existent pas ici.
+Les commandes `/speckit-*` existent comme skills personnels mais ce dépôt n'est pas initialisé
+pour Spec Kit (voir `docs/agents/skills-usage.md`) — vérifier avant d'invoquer plutôt que de
+supposer.
 
 ### 3. Transparence
 
@@ -87,6 +120,8 @@ indisponible.
 
 | Capacité | Nom exact | Type | Quand |
 |---|---|---|---|
+| Orchestration systématique | `development-orchestrator` | Skill personnel (`~/.claude/skills/`), **invocation systématique** | **Chaque message utilisateur dans ce dépôt, sans exception** (décision explicite 2026-08-14) — voir note sous la section 1, pas seulement pour les tâches non triviales |
+| Gouvernance spec (WHAT) | `/speckit-*` | Skill personnel (`~/.claude/skills/`), **projet non initialisé** | Voir `docs/agents/skills-usage.md` — tant que `.specify/` est absent du dépôt, `to-spec`/`to-tickets` + GitHub Issues restent la source canonique |
 | Revue finale | `code-review` | Skill projet, auto | Qualité, sécurité, régression, conformité avant commit/PR |
 | Conception de module | `codebase-design` | Skill projet, auto | Nouvelle architecture/sous-système, interface d'un module |
 | Modèle métier | `domain-modeling` | Skill projet, auto | Entités, règles, invariants, glossaire/ADR |
