@@ -79,7 +79,7 @@ explicitement dans une session ultérieure. Corrections de portabilité A-E dans
 config.toml`, `lancer_app.bat`, `pytest.ini` (nouveau), `lancer_app.sh` (nouveau),
 `.gitattributes` (nouveau).
 
-**Statut : Implémentation corrective terminée — validation Linux réelle OCI restante.**
+**Statut : PH0-OCI-01 clôturable — validation Linux réelle OCI complète (2026-08-14).**
 
 **État (audit du 2026-08-06, corrections du 2026-08-07, voir [`LINUX_PORTABILITY_REPORT.md`](../architecture/LINUX_PORTABILITY_REPORT.md))** :
 Docker/WSL2/CI se sont révélés indisponibles sur le poste de développement — l'exécution réelle
@@ -90,8 +90,22 @@ paquets de `requirements-server.txt` résolvent), 14 tests dynamiques légers so
 (14/14), **puis correction et validation d'un bug réel trouvé pendant l'audit** (reprise de job
 `resume_run_id` silencieusement cassée en mode job-directory — voir `PH0-OCI-01-BUG` ci-dessous)
 et des 4 corrections de portabilité applicables sans machine Linux (Streamlit headless,
-encodage explicite, configuration pytest, lanceur `.sh`, `.gitattributes`). Décision : **Go
-conditionnel, inchangée** — reste uniquement l'exécution réelle sur instance OCI.
+encodage explicite, configuration pytest, lanceur `.sh`, `.gitattributes`). Décision à l'époque :
+**Go conditionnel** — reste uniquement l'exécution réelle sur instance OCI.
+
+**Validation Linux réelle sur OCI (2026-08-14)** : instance OCI réelle provisionnée
+(`backtester-ph0-oci-01`, `VM.Standard.E4.Flex` temporaire — voir
+[`LINUX_PORTABILITY_REPORT.md` §15](../architecture/LINUX_PORTABILITY_REPORT.md) pour le détail
+complet et la note sur le caractère temporaire de ce shape). Tous les critères encore ouverts
+sont désormais vérifiés en conditions réelles : dépendances installées (51 paquets, aucune
+compilation), suite pytest **546/546 passed** avec les vraies données (`nasdaq_3m.csv`, SHA256
+identique Windows/OCI), `lancer_app.sh` exécuté réellement (mode Git `100755`, Streamlit headless
+réel, HTTP 200 sur `/_stcore/health` et `/`), backtest complet réel
+(`NASDAQ Perfect Revolution V1.1`, `DEFAULT_PARAMS`, 1 000 000 lignes) avec **verdict IDENTIQUE**
+à l'exécution Windows de référence (114 trades, 999 869 points d'equity, stats identiques valeur
+par valeur — seule différence trouvée : terminateur de ligne CSV cosmétique, `os.linesep`, sans
+impact numérique). Reprise de job (`resume_run_id`) reconfirmée réellement sous Linux via
+`tests/test_job_resume.py` (subprocess réel, inclus dans les 546/546).
 
 - [x] Portabilité confirmée par audit statique + résolution réelle des dépendances Linux
       (`pip download --platform`) — voir rapport, aucun bloquant.
@@ -101,14 +115,17 @@ conditionnel, inchangée** — reste uniquement l'exécution réelle sur instanc
       11 tests, rouge avant/vert après) — voir ticket `PH0-OCI-01-BUG` ci-dessous.
 - [x] Corrections de portabilité A-D appliquées (Streamlit headless, encodage UTF-8 explicite,
       `pytest.ini`, `lancer_app.sh`) + E (`.gitattributes`) — suite complète 546/546 verte.
-- [ ] `pip install -r requirements-server.txt` réussit **réellement** sur une instance OCI —
-      **non exécuté**, aucune ressource OCI créée (hors périmètre des deux sessions).
-- [ ] `app.py` démarre et sert l'interface (mode `headless=true`) **réellement sur OCI** — non
-      exécuté.
-- [ ] Un backtest simple s'exécute sur OCI et produit un résultat identique (aux flottants près)
-      à l'exécution locale Windows de référence — non exécuté.
-- [ ] `lancer_app.sh` exécuté réellement sous Linux (droit d'exécution à positionner au commit,
-      Windows ne peut pas écrire le bit Unix) — non exécuté.
+- [x] `pip install -r requirements-server.txt` réussit **réellement** sur une instance OCI —
+      **exécuté le 2026-08-14**, 51 paquets installés, `pip check` sans conflit (voir rapport §15).
+- [x] `app.py` démarre et sert l'interface (mode `headless=true`) **réellement sur OCI** —
+      **exécuté le 2026-08-14** via `./lancer_app.sh`, HTTP 200 confirmé sur `/_stcore/health` et
+      `/` (voir rapport §15).
+- [x] Un backtest simple s'exécute sur OCI et produit un résultat identique (aux flottants près)
+      à l'exécution locale Windows de référence — **exécuté le 2026-08-14** (backtest complet réel,
+      pas seulement "simple"), verdict **IDENTIQUE** (voir rapport §15).
+- [x] `lancer_app.sh` exécuté réellement sous Linux (droit d'exécution à positionner au commit,
+      Windows ne peut pas écrire le bit Unix) — **exécuté le 2026-08-14** : mode Git confirmé
+      `100755`, lancé via `./lancer_app.sh` (pas `bash lancer_app.sh`), voir rapport §15.
 
 **Tests attendus** : comparaison du résultat OCI vs résultat Windows de référence, procédure
 détaillée en section 11 du rapport de portabilité.

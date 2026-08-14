@@ -746,3 +746,36 @@ git ls-files history/
 # Retirer credentials.toml du suivi Git (sans le supprimer localement)
 git rm --cached .streamlit/credentials.toml
 ```
+
+---
+
+## 12. PH0-OCI-01 — Validation Linux réelle sur OCI (2026-08-14)
+
+**Statut : PH0-OCI-01 clôturable.** Détail complet :
+`docs/architecture/LINUX_PORTABILITY_REPORT.md` §15 ; ticket synchronisé :
+`docs/roadmap/EPICS_AND_TICKETS.md` → `PH0-OCI-01`.
+
+- **Environnement réel** : instance OCI `backtester-ph0-oci-01` (`VM.Standard.E4.Flex`, x86_64,
+  **temporaire** — `VM.Standard.A1.Flex` visé pour la production a échoué "Out of capacity" à
+  Marseille, décision de shape final encore ouverte, voir `PH0-OCI-10`), Ubuntu 24.04.4 LTS,
+  Python 3.12.3, glibc 2.39. Dépendances `requirements-server.txt` installées réellement (51
+  paquets, aucune compilation depuis les sources, `pip check` sans conflit).
+- **Suite de tests** : `pytest` **546/546 passed** réellement sous Linux, avec les vraies
+  données (`nasdaq_3m.csv` transféré depuis Windows, SHA256 identique des deux côtés). Inclut
+  `tests/test_job_resume.py` (exécute réellement `optimizer_process.py` en subprocess, job de
+  2 combinaisons + job de reprise) — couvre en conditions réelles Linux la reprise
+  d'optimisation (`resume_run_id`), pas seulement le pipeline de base.
+- **Streamlit** : `lancer_app.sh` exécuté réellement (`./lancer_app.sh`, mode Git `100755`),
+  mode headless réel confirmé, HTTP 200 sur `/_stcore/health` et sur `/`, arrêt propre. Point de
+  durcissement noté pour plus tard (pas un blocage) : Streamlit écoute par défaut sur `*:8501`,
+  mais la Security List OCI garde ce port fermé — aucune exposition publique réelle.
+- **Backtest comparatif Windows ↔ OCI** : `NASDAQ Perfect Revolution V1.1` + `DEFAULT_PARAMS`
+  sur `nasdaq_3m.csv` complet (1 000 000 lignes), une seule exécution de chaque côté. **Verdict
+  IDENTIQUE** : 114 trades, 999 869 points d'equity, toutes les métriques identiques valeur par
+  valeur. Seul écart trouvé : terminateur de ligne CSV cosmétique (`pandas.to_csv()` /
+  `os.linesep`, CRLF Windows vs LF Linux) — aucune différence numérique après normalisation.
+- **Pour une future conversation** : PH0-OCI-01 n'a plus de critère ouvert — son blocage
+  (`Blocked by: PH0-OCI-01`) sur les tickets `PH0-OCI-02`, `PH0-OCI-04`, `PH0-OCI-05`,
+  `PH0-OCI-06`, etc. (voir `docs/roadmap/EPICS_AND_TICKETS.md`) est levé ; leur propre lecture et
+  leurs propres critères restent à évaluer individuellement avant de les engager. Le shape de VM
+  utilisé ici (`E4.Flex`) est temporaire, pas une décision finale de production.

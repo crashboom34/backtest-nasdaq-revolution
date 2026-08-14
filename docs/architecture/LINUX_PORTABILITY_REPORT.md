@@ -239,6 +239,10 @@ actuelles.
 exécution réelle sous Linux n'a pu être réalisée (Docker/WSL2/CI tous indisponibles) — voir
 section 11 pour la procédure qui permettra de lever cette limite.
 
+**Mise à jour du 2026-08-14** : cette limite est levée — une instance OCI réelle a été
+provisionnée et la procédure de la section 11 a été exécutée intégralement avec succès. Voir
+section 15 pour le détail complet de la validation Linux réelle.
+
 ## 10. Procédure reproductible
 
 ```bash
@@ -262,6 +266,11 @@ python ph0_oci_01_smoke_tests.py
 
 ## 11. Procédure future pour OCI (Palier B — non exécutée cette session)
 
+> **Mise à jour du 2026-08-14** : cette procédure a été exécutée intégralement en conditions
+> réelles sur une instance OCI (`backtester-ph0-oci-01`, `VM.Standard.E4.Flex` temporaire,
+> Marseille). Les étapes ci-dessous restent le déroulé de référence (toujours valide comme
+> checklist) ; le compte rendu des résultats réels obtenus est en section 15, pas réécrit ici.
+
 1. Provisionner une instance OCI minimale (palier Always Free, Ampere A1 ou petite forme AMD
    E-Flex — voir `BENCHMARK_PLAN.md`), image Oracle Linux 9 ou Ubuntu 22.04/24.04 (glibc ≥ 2.28).
 2. Cloner le dépôt, `pip install -r requirements-server.txt` — **exécution réelle** (pas une
@@ -280,46 +289,62 @@ python ph0_oci_01_smoke_tests.py
 **Aucune ressource OCI n'a été créée pendant cette session** — cette procédure reste à exécuter
 dans une session ultérieure, avec autorisation explicite.
 
+**Exécutée réellement le 2026-08-14** (autorisations explicites étape par étape) — voir section 15.
+
 ## 12. Critères d'acceptation PH0-OCI-01 — état actuel
 
 | Critère (mission, section 10) | État |
 |---|---|
-| L'environnement Linux peut installer les dépendances | **Vérifié par simulation de résolution** (section 6, réussi) ; **non vérifié par installation réelle** (pas de machine Linux) |
-| Les modules principaux sont importables | **Vérifié sous Windows** (test 1) ; à revérifier sous Linux réel |
-| Les tests hors ligne passent ou les exceptions sont documentées | **535/535 passent sous Windows** ; aucune exception à documenter |
-| Un petit backtest fonctionne | **Vérifié sous Windows** (test 6) |
-| Un petit job d'optimisation fonctionne | **Vérifié sous Windows** (test 7) |
-| Le job directory est créé correctement | **Vérifié sous Windows** (test 3) |
-| Les fichiers de progression sont mis à jour | **Vérifié sous Windows** (test 4) |
-| Streamlit démarre en mode headless | **Vérifié sous Windows** (test 8) — mais `headless=false` doit être corrigé pour un vrai serveur (voir section 8, point 1) |
-| Aucune dépendance Windows bloquante ne subsiste | **Confirmé** (MT5 isolé, absent de `requirements-server.txt`) |
-| Aucun secret n'est exposé | **Confirmé** (test 9 + relecture des modules provider) |
-| Les différences restantes sont documentées | **Oui** (section 5, section 8) |
-| La procédure peut être reproduite plus tard sur OCI | **Oui** (section 10-11) |
-| *(hors liste initiale, trouvé pendant l'audit)* Reprise de job (`resume_run_id`) fonctionnelle | **Oui, corrigée depuis** (section 14) — bug confirmé au moment de l'audit (section 8, problème #7), corrigé avec test de régression dans la session suivante |
+| L'environnement Linux peut installer les dépendances | **Vérifié par installation réelle le 2026-08-14** sur OCI (Ubuntu 24.04, glibc 2.39) — 51 paquets installés avec succès, `pip check` sans conflit, aucune compilation depuis les sources. Voir section 15. (Vérification initiale par simulation de résolution — section 6 — également réussie.) |
+| Les modules principaux sont importables | **Vérifié sous Linux réel le 2026-08-14** — imports directs (`numpy, pandas, scipy, numba, llvmlite, pyarrow, streamlit, plotly, pandas_ta`) réussis ; la suite pytest 546/546 passe également, ce qui implique l'import sans erreur de chaque module qu'elle exerce (`engine`, `optimizer`/`optimizer_process`, `job_launcher`, `market_data.*`, etc.), sans constituer un inventaire exhaustif séparé de tous les modules du dépôt. Voir section 15. |
+| Les tests hors ligne passent ou les exceptions sont documentées | **546/546 passent réellement sous Linux OCI** avec les vraies données (`nasdaq_3m.csv`, 2026-08-14) — voir section 15. (535/535 sous Windows au moment de l'audit initial, aucune exception à documenter.) |
+| Un petit backtest fonctionne | **Vérifié sous Linux réel le 2026-08-14** — backtest complet réel (`nasdaq_3m.csv`, 1 000 000 lignes, `Strategy()` + `DEFAULT_PARAMS` sans modification) exécuté sur OCI, verdict **IDENTIQUE** à l'exécution Windows de référence. Voir section 15. (Test synthétique initial sous Windows — test 6 — également vert.) |
+| Un petit job d'optimisation fonctionne | **Vérifié sous Linux réel le 2026-08-14** — `tests/test_job_resume.py` exécute réellement `optimizer_process.py` en subprocess sur OCI (job de 2 combinaisons + reprise) dans le cadre de la suite pytest 546/546. Voir section 15. |
+| Le job directory est créé correctement | **Vérifié sous Linux réel le 2026-08-14** (suite pytest 546/546 sur OCI, dont `test_optimization_store.py`/`test_job_launcher.py`/`test_job_store.py`). (Test initial sous Windows — test 3 — également vert.) |
+| Les fichiers de progression sont mis à jour | **Vérifié sous Linux réel le 2026-08-14** (suite pytest 546/546 sur OCI). (Test initial sous Windows — test 4 — également vert.) |
+| Streamlit démarre en mode headless | **Vérifié sous Linux réel le 2026-08-14** — `lancer_app.sh` exécuté réellement (`./lancer_app.sh`, mode Git `100755`), Streamlit headless réel, HTTP 200 sur `/_stcore/health` et sur `/`, arrêt propre. Voir section 15. `headless=false` du profil Windows local non affecté (correction A de la section 14 confirmée effective en pratique). |
+| Aucune dépendance Windows bloquante ne subsiste | **Confirmé** (MT5 isolé, absent de `requirements-server.txt`) — reconfirmé par l'installation réelle du 2026-08-14 (aucune tentative d'installer `metatrader5`). |
+| Aucun secret n'est exposé | **Confirmé** (test 9 + relecture des modules provider) — reconfirmé par la suite pytest 546/546 sur OCI (tests dédiés `test_eodhd_*`/`test_ig_*` de non-fuite de secrets, tous verts sous Linux réel). |
+| Les différences restantes sont documentées | **Oui** (section 5, section 8) — une différence réelle supplémentaire trouvée et documentée le 2026-08-14 : `pandas.DataFrame.to_csv()` utilise `lineterminator=os.linesep` par défaut (CRLF sous Windows, LF sous Linux) — purement cosmétique, aucun écart numérique après normalisation (voir section 15). |
+| La procédure peut être reproduite plus tard sur OCI | **Oui** (section 10-11) — reproduite réellement le 2026-08-14, voir section 15. |
+| *(hors liste initiale, trouvé pendant l'audit)* Reprise de job (`resume_run_id`) fonctionnelle | **Oui, corrigée depuis** (section 14) sous Windows, **et reconfirmée réellement sous Linux OCI le 2026-08-14** via `tests/test_job_resume.py` (subprocess réel, voir section 15). |
 
 ## 13. Décision Go/No-Go
 
-**Go conditionnel** — rien dans cette analyse statique et dans les tests dynamiques sous Windows
-n'indique un blocage réel pour un déploiement Linux/OCI. La procédure peut avancer vers un
-**premier test réel sur une instance OCI** (Palier B, section 11), qui reste la seule étape
-capable de transformer ce "Go conditionnel" en confirmation définitive — aucune exécution Linux
-réelle n'a eu lieu cette session.
+**Audit initial (2026-08-06/07)** : **Go conditionnel** — rien dans l'analyse statique et les
+tests dynamiques sous Windows n'indiquait de blocage réel pour un déploiement Linux/OCI, mais
+aucune exécution Linux réelle n'avait eu lieu (Docker/WSL2/CI tous indisponibles cette
+session-là). La seule étape capable de transformer ce "Go conditionnel" en confirmation
+définitive était un premier test réel sur une instance OCI (Palier B, section 11).
 
-**Conditions à satisfaire avant de considérer PH0-OCI-01 pleinement clos** (pas des bloquants pour
-avancer, mais à faire avant la Phase 1 complète) :
-1. Exécuter réellement la procédure de la section 11 sur une instance OCI (même le palier
-   gratuit suffit) — **seule condition encore ouverte**, aucune ressource OCI créée à ce jour.
+**Validation OCI réelle (2026-08-14)** : cette étape a été exécutée intégralement, sur une
+instance OCI réellement provisionnée (`backtester-ph0-oci-01`), avec autorisation explicite à
+chaque étape. Toutes les conditions ci-dessous sont désormais satisfaites en conditions réelles
+— voir section 15 pour le détail complet :
+1. ~~Exécuter réellement la procédure de la section 11 sur une instance OCI~~ — **fait le
+   2026-08-14** (voir section 15).
 2. ~~Appliquer les corrections listées en section 8~~ — **fait** (session du 2026-08-07, voir
-   section 14), sauf le nettoyage optionnel `openpyxl`/`matplotlib` (volontairement non traité).
-3. Confirmer que `contourpy`/`pandas`/`scipy` s'installent réellement sur l'image OCI retenue
-   (glibc ≥ 2.28 attendu, déjà vérifié par résolution réelle des wheels — section 6 — mais
-   l'installation réelle sur l'image retenue reste à confirmer une fois, pas à chaque
-   déploiement).
+   section 14), sauf le nettoyage optionnel `openpyxl`/`matplotlib` (volontairement non traité,
+   toujours non bloquant).
+3. ~~Confirmer que `contourpy`/`pandas`/`scipy` s'installent réellement sur l'image OCI
+   retenue~~ — **confirmé le 2026-08-14** : installation réelle réussie sur Ubuntu 24.04
+   (glibc 2.39), aucune compilation requise (voir section 15).
 
-**Statut du ticket `PH0-OCI-01`** : **Implémentation corrective terminée — validation Linux
-réelle OCI restante.** Voir section 14 pour le détail des corrections, et
-`docs/roadmap/EPICS_AND_TICKETS.md` pour l'état synchronisé du ticket.
+**Verdict final actuel : GO confirmé.** La validation Linux réelle sur OCI est terminée avec
+succès sur l'ensemble des critères d'acceptation (section 12, table mise à jour). Aucun écart
+fonctionnel ou numérique trouvé — seule une différence cosmétique de fin de ligne CSV
+(`os.linesep`, section 15) a été identifiée et documentée, sans impact sur les résultats.
+
+**Point de durcissement identifié, non bloquant pour la clôture** : Streamlit écoute par défaut
+sur toutes les interfaces (`*:8501`) plutôt que sur `127.0.0.1` uniquement ; l'exposition
+publique reste bloquée par la Security List OCI (port 8501 fermé, jamais modifié pendant cette
+validation) — à traiter comme amélioration de durcissement réseau dans un ticket dédié
+(`PH0-OCI-05`/`PH0-OCI-06`), pas comme un critère de PH0-OCI-01.
+
+**Statut du ticket `PH0-OCI-01`** : **PH0-OCI-01 clôturable — validation Linux réelle OCI
+complète (2026-08-14).** Voir section 14 pour le détail des corrections antérieures, section 15
+pour la validation réelle, et `docs/roadmap/EPICS_AND_TICKETS.md` pour l'état synchronisé du
+ticket.
 
 ## 14. Corrections appliquées (session du 2026-08-07, autorisation explicite)
 
@@ -414,3 +439,97 @@ Linux (Palier B).
 - Tout ce qui était déjà listé en section 1/7/9/11 avant cette session corrective (installation
   réelle des dépendances, `pytest` réel sous Linux, petit backtest/petite optimisation réels sur
   OCI).
+
+## 15. Validation OCI réelle (2026-08-14)
+
+> Session distincte des audits des 2026-08-06/07 (sections 1-14 ci-dessus, non réécrites).
+> Instance OCI réelle provisionnée (ticket `PH0-OCI-01`, ADR 0015) : `backtester-ph0-oci-01`,
+> `VM.Standard.E4.Flex` (2 OCPU/12 Go, temporaire — voir note ci-dessous), région France South
+> (Marseille), boot volume 50 Go. Autorisation explicite de l'utilisateur à chaque étape.
+
+### Environnement réel
+
+| Élément | Valeur observée |
+|---|---|
+| OS | Ubuntu 24.04.4 LTS (noyau `6.17.0-1018-oracle`), `x86_64` |
+| glibc | 2.39 (`ldd --version`) — au-dessus du seuil ≥ 2.28 requis (section 6) |
+| Python | 3.12.3 |
+| Shape | `VM.Standard.E4.Flex` (x86_64, AMD) — choix **temporaire** : `VM.Standard.A1.Flex`
+  (Ampere, Always Free) a échoué deux fois avec "Out of capacity" à Marseille au moment de cette
+  session ; E4.Flex a servi uniquement à débloquer la validation Linux PH0-OCI-01, ce n'est pas
+  la forme de VM retenue pour la production (décision encore ouverte, voir `PH0-OCI-10`) |
+
+### Installation réelle des dépendances
+
+`python3 -m venv .venv` a d'abord échoué (`ensurepip` absent) ; `python3.12-venv` installé après
+simulation `apt-get -s install` conforme (3 paquets attendus, aucune suppression, aucun kernel).
+Venv recréé avec succès. `pip install -r requirements-server.txt` : **51 paquets installés avec
+succès**, uniquement des wheels binaires (`manylinux_2_17`/`_2_27`/`_2_28`), **aucune compilation
+depuis les sources** — y compris `contourpy`, `numba`, `llvmlite`, `pandas`, `scipy` (section 6
+confirmée en conditions réelles). `pip check` → `No broken requirements found.`
+
+### Imports et suite de tests réelle
+
+Imports directs réussis : `numpy, pandas, scipy, numba, llvmlite, pyarrow, streamlit, plotly,
+pandas_ta`. `nasdaq_3m.csv` (fichier de production, non versionné) transféré depuis Windows par
+`scp` — **SHA256 identique** des deux côtés
+(`7b7a127df01152b5159ea51583ca22db7811e0be4aa04804167de8e1d47b2f1e`).
+
+Suite `pytest` (version 9.0.3, identique à la référence Windows) :
+- Sans `nasdaq_3m.csv` : 532 passed, 2 skipped, 12 errors (`FileNotFoundError` — cause unique et
+  attendue : fichier non transféré à ce stade, jamais un défaut de code).
+- Avec `nasdaq_3m.csv` transféré : **546/546 passed en 78,47 s** — suite complètement verte,
+  0 skip, 0 erreur. Inclut réellement `tests/test_job_resume.py` (exécute `optimizer_process.py`
+  en subprocess, job de 2 combinaisons + job de reprise, vérifie "Reprise : 2 combinaisons déjà
+  testées" et `combinations_tested == 0`) — couvre en conditions réelles Linux le critère
+  "petit job d'optimisation" ET la non-régression du bug corrigé en section 14.
+
+### `lancer_app.sh` + Streamlit headless réel
+
+Mode Git confirmé `100755` (bit exécutable correctement versionné). Exécuté réellement via
+`./lancer_app.sh` (pas `bash lancer_app.sh`). Process Streamlit réel identifié
+(`python -m streamlit run app.py --server.port 8501`), headless confirmé par le log (aucune
+tentative d'ouverture de navigateur). Test HTTP local (`127.0.0.1`, `urllib.request`, aucune
+dépendance à `curl`) :
+- `GET /_stcore/health` → **200**, corps `ok`.
+- `GET /` → **200**, page HTML Streamlit réelle.
+
+Arrêt propre : `SIGTERM` envoyé uniquement au process Streamlit identifié (pas de `pkill`
+global) ; port 8501 confirmé non écouté après coup.
+
+**Point de durcissement noté, non bloquant** : Streamlit écoute par défaut sur `*:8501` (toutes
+interfaces), pas seulement `127.0.0.1` — comportement Streamlit standard. Aucune exposition
+publique réelle : la Security List OCI garde le port 8501 fermé, jamais modifiée pendant cette
+validation. À traiter dans un futur ticket de durcissement réseau (`PH0-OCI-05`/`06`), pas un
+critère de PH0-OCI-01.
+
+### Backtest comparatif Windows ↔ OCI — verdict IDENTIQUE
+
+Protocole : `engine.load_data("nasdaq_3m.csv")` (1 000 000 lignes) puis
+`engine.run_backtest(df, Strategy(), DEFAULT_PARAMS)` de `strategies/perfect_revolution_v1.py`,
+sans aucun autre argument (valeurs par défaut versionnées : `initial_capital=10000.0,
+spread=1.0, slip_in=0.5, slip_out=0.5`). Une seule exécution de chaque côté.
+
+- 114 trades, 999 869 points d'equity, `stats_dict` complet — **identiques valeur par valeur**
+  entre Windows et OCI (win_rate, profit_factor, max_dd_pct, net_ret_usd, dow_pnl, yearly_pnl...).
+- Écart de hash SHA256 initial sur les CSV exportés, **investigué et expliqué** : différence
+  purement cosmétique de terminateur de ligne — `pandas.DataFrame.to_csv()` utilise
+  `lineterminator=os.linesep` par défaut (CRLF sous Windows, LF sous Linux), confirmé par
+  inspection binaire (`xxd`, `cat -A`). **Après normalisation des fins de ligne, les hash SHA256
+  sont strictement identiques** des deux côtés, pour `trades.csv` et `equity.csv`. Aucune
+  différence numérique réelle.
+
+**Verdict : IDENTIQUE.**
+
+### État Git après validation
+
+`HEAD` = `19dce8fc8e38933c861c7c8533e41fe6669d868b` (identique à `origin/master`, aucune
+divergence) confirmé stable sur Windows et sur OCI à chaque étape de cette session. Aucune
+modification de code, aucun commit, aucun push. `nasdaq_3m.csv` transféré mais jamais versionné
+(`.gitignore` respecté des deux côtés). Working tree OCI resté propre du début à la fin.
+
+### Conclusion de la section 15
+
+Tous les critères d'acceptation encore ouverts après l'audit du 2026-08-06/07 (section 12) sont
+désormais **vérifiés en conditions réelles sur Linux/OCI**, sans aucune correction de code
+nécessaire pendant cette validation. Voir section 13 pour le verdict Go/No-Go final.
