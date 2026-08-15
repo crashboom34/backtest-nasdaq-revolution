@@ -382,10 +382,13 @@ document.
 ## Prochaine action unique recommandée
 
 > **`DATA-FOUNDATION` est TERMINÉE — `GATE DATA = PASS` (2026-08-15, `AF-DATA-01`→`AF-DATA-04A`,
-> voir `EPICS_AND_TICKETS.md` §10 pour le verdict complet).** Il n'y a plus de gagnant unique
-> imposé par le graphe pour l'action suivante : `R`, `V`, `F` sont tous les trois débloqués et
-> `READY` en parallèle (voir `EPICS_AND_TICKETS.md` §11-12, qui recommande `AF-R-01` sans en faire
-> une contrainte). Cette section historique (ci-dessous) reste préservée pour la traçabilité de
+> voir `EPICS_AND_TICKETS.md` §10 pour le verdict complet).** **`TRACK R FOUNDATION` est
+> également TERMINÉE (2026-08-15, `AF-R-01`→`AF-R-03`, validée localement, non commitée — voir
+> `EPICS_AND_TICKETS.md` §11 ; pas de `GATE R` officiel, ce nom n'existe pas dans ce document,
+> voir la correction `AF-RM-01-QC` ci-dessous).** `V` et `F` restent tous les deux débloqués et
+> `READY` en parallèle, sans dépendance croisée entre eux (voir `EPICS_AND_TICKETS.md` §11-12, qui
+> recommande désormais `AF-V-01` sans en faire une contrainte — premier consommateur réel d'un
+> `DatasetSplitPlan`). Cette section historique (ci-dessous) reste préservée pour la traçabilité de
 > la décision `AF-RM-01-QC`, elle ne décrit plus l'action à mener maintenant.
 
 **Corrigé `AF-RM-01-QC` (2026-08-15)** — la version `AF-RM-01` recommandait "Track R jusqu'à

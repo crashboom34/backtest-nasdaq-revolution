@@ -24,6 +24,7 @@ from market_data.backtest_manifest import build_backtest_manifest, save_backtest
 # compute_source_content_hash() ne masque la fonction dans leur propre portée — risque de
 # shadowing déjà anticipé lors de la revue Standards d'AF-DATA-01.
 from market_data.content_hash import content_hash as compute_content_hash
+from research_run import build_experiment, build_research_run, save_experiment, save_research_run
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -622,6 +623,99 @@ def write_data_manifest(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# EXPERIMENT / RESEARCHRUN (Track R, AF-R-01 — additif)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def write_research_run(
+    job_dir: str,
+    research_run_id: str,
+    experiment_id: Optional[str] = None,
+    hypothesis: Optional[str] = None,
+    dataset_snapshot_id: Optional[str] = None,
+    seed: Optional[int] = None,
+) -> None:
+    """Écrit `research_run.json` dans `job_dir` + `experiments/<experiment_id>.json` en sibling de
+    `job_dir` (voir `research_run.py`) — additif, AF-R-01.
+
+    **Chemin legacy explicite** : si `experiment_id` n'est pas fourni, ne fait RIEN (aucun fichier
+    créé) — aucun appelant actuel de `finalize_job()` ne fournit encore `experiment_id`, ce
+    comportement laisse donc le pipeline strictement inchangé tant qu'un futur appelant ne décide
+    pas explicitement d'utiliser ce schéma (même politique que `content_hash`/`snapshot_id`
+    AF-DATA-02/04A).
+
+    `Experiment` est un conteneur durable partagé entre plusieurs `ResearchRun`/job directories —
+    il ne peut structurellement pas vivre dans un seul `job_dir` (voir `research_run.py`). Son
+    emplacement (`experiments/`, sibling de `job_dir`) est dérivé de `job_dir` lui-même, sans
+    lecture de variable d'environnement supplémentaire.
+
+    `dataset_snapshot_id` : réutilise le `snapshot_id` déjà calculé pour ce job (voir
+    `write_data_manifest()`) — jamais recalculé ici. **Obligatoire** pour qu'un `ResearchRun` soit
+    réellement écrit (voir `research_run.build_research_run()`) : absent/vide, cette fonction ne
+    fait rien (best-effort), aucun fichier — ni `research_run.json` ni `experiments/<id>.json` —
+    n'apparaît (atomique : voir la construction du `ResearchRun` avant toute écriture ci-dessous).
+
+    Best-effort, comme `write_data_manifest()` : une erreur ne fait jamais échouer la génération
+    des artefacts du job.
+
+    **Décision explicite non tranchée ici (lifecycle, revue AF-R-01 2026-08-15)** : ni cette
+    fonction ni `finalize_job()` ne consultent `final_status` ("completed"/"stopped"/"error" —
+    voir `optimizer_process.py`). Aujourd'hui ce n'est pas un bug actif : aucun appelant réel de
+    `finalize_job()` ne fournit encore `experiment_id`, donc `write_research_run()` n'est jamais
+    exécutée en pratique. Mais telle quelle, cette implémentation écrirait un `research_run.json`
+    même pour un run `error`/`stopped` si `experiment_id` était un jour fourni sans condition sur
+    le statut — un `ResearchRun` n'est pas structurellement garanti représenter une exécution
+    *réussie*. Aucune state machine n'est ajoutée pour ce ticket (hors scope AF-R-01) ; le futur
+    ticket qui câble réellement `experiment_id` dans `optimizer_process.py` doit trancher s'il
+    filtre sur `final_status == "completed"` avant d'appeler `finalize_job(experiment_id=...)`.
+
+    **AF-R-02 (2026-08-15)** : `git_sha`/`engine_version` ne sont PAS des paramètres de cette
+    fonction — capturés automatiquement à l'intérieur de `build_research_run()` (voir
+    `research_run.py`), exactement comme `write_data_manifest()` ci-dessus ne passe pas
+    `git_commit` à `build_backtest_manifest()` et laisse sa détection "auto" par défaut. Seul
+    `repo_dir` est transmis explicitement (ancrage sur le dépôt réel, même motif que
+    `write_data_manifest()`). `seed`, en revanche, ne peut PAS être auto-détecté (donnée propre à
+    l'appelant) : transmis tel quel, `None` par défaut — aucun appelant actuel n'en fournit encore,
+    chemin legacy inchangé, cohérent avec `experiment_id`/`research_hypothesis` (AF-R-01).
+    """
+    if not experiment_id:
+        return  # chemin legacy : rien à faire tant qu'aucun appelant ne fournit experiment_id
+
+    try:
+        # Construit et valide le ResearchRun EN PREMIER (dataset_snapshot_id obligatoire — voir
+        # research_run.py) avant d'écrire quoi que ce soit : si l'identité dataset manque, aucun
+        # fichier ne doit apparaître, y compris l'Experiment — sinon un Experiment orphelin (zéro
+        # ResearchRun valide) resterait sur disque après un appel qui a pourtant échoué.
+        research_run = build_research_run(
+            research_run_id, experiment_id, dataset_snapshot_id=dataset_snapshot_id,
+            seed=seed, repo_dir=os.path.dirname(os.path.abspath(__file__)),
+        )
+
+        # os.path.normpath() avant dirname() : un job_dir se terminant par un séparateur (trailing
+        # slash/backslash) ferait sinon retourner job_dir lui-même (moins le séparateur) au lieu de
+        # son vrai parent — experiments/ se retrouverait NICHÉ dans job_dir au lieu d'en être le
+        # sibling attendu. Sécurité de chemin, pas une hypothèse : les job_dir réels proviennent
+        # d'un argument externe (sys.argv/BACKTEST_JOB_DIR), pas garantis sans séparateur final.
+        experiments_dir = os.path.join(os.path.dirname(os.path.normpath(job_dir)), "experiments")
+        # build_experiment() valide experiment_id EN PREMIER (validate_portable_identifier() côté
+        # research_run.py — rejette tout caractère hors [A-Za-z0-9_.-], jamais ne le sanitise :
+        # une sanitisation permissive aurait pu faire collisionner deux identités distinctes, ex.
+        # "exp:a" et "exp*a" vers le même nom de fichier — trouvé en revue globale Track R, MCP
+        # Codex). Construire le chemin seulement APRÈS validation, comme pour research_run ci-dessus.
+        try:
+            experiment = build_experiment(experiment_id, hypothesis=hypothesis)
+            experiment_path = os.path.join(experiments_dir, f"{experiment.experiment_id}.json")
+            save_experiment(experiment_path, experiment)
+        except FileExistsError:
+            pass  # déjà créé par un ResearchRun précédent du même Experiment — jamais écrasé
+
+        save_research_run(os.path.join(job_dir, "research_run.json"), research_run)
+    except FileExistsError:
+        pass  # research_run.json déjà écrit pour ce job — jamais écrasé
+    except Exception as exc:  # noqa: BLE001 — additif, ne doit jamais casser le job
+        print(f"[job_store] research_run.json non généré (non bloquant) : {exc}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # FINALIZATION (point d'entrée unique pour optimizer_process)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -638,6 +732,9 @@ def finalize_job(
     snapshot_id: Optional[str] = None,
     period_start: Optional[str] = None,
     period_end: Optional[str] = None,
+    experiment_id: Optional[str] = None,
+    research_hypothesis: Optional[str] = None,
+    research_seed: Optional[int] = None,
 ) -> None:
     """
     Génère tous les artefacts finaux du job dans job_dir.
@@ -654,6 +751,14 @@ def finalize_job(
 
     `snapshot_id`/`period_start`/`period_end` : AF-DATA-04A, mêmes règles de propagation simple
     (calculés une fois en amont, jamais recalculés ici, `None` par défaut = chemin legacy).
+
+    `experiment_id`/`research_hypothesis`/`research_seed` : Track R, AF-R-01/AF-R-02. Restent
+    `None` par défaut — aucun appelant actuel de `finalize_job()` ne les fournit encore, ce chemin
+    reste donc strictement inchangé (voir `write_research_run()`). `dataset_snapshot_id` du
+    `ResearchRun` réutilise directement `snapshot_id` ci-dessus, jamais recalculé. `git_sha`/
+    `engine_version` ne sont PAS des paramètres ici : capturés automatiquement à l'intérieur de
+    `write_research_run()`/`build_research_run()` (AF-R-02), pas de donnée à faire remonter depuis
+    optimizer_process.py pour ceux-là.
     """
     top_results = [r for r in all_results if r.get("score", 0) > 0]
     top_results.sort(key=lambda r: r["score"], reverse=True)
@@ -668,6 +773,15 @@ def finalize_job(
         source_timeframe=source_timeframe, content_hash=content_hash,
         snapshot_id=snapshot_id, period_start=period_start, period_end=period_end,
     )
+    if experiment_id:
+        write_research_run(
+            job_dir,
+            research_run_id=os.path.basename(os.path.normpath(job_dir)) or "run",
+            experiment_id=experiment_id,
+            hypothesis=research_hypothesis,
+            dataset_snapshot_id=snapshot_id,
+            seed=research_seed,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

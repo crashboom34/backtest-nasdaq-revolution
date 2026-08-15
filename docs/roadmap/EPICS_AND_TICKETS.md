@@ -509,7 +509,8 @@ challenger).
 
 ### AF-R-01 — Experiment / ResearchRun — schéma minimal + stockage fichier
 
-**Status** : **READY** (`GATE DATA = PASS`, 2026-08-15 — débloqué, non commencé)
+**Status** : **DONE** (2026-08-15, `research_run.py` — validé localement, non commité, voir
+"Track R Foundation = COMPLETE" ci-dessous §11bis)
 
 **What to build** : structures `Experiment` (durable, `hypothesis` optionnel) et `ResearchRun`
 (exécution concrète immuable), stockées en fichiers (job directory existant, pas une nouvelle base
@@ -533,7 +534,7 @@ de données) — **ne prétend pas que PostgreSQL est nécessaire** à cette pre
 
 ### AF-R-02 — Capture git_sha / seed / version logicielle par run
 
-**Status** : BLOCKED (`AF-R-01`)
+**Status** : **DONE** (2026-08-15, `research_run.py` — validé localement, non commité)
 
 **What to build** : chaque nouveau `ResearchRun` capture automatiquement le `git_sha` (réutilise
 `market_data.backtest_manifest._current_git_commit()`, déjà existant), un `seed` explicite, et la
@@ -545,7 +546,7 @@ version logicielle (`engine_version`, déjà existant dans `BacktestManifest`).
 
 ### AF-R-03 — DatasetSplitPlan / HoldoutAccessEvent — fondations
 
-**Status** : BLOCKED (`AF-R-01`, `AF-DATA` pour l'identité du `DatasetVersion` partitionné)
+**Status** : **DONE** (2026-08-15, `dataset_split.py` — validé localement, non commité)
 
 **What to build** : fondations du plan de partition (train/test/holdout) d'un `DatasetVersion`, et
 de l'audit d'accès au holdout (`HoldoutAccessEvent` référence `research_run_id` +
@@ -556,6 +557,14 @@ jamais être décrit "intouché" sans vérifier les événements.
 
 **Effort** : M. **Uncertainty** : medium (premier cas d'usage réel encore absent — garder minimal).
 **Skills recommended** : `domain-modeling`, `tdd`.
+
+**Livré réellement (revue corrective incluse)** : `DatasetSplitPlan` identifié par son propre
+`split_plan_id` (pas par `dataset_version_id`/`dataset_snapshot_id`, qui reste un champ direct
+obligatoire) — cardinalité 1 snapshot -> N plans, corrigée après une première erreur de
+modélisation trouvée en revue (voir `DOMAIN_MODEL.md` §12). `HoldoutAccessEvent` référence
+`split_plan_id` ET `dataset_snapshot_id` directement (jamais l'un à la place de l'autre).
+`ResearchRun.split_plan_id` **non ajouté** — différé explicitement à `AF-V-01` (premier
+consommateur réel d'un plan), pas un oubli.
 
 ---
 
@@ -854,34 +863,40 @@ provenance s'ajoute un jour.
 5. ✅ `AF-DATA-04A` — correctif minimal (`snapshot_id`/bornes source/contrôle de stabilité).
 6. ✅ Revalidation réelle (Perfect Revolution, 114 trades) → **`GATE DATA = PASS`**.
 
-**READY NOW** (débloqués par `GATE DATA = PASS`, zéro dépendance croisée entre eux, aucun
-commencé) :
-- `AF-R-01` — Experiment/ResearchRun, schéma minimal + stockage fichier.
-- `AF-V-01` — OOS/holdout intouché, première `ValidationRun` réelle.
-- `AF-F-01` — Knowledge Base foundation.
+**TRACK R FOUNDATION = COMPLETE (2026-08-15, validé localement, NON COMMITÉ)** — pas un `GATE R`
+officiel (ce nom n'existe pas dans la roadmap, voir §12 historique ci-dessous) :
+1. ✅ `AF-R-01` — Experiment/ResearchRun, schéma minimal + stockage fichier.
+2. ✅ `AF-R-02` — capture `git_sha`/`seed`/`engine_version`.
+3. ✅ `AF-R-03` — DatasetSplitPlan/HoldoutAccessEvent, fondations (cardinalité corrigée en revue).
+
+**READY NOW** (débloqués par `GATE DATA = PASS`, zéro dépendance croisée entre eux) :
+- `AF-V-01` — OOS/holdout intouché, première `ValidationRun` réelle. Non commencé.
+- `AF-F-01` — Knowledge Base foundation. Non commencé.
 - `AF-EPREC-01` — Precision Engine Contract (déjà `READY` depuis le début, indépendant de
   `AF-DATA` — à vérifier s'il a déjà été traité séparément avant de le redémarrer).
 
-Cet ordre reste dérivé directement des dépendances déclarées — `AF-R-01`/`AF-V-01`/`AF-F-01` ne
-sont *pas* présentés comme séquentiels entre eux, aucun gagnant unique n'est imposé par le graphe.
+Cet ordre reste dérivé directement des dépendances déclarées — `AF-V-01`/`AF-F-01` ne sont *pas*
+présentés comme séquentiels entre eux, aucun gagnant unique n'est imposé par le graphe.
 
 ---
 
 ## 12. Prochaine action unique
 
-> **Il n'y a plus un gagnant unique imposé par le graphe** — `AF-R-01`, `AF-V-01`, `AF-F-01` sont
-> tous les trois `READY` en parallèle depuis `GATE DATA = PASS`, sans dépendance croisée entre eux
-> (voir §11). Prétendre qu'un seul est "la" prochaine action serait une fausse précision.
+**Historique (avant 2026-08-15)** : cette section recommandait `AF-R-01` en premier parmi trois
+choix parallèles (`AF-R-01`/`AF-V-01`/`AF-F-01`, tous `READY` sans dépendance croisée). C'est
+désormais fait — voir §11, Track R Foundation complète.
 
-**Recommandation, pas une contrainte du graphe** : `AF-R-01` en premier, par la hiérarchie de
-principes (`MASTER_ROADMAP.md` §1 — Reproductibilité, rang #2, immédiatement après Fiabilité) et
-parce qu'`AF-R-01`/`AF-R-02`/`AF-R-03` sont eux-mêmes des prérequis progressifs pour que les
-futures `ValidationRun`/candidats Discovery soient réellement traçables — mais `AF-V-01` ou
-`AF-F-01` sont des choix tout aussi valides selon la priorité produit du moment.
+**État actuel** : `AF-V-01` et `AF-F-01` restent tous les deux `READY`, toujours sans dépendance
+croisée entre eux — aucun gagnant unique n'est imposé par le graphe. **Recommandation, pas une
+contrainte du graphe** : `AF-V-01` en premier — c'est le premier ticket qui consommera réellement
+un `DatasetSplitPlan` (Track R n'a construit que la fondation, jamais câblée), et c'est là que la
+question laissée `FUTURE` par `AF-R-03` ("comment un `ResearchRun` référence-t-il le
+`DatasetSplitPlan` qu'il a utilisé ?") doit être tranchée avec un cas d'usage réel plutôt que
+spéculée à l'avance (voir `DOMAIN_MODEL.md` §12). `AF-F-01` reste un choix tout aussi valide selon
+la priorité produit du moment.
 
-**Important** : cette mission (checkpoint documentaire) **ne commence l'implémentation d'aucun
-ticket Track R/V/F** — cette section indique seulement où reprendre, elle n'autorise rien de
-nouveau.
+**Important** : cette recommandation n'autorise rien de nouveau — `AF-V-01` doit être
+explicitement autorisé par l'utilisateur avant tout travail, comme chaque ticket précédent.
 
 ---
 

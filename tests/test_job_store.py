@@ -474,3 +474,299 @@ def test_finalize_job_with_content_hash_keeps_all_historical_artifacts_intact(tm
         names = set(zf.namelist())
     assert "data_manifest.json" not in names  # toujours exclu de l'archive
     assert "metrics.json" in names
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-R-01 — Experiment / ResearchRun, câblage optionnel dans le pipeline de job.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_write_research_run_does_nothing_without_experiment_id(tmp_path):
+    """Legacy compatible : sans experiment_id, aucun fichier Research n'est créé — chemin
+    inchangé pour les jobs qui n'utilisent pas encore ce schéma."""
+    job_store.write_research_run(str(tmp_path), research_run_id="run_x")
+
+    assert not (tmp_path / "research_run.json").exists()
+    assert not (tmp_path.parent / "experiments").exists()
+
+
+def test_write_research_run_creates_research_run_and_experiment_files(tmp_path):
+    job_dir = tmp_path / "results" / "job_x"
+    job_dir.mkdir(parents=True)
+
+    job_store.write_research_run(
+        str(job_dir), research_run_id="run_x", experiment_id="exp_x",
+        dataset_snapshot_id="local_csv:sha256:" + "ab" * 32,
+    )
+
+    research_run_path = job_dir / "research_run.json"
+    experiment_path = tmp_path / "results" / "experiments" / "exp_x.json"
+    assert research_run_path.is_file()
+    assert experiment_path.is_file()
+
+    from research_run import load_experiment, load_research_run
+    run = load_research_run(research_run_path)
+    experiment = load_experiment(experiment_path)
+    assert run.experiment_id == "exp_x"
+    assert run.dataset_snapshot_id == "local_csv:sha256:" + "ab" * 32
+    assert experiment.experiment_id == "exp_x"
+
+
+def test_write_research_run_shares_one_experiment_file_across_two_jobs(tmp_path):
+    """E, au niveau pipeline : deux jobs différents partageant le même experiment_id -> un seul
+    fichier experiments/exp_x.json, jamais réécrit par le second job."""
+    job_dir_a = tmp_path / "results" / "job_a"
+    job_dir_b = tmp_path / "results" / "job_b"
+    job_dir_a.mkdir(parents=True)
+    job_dir_b.mkdir(parents=True)
+
+    a_real_snapshot_id = "local_csv:sha256:" + "ab" * 32
+    job_store.write_research_run(
+        str(job_dir_a), research_run_id="run_a", experiment_id="exp_shared",
+        hypothesis="Première formulation", dataset_snapshot_id=a_real_snapshot_id,
+    )
+    job_store.write_research_run(  # ne doit pas lever, ne doit pas écraser
+        str(job_dir_b), research_run_id="run_b", experiment_id="exp_shared",
+        hypothesis="Reformulation ignorée", dataset_snapshot_id=a_real_snapshot_id,
+    )
+
+    from research_run import load_experiment
+    experiment = load_experiment(tmp_path / "results" / "experiments" / "exp_shared.json")
+    assert experiment.hypothesis == "Première formulation"
+    assert (job_dir_a / "research_run.json").is_file()
+    assert (job_dir_b / "research_run.json").is_file()
+
+
+def test_reusing_an_experiment_id_with_a_contradictory_hypothesis_never_corrupts_the_first(
+    tmp_path,
+):
+    """Revue AF-R-01 (2026-08-15), scénario explicite demandé : 1) créer Experiment exp-A avec
+    hypothesis="H1" (via un premier ResearchRun) ; 2) tenter de réutiliser experiment_id="exp-A"
+    avec hypothesis="H2" incompatible (via un second ResearchRun).
+
+    Garantie : ni écrasement silencieux, ni fusion trompeuse de deux hypothèses incompatibles sous
+    un même Experiment — la première écriture fait foi, immuable (`FileExistsError` interne
+    absorbé en best-effort, jamais un `hypothesis` mélangé ou corrompu). C'est la conséquence
+    directe et déjà voulue de "Experiment = conteneur durable, jamais modifié après création" : le
+    choix du même `experiment_id` par l'appelant EST l'affirmation qu'il s'agit de la même ligne de
+    recherche — un `experiment_id` différent est le mécanisme prévu pour deux hypothèses
+    distinctes, pas une divergence de `hypothesis` texte libre sous le même id."""
+    job_dir_a = tmp_path / "results" / "job_a"
+    job_dir_b = tmp_path / "results" / "job_b"
+    job_dir_a.mkdir(parents=True)
+    job_dir_b.mkdir(parents=True)
+    a_real_snapshot_id = "local_csv:sha256:" + "ab" * 32
+
+    job_store.write_research_run(  # 1) Experiment exp-A créé avec H1
+        str(job_dir_a), research_run_id="run_a", experiment_id="exp-A",
+        hypothesis="H1", dataset_snapshot_id=a_real_snapshot_id,
+    )
+    job_store.write_research_run(  # 2) tentative avec H2 incompatible — ne doit jamais lever
+        str(job_dir_b), research_run_id="run_b", experiment_id="exp-A",
+        hypothesis="H2", dataset_snapshot_id=a_real_snapshot_id,
+    )
+
+    from research_run import load_experiment
+    experiment = load_experiment(tmp_path / "results" / "experiments" / "exp-A.json")
+    assert experiment.hypothesis == "H1"  # jamais écrasé par H2, jamais fusionné
+    assert experiment.hypothesis != "H2"
+
+
+@pytest.mark.parametrize("bad_snapshot_id", [None, "", "   "])
+def test_write_research_run_does_nothing_without_a_real_dataset_snapshot_id(
+    tmp_path, bad_snapshot_id,
+):
+    """Symétrique de test_build_research_run_requires_a_real_dataset_snapshot_id
+    (tests/test_research_run.py) au niveau pipeline : un job sans identité dataset exploitable ne
+    doit produire AUCUN ResearchRun — mais ne doit jamais casser le job (best-effort, comme le
+    reste de write_research_run())."""
+    job_dir = tmp_path / "results" / "job_x"
+    job_dir.mkdir(parents=True)
+
+    job_store.write_research_run(  # ne doit jamais lever
+        str(job_dir), research_run_id="run_x", experiment_id="exp_x",
+        dataset_snapshot_id=bad_snapshot_id,
+    )
+
+    assert not (job_dir / "research_run.json").exists()
+    assert not (tmp_path / "results" / "experiments" / "exp_x.json").exists()
+
+
+def test_write_research_run_places_experiments_dir_as_a_true_sibling_even_with_trailing_separator(
+    tmp_path,
+):
+    """Revue AF-R-01, point 5 : os.path.dirname(job_dir) seul se laisserait piéger par un job_dir
+    se terminant par un séparateur (renverrait job_dir lui-même, pas son parent) — experiments/
+    finirait niché DANS le job directory au lieu d'en être le sibling attendu
+    (results/experiments/, pas results/job_x/experiments/). job_dir provient d'un argument externe
+    (sys.argv/BACKTEST_JOB_DIR côté optimizer_process.py) — pas garanti sans séparateur final."""
+    job_dir = tmp_path / "results" / "job_x"
+    job_dir.mkdir(parents=True)
+    job_dir_with_trailing_sep = str(job_dir) + os.sep
+
+    job_store.write_research_run(
+        job_dir_with_trailing_sep, research_run_id="run_x", experiment_id="exp_x",
+        dataset_snapshot_id="local_csv:sha256:" + "ab" * 32,
+    )
+
+    sibling_experiments_dir = tmp_path / "results" / "experiments"
+    nested_experiments_dir = job_dir / "experiments"
+    assert (sibling_experiments_dir / "exp_x.json").is_file()
+    assert not nested_experiments_dir.exists()
+
+
+def test_write_research_run_rejects_an_experiment_id_unsafe_for_windows_filenames(tmp_path):
+    """Trouvé en revue globale Track R : experiment_id passe validate_identifier() (rejette
+    seulement '/', '\\', '..', vide) mais PAS ':'/'*'/'?'/'<'/'>'/'|', invalides comme nom de
+    fichier Windows. **Correction (MCP Codex)** : sanitiser silencieusement (remplacer par '_')
+    serait une transformation à PERTE — "exp:a" et "exp*a" produiraient le même nom de fichier, un
+    vrai risque de collision d'identité. Un experiment_id du type "exp:v2*bad?" doit donc être
+    REJETÉ (ValueError côté build_experiment(), absorbé en best-effort ici — ne casse jamais le
+    job), jamais silencieusement transformé."""
+    job_dir = tmp_path / "results" / "job_x"
+    job_dir.mkdir(parents=True)
+
+    job_store.write_research_run(  # ne doit jamais lever au niveau pipeline (best-effort)
+        str(job_dir), research_run_id="run_x", experiment_id="exp:v2*bad?",
+        dataset_snapshot_id="local_csv:sha256:" + "ab" * 32,
+    )
+
+    experiments_dir = tmp_path / "results" / "experiments"
+    assert not experiments_dir.exists() or list(experiments_dir.glob("*.json")) == []
+    # Atomique : experiment_id invalide -> ni l'Experiment ni research_run.json ne sont écrits.
+    assert not (job_dir / "research_run.json").exists()
+
+
+def test_write_research_run_never_modifies_a_preexisting_data_manifest(tmp_path):
+    job_dir = tmp_path / "results" / "job_x"
+    job_dir.mkdir(parents=True)
+    legacy_manifest = job_dir / "data_manifest.json"
+    legacy_manifest.write_text('{"legacy": true}', encoding="utf-8")
+    original_bytes = legacy_manifest.read_bytes()
+    original_mtime = legacy_manifest.stat().st_mtime_ns
+
+    job_store.write_research_run(str(job_dir), research_run_id="run_x", experiment_id="exp_x")
+
+    assert legacy_manifest.read_bytes() == original_bytes
+    assert legacy_manifest.stat().st_mtime_ns == original_mtime
+
+
+@pytest.mark.parametrize("bad_experiment_id", ["../escape", "a/b", "a\\b", ".."])
+def test_write_research_run_rejects_unsafe_experiment_id_without_escaping_experiments_dir(
+    tmp_path, bad_experiment_id,
+):
+    """Trouvé par revue indépendante (MCP Codex) : `experiment_id` sert à construire
+    `experiments/<experiment_id>.json` — un identifiant contenant un séparateur de chemin ou
+    '..' pourrait faire écrire en dehors de `results/experiments/`. `research_run.py` rejette
+    maintenant ces identifiants (`_validate_identifier`) ; ici on vérifie qu'au niveau pipeline
+    ce rejet reste best-effort (ne casse jamais le job — même contrat que le reste de
+    write_research_run()) et qu'aucun fichier n'apparaît hors de results/experiments/."""
+    job_dir = tmp_path / "results" / "job_x"
+    job_dir.mkdir(parents=True)
+
+    job_store.write_research_run(  # ne doit jamais lever
+        str(job_dir), research_run_id="run_x", experiment_id=bad_experiment_id,
+    )
+
+    assert not (job_dir / "research_run.json").exists()
+    assert not (tmp_path / "escape.json").exists()
+    experiments_dir = tmp_path / "results" / "experiments"
+    if experiments_dir.exists():
+        assert list(experiments_dir.iterdir()) == []
+
+
+def test_finalize_job_without_experiment_id_stays_legacy_compatible(tmp_path):
+    """Chemin par défaut (aucun appelant actuel ne fournit encore experiment_id) : finalize_job()
+    reste identique à avant AF-R-01, aucun fichier Research créé."""
+    job_store.finalize_job(
+        job_dir=str(tmp_path),
+        meta={"strategy_name": "Test", "top_100": []},
+        config_dict={"data_file": "nasdaq_3m.csv"},
+        all_results=[],
+        benchmark_ms=10.0,
+        df_rows_used=100,
+        log_lines=["test"],
+    )
+
+    assert not (tmp_path / "research_run.json").exists()
+
+
+def test_finalize_job_with_experiment_id_writes_research_run(tmp_path):
+    job_dir = tmp_path / "results" / "job_x"
+    job_dir.mkdir(parents=True)
+
+    job_store.finalize_job(
+        job_dir=str(job_dir),
+        meta={"strategy_name": "Test", "top_100": []},
+        config_dict={"data_file": "nasdaq_3m.csv"},
+        all_results=[],
+        benchmark_ms=10.0,
+        df_rows_used=100,
+        log_lines=["test"],
+        content_hash="deadbeef" * 8,
+        snapshot_id="local_csv:sha256:" + "deadbeef" * 8,
+        experiment_id="exp_x",
+    )
+
+    assert (job_dir / "research_run.json").is_file()
+    from research_run import load_research_run
+    run = load_research_run(job_dir / "research_run.json")
+    # dataset_snapshot_id du ResearchRun réutilise le snapshot_id déjà calculé pour ce job — jamais
+    # recalculé, jamais dupliqué manuellement par l'appelant.
+    assert run.dataset_snapshot_id == "local_csv:sha256:" + "deadbeef" * 8
+    # AF-R-02 : git_sha/engine_version capturés automatiquement (job_store.py vit dans ce vrai
+    # dépôt Git) sans qu'aucun appelant n'ait rien fourni — jamais d'exception, jamais None inventé
+    # comme une fausse preuve si Git était indisponible (voir test dédié ci-dessous pour ce cas).
+    assert run.git_sha is None or isinstance(run.git_sha, str)
+    assert run.engine_version
+    # research_seed non fourni ici -> reste None, jamais inventé (E).
+    assert run.seed is None
+
+
+def test_finalize_job_with_research_seed_writes_it_into_research_run(tmp_path):
+    """C, D au niveau pipeline : research_seed transmis à finalize_job() se retrouve tel quel dans
+    le ResearchRun persisté."""
+    job_dir = tmp_path / "results" / "job_x"
+    job_dir.mkdir(parents=True)
+
+    job_store.finalize_job(
+        job_dir=str(job_dir),
+        meta={"strategy_name": "Test", "top_100": []},
+        config_dict={"data_file": "nasdaq_3m.csv"},
+        all_results=[],
+        benchmark_ms=10.0,
+        df_rows_used=100,
+        log_lines=["test"],
+        snapshot_id="local_csv:sha256:" + "deadbeef" * 8,
+        experiment_id="exp_x",
+        research_seed=20260815,
+    )
+
+    from research_run import load_research_run
+    run = load_research_run(job_dir / "research_run.json")
+    assert run.seed == 20260815
+
+
+def test_finalize_job_without_research_seed_stays_legacy_compatible(tmp_path):
+    """L : un appelant qui ne fournit pas research_seed (chemin actuel, aucun appelant réel ne le
+    fait encore) obtient un ResearchRun avec seed=None — comportement inchangé par rapport à
+    avant AF-R-02, pas une régression du chemin déjà testé par test_finalize_job_without_
+    experiment_id_stays_legacy_compatible (aucun fichier Research du tout, cas plus strict)."""
+    job_dir = tmp_path / "results" / "job_y"
+    job_dir.mkdir(parents=True)
+
+    job_store.finalize_job(
+        job_dir=str(job_dir),
+        meta={"strategy_name": "Test", "top_100": []},
+        config_dict={"data_file": "nasdaq_3m.csv"},
+        all_results=[],
+        benchmark_ms=10.0,
+        df_rows_used=100,
+        log_lines=["test"],
+        snapshot_id="local_csv:sha256:" + "deadbeef" * 8,
+        experiment_id="exp_y",
+    )
+
+    from research_run import load_research_run
+    run = load_research_run(job_dir / "research_run.json")
+    assert run.seed is None

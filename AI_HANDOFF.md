@@ -807,7 +807,32 @@ git rm --cached .streamlit/credentials.toml
 - **Ce qui reste `FUTURE`** (ne pas sur-promettre) : catalogue `DatasetVersion`
   persistant/interrogeable (PostgreSQL, ADR 0007 toujours `Proposed`) ; `DATA-ADVANCED`
   (Dukascopy, corporate actions, sync incrémental) ; sélection/lignes après filtrage
-  (`opt_start_date`/`opt_end_date`/`max_rows`), `DatasetSplitPlan`, `HoldoutAccessEvent`,
-  `ResearchRun` — **Track R**, prochaine étape (voir `EPICS_AND_TICKETS.md` §11-12 :
-  `AF-R-01`/`AF-V-01`/`AF-F-01` tous `READY` en parallèle, aucun commencé).
-- **Baseline tests** : 588 passed (546 avant `AF-DATA-*`, +42 nouveaux tests sur ce jalon).
+  (`opt_start_date`/`opt_end_date`/`max_rows`).
+
+**TRACK R FOUNDATION = COMPLETE (2026-08-15, non commité)** — `Experiment`/`ResearchRun`
+(`research_run.py`, `AF-R-01`), capture `git_sha`/`seed`/`engine_version` (`AF-R-02`),
+`DatasetSplitPlan`/`HoldoutAccessEvent` (`dataset_split.py`, `AF-R-03`), plomberie partagée
+(`atomic_json_store.py`). **Pas de `GATE R` officiel** — la roadmap ne définit aucun gate de ce
+nom (`GATE R` a été renommée `GATE DATA` en revue `AF-RM-01-QC`, voir `MASTER_ROADMAP.md`) ; ce
+track reste consommateur de `GATE DATA`, pas producteur d'un gate propre.
+
+- **IMPLEMENTED/TESTED** : `Experiment` (durable, `hypothesis` optionnelle) ; `ResearchRun`
+  (immuable, `dataset_snapshot_id` **obligatoire**, `git_sha` auto-détecté via le mécanisme
+  `market_data.backtest_manifest._current_git_commit()` déjà existant, `seed` optionnel jamais
+  inventé, `engine_version` partagé avec `BacktestManifest.ENGINE_VERSION`) ; `DatasetSplitPlan`
+  (identifié par son propre `split_plan_id`, **cardinalité 1 snapshot -> N plans** — corrigée en
+  revue après une première erreur de modélisation, voir `DOMAIN_MODEL.md` §12) ; `HoldoutAccessEvent`
+  (append-only, `split_plan_id`+`dataset_snapshot_id`+`research_run_id` directs, `reason`
+  obligatoire) ; `has_holdout_access_events()` (jamais `is_untouched()`) ; validation stricte des
+  identifiants utilisés en chemin de fichier (`validate_portable_identifier()` — rejette, ne
+  sanitise jamais, pour éviter toute collision d'identité, trouvaille MCP Codex).
+- **DOCUMENTED mais explicitement FUTURE, non câblé** : aucun appel réel de `optimizer_process.py`
+  ne fournit encore `experiment_id`/`research_hypothesis`/`research_seed` à `finalize_job()` —
+  chemin legacy strictement inchangé. `job_store.py` n'a AUCUN câblage vers `DatasetSplitPlan`/
+  `HoldoutAccessEvent` (aucun des deux ne correspond à un événement du cycle de vie d'un job).
+  `ResearchRun.split_plan_id` n'existe pas — décision différée à `AF-V-01` (premier consommateur
+  réel d'un `DatasetSplitPlan`), pas oubliée. `has_holdout_access_events()` est scopé par
+  convention d'appel (répertoire du bon plan), pas par vérification structurelle — dette acceptée
+  tant qu'aucun appelant réel n'existe, à durcir avant la première vraie Validation.
+- **Baseline tests** : 588 passed (546 avant `AF-DATA-*`, +42 nouveaux tests sur ce jalon) → 705
+  passed après Track R Foundation (non commité).

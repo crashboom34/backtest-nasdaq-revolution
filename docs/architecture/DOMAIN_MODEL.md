@@ -489,6 +489,91 @@ sur-construire ce point dans le modèle de domaine.
 ou export futur — toute affirmation de fraîcheur d'un holdout doit consulter les
 `HoldoutAccessEvent` réels, jamais le présumer par défaut (voir invariant §18).
 
+**Résolution AF-R-03 (2026-08-15, `/domain-modeling` réellement invoqué)** — vocabulaire
+`dataset_version_id` ci-dessus vs implémentation réelle : ce n'est **pas une contradiction**, un
+écart documentaire à harmoniser. §2 établit déjà que `DatasetVersion`/`DatasetSnapshot` est le
+**concept** (version figée d'un `Dataset`, identifiée par un `content_hash` réel) — jamais une
+classe cataloguée persistante pour le CSV local (statut `PARTIAL`, jamais généralisé). Track R
+(`AF-R-01`) a déjà tranché cette même question pour `ResearchRun` : référencer l'identité réelle
+existante (`dataset_snapshot_id: str`, forme `"local_csv:sha256:<hash>"`, produite par `AF-DATA`)
+plutôt qu'inventer une entité cataloguée pour satisfaire un nom de champ. `DatasetSplitPlan` et
+`HoldoutAccessEvent` suivent le **même** principe : leur champ dataset est nommé
+**`dataset_snapshot_id`** (identique à `ResearchRun.dataset_snapshot_id`, même type, même valeurs
+possibles), pas un `dataset_version_id` distinct. Aucune `DatasetVersionRepository`/table/registry
+n'est créée pour autant — voir `research_run.py` pour le motif déjà établi.
+
+**Identité et zones (résolution AF-R-03, CORRIGÉE — revue corrective 2026-08-15)** : une version
+précédente de cette note affirmait "`DatasetSplitPlan` est identifié par son `dataset_snapshot_id`,
+un seul plan par version de dataset" — **c'était une erreur de modélisation**, non demandée par le
+ticket ni par ce document, corrigée ici avec preuve. `DatasetSnapshot` (Track DATA — "quelle
+version de données existe ?") et `DatasetSplitPlan` (Track R — "quelle portion **CE ResearchRun**
+a réellement utilisée ?", frontière déjà établie ailleurs dans ce dépôt) sont des identités
+**distinctes**. Scénario qui casse l'ancienne contrainte : deux `ResearchRun` légitimes peuvent
+choisir des découpages temporels différents du **même** snapshot (ex. holdout 2023 pour l'un,
+holdout 2023-2024 pour l'autre) sans jamais recalculer `content_hash`/`snapshot_id` ni copier les
+données — Track R répond une question **scopée par ResearchRun**, jamais une propriété unique du
+snapshot lui-même. Preuve textuelle supplémentaire, interne à ce document : la phrase ci-dessous
+"`dataset_version_id` référencé directement, **pas seulement via** `DatasetSplitPlan`" n'aurait
+aucun sens si `DatasetSplitPlan` n'avait pas sa propre identité distincte du dataset — sinon
+"référencer via le plan" et "référencer directement" seraient rigoureusement la même chose.
+**Correction retenue** : `DatasetSplitPlan` est identifié par un `split_plan_id: str` **propre**
+(choisi par l'appelant, même motif que `research_run_id`/`experiment_id` — pas un UUID
+auto-généré, pas un hash canonique du contenu, confirmé par MCP Codex : "un split plan est une
+intention de recherche nommable, pas un fait technique anonyme"). `dataset_snapshot_id` reste un
+**champ obligatoire** du plan (référence directe), mais n'est plus sa clé de stockage — plusieurs
+plans distincts peuvent désormais référencer le même snapshot sans collision. Les quatre zones du
+schéma ci-dessus restent le vocabulaire complet, mais seules `TRAIN` et `FINAL_HOLDOUT` sont
+**obligatoires** dans un plan minimal — `VALIDATION` et `DISCOVERY_OOS` restent optionnelles tant
+qu'aucun consommateur réel (Walk-Forward, Discovery) ne les exploite (hors scope `AF-R-03`, voir
+`EPICS_AND_TICKETS.md`). Les zones présentes doivent rester chronologiquement ordonnées et non
+chevauchantes entre elles (le schéma ci-dessus est un ordre strict) ; les gaps entre zones sont
+autorisés (une marge tampon anti-contamination aux frontières est une pratique légitime, pas une
+lacune).
+
+**`ResearchRun` ne référence PAS `split_plan_id`** — prématuré, aucun pipeline réel ne consomme
+encore le split. **Précision (revue checkpoint Track R, 2026-08-15, `/domain-modeling`)** :
+l'affirmation précédente ("la traçabilité passera par `HoldoutAccessEvent`") était incomplète, pas
+fausse — un `HoldoutAccessEvent` n'existe QUE si le `FINAL_HOLDOUT` a été ouvert ; un `ResearchRun`
+peut parfaitement utiliser `TRAIN`/`VALIDATION`/`DISCOVERY_OOS` sans jamais toucher au holdout, et
+dans ce cas rien ne relie ce `ResearchRun` à SON `DatasetSplitPlan`. Classification explicite :
+**FUTURE**, pas nécessaire pour ce checkpoint. N'appartient PAS à un nouveau ticket `AF-R-04`
+séparé (spéculatif tant que la forme exacte n'est pas connue) — appartient plutôt à `AF-V-01`
+(première `ValidationRun` réelle), le premier ticket qui consommera effectivement un
+`DatasetSplitPlan` et pourra alors décider, avec un cas d'usage réel, où la référence doit vivre
+(`ResearchRun.split_plan_id`, un champ sur `ValidationRun`, ou autre — pas tranché ici,
+prématurément).
+
+**`HoldoutAccessEvent` (résolution AF-R-03, étendue en revue corrective)** : référence désormais
+**à la fois** `split_plan_id` (désambiguïse QUEL plan/`FINAL_HOLDOUT` précis a été consulté,
+maintenant que plusieurs plans peuvent partager un snapshot) **et** `dataset_snapshot_id` direct
+(jamais remplacé — exigé explicitement ci-dessus, "sans jointure implicite") ; `research_run_id`
+direct, `experiment_id` **non dupliqué** (dérivable du `ResearchRun` référencé, même principe que
+"référence par identifiant" déjà établi) ; `reason` **obligatoire** (chaîne non vide) — contrairement
+à `Experiment.hypothesis`, un événement d'audit sans motif énoncé viderait le journal de son
+utilité ; `locked_state` capture uniquement ce que l'accédant déclare avoir constaté à l'instant T
+(`"locked"`/`"unlocked"`), jamais un état recalculé/vérifié techniquement — pas une state machine.
+`split_plan_id`/`dataset_snapshot_id` sont **asserted par l'appelant**, jamais croisés/validés l'un
+contre l'autre par le module (confirmé MCP Codex : une divergence serait une donnée incohérente à
+traiter comme telle, pas à résoudre silencieusement dans un simple constructeur).
+
+**Écart de nommage assumé (trouvé en revue `/code-review` Spec)** : le champ `first_opened_at` du
+tableau ci-dessus (non modifié) suggère un timestamp UNIQUE sur une structure mutable ("première
+ouverture"). L'implémentation retient plutôt `accessed_at` sur CHAQUE événement — cohérent avec le
+modèle réellement choisi ("append-only, un fichier immuable par accès", pas un champ mis à jour sur
+une structure partagée) : `first_opened_at` serait trompeur pour un deuxième/troisième événement,
+qui ne sont justement pas des "premières" ouvertures. Écart de vocabulaire assumé, pas une
+implémentation incorrecte.
+
+**Sémantique "untouched" (résolution AF-R-03)** : l'API fournie est `has_holdout_access_events(...)`
+(constat factuel : "au moins un événement existe dans CE répertoire d'audit"), **jamais**
+`is_untouched()` — notre système ne peut prouver une absence d'accès humain au-delà de ses propres
+fichiers. Toute absence retournée signifie explicitement "aucune consultation enregistrée dans
+l'audit Track R", pas une garantie physique absolue (voir invariant §18 point 7). **Portée
+(précision MCP Codex, correction de cardinalité)** : le répertoire audité est désormais scopé par
+`split_plan_id`, pas par `dataset_snapshot_id` — plusieurs plans distincts pouvant partager un
+snapshot, l'appelant doit auditer le plan précis qui l'intéresse, jamais un répertoire partagé
+entre plans distincts sous peine de réponse ambiguë.
+
 ---
 
 ## 13. Champions (statut existant préservé, lifecycle proposé séparément)
