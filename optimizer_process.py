@@ -197,6 +197,16 @@ if __name__ == "__main__":
     # CHARGEMENT DES DONNÉES
     # ════════════════════════════════════════════════════════════
 
+    # AF-DATA-04A : signature filesystem (taille+mtime_ns) capturée AVANT le chargement — bracket
+    # de contrôle de stabilité, comparée après le hachage ci-dessous. Best-effort (si la capture
+    # elle-même échoue, on dégrade silencieusement vers le comportement AF-DATA-02 : pas de
+    # vérification de stabilité pour ce run, jamais un nouveau mode de blocage).
+    from job_store import capture_source_signature
+    try:
+        _source_signature_before_load = capture_source_signature(config.data_file)
+    except OSError:
+        _source_signature_before_load = None
+
     _log(f"Chargement des données : {_abs_data}")
     # Façade de compatibilité (Data Center Phase 11) : passe par le port MarketDataSource au
     # lieu d'un appel direct à engine.load_data(chemin_brut). SingleFileCsvMarketDataSource
@@ -212,6 +222,37 @@ if __name__ == "__main__":
     # deviné) — utilisée uniquement pour enrichir data_manifest.json, voir job_store.finalize_job.
     from market_data.resample import infer_timeframe_from_series
     _inferred_source_timeframe = infer_timeframe_from_series(df["time"])
+
+    # HASH ONCE, PROPAGATE MANY (AF-DATA-02) : identité de contenu du fichier source calculée une
+    # seule fois ici, juste après un chargement réussi (le fichier est garanti exister à cet
+    # instant) — jamais recalculée plus loin. Propagée à finalize_job() -> write_data_manifest()
+    # -> build_backtest_manifest(), exactement comme _inferred_source_timeframe ci-dessus.
+    # Best-effort (voir job_store.compute_source_content_hash) : ne bloque jamais le job.
+    # ATTENTION (AF-DATA-04A) : ce hash certifie les octets du fichier "à cet instant du
+    # pipeline" — pas une preuve cryptographique atomique que ces octets sont EXACTEMENT ceux
+    # parsés dans `df` ci-dessus (deux lectures disque indépendantes). Le contrôle de stabilité
+    # ci-dessous détecte les modifications ordinaires survenues entre les deux, sans verrou ni
+    # second hash — voir docstring de compute_source_content_hash() pour la limite exacte.
+    from job_store import (
+        compute_source_content_hash, assert_source_signature_unchanged,
+        build_local_csv_snapshot_id, compute_source_period_bounds,
+    )
+    _source_content_hash = compute_source_content_hash(config.data_file)
+
+    # AF-DATA-04A : contrôle de stabilité — UN SEUL SHA-256 calculé ci-dessus, jamais un second ;
+    # seule une comparaison de métadonnées filesystem (taille+mtime_ns). Si une mutation
+    # ORDINAIRE du fichier est détectée pendant la fenêtre chargement->hachage, ce nouveau job ne
+    # doit pas écrire un manifeste affirmant une provenance fiable qu'il ne peut pas certifier —
+    # erreur explicite et non capturée ici (propagée, comme un échec de chargement des données),
+    # plutôt qu'un content_hash=None silencieux qui masquerait le problème. Se produit AVANT la
+    # phase de calcul lourd (benchmark/optimisation ci-dessous n'a pas encore commencé).
+    if _source_signature_before_load is not None:
+        assert_source_signature_unchanged(config.data_file, _source_signature_before_load)
+
+    _source_snapshot_id = build_local_csv_snapshot_id(_source_content_hash)
+    # Bornes du dataset SOURCE COMPLET (avant tout filtrage ci-dessous) — Track DATA seulement,
+    # jamais la sélection effectivement consommée par un ResearchRun (Track R, hors scope ici).
+    _source_period_start, _source_period_end = compute_source_period_bounds(df["time"])
 
     # ════════════════════════════════════════════════════════════
     # FILTRAGE PÉRIODE RÉDUITE (opt_start_date / opt_end_date / max_rows)
@@ -513,6 +554,10 @@ if __name__ == "__main__":
                 df_rows_used=df_rows_used,
                 log_lines=log_lines,
                 source_timeframe=_inferred_source_timeframe,
+                content_hash=_source_content_hash,
+                snapshot_id=_source_snapshot_id,
+                period_start=_source_period_start,
+                period_end=_source_period_end,
             )
             _log("Artefacts job générés avec succès.")
         except Exception as e:

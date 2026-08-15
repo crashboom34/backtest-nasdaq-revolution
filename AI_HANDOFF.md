@@ -779,3 +779,35 @@ git rm --cached .streamlit/credentials.toml
   `PH0-OCI-06`, etc. (voir `docs/roadmap/EPICS_AND_TICKETS.md`) est levé ; leur propre lecture et
   leurs propres critères restent à évaluer individuellement avant de les engager. Le shape de VM
   utilisé ici (`E4.Flex`) est temporaire, pas une décision finale de production.
+
+## 13. DATA FOUNDATION — `GATE DATA = PASS` (2026-08-15)
+
+**Statut : `AF-DATA-01`→`AF-DATA-04A` DONE, `GATE DATA = PASS`.** Détail complet :
+`docs/roadmap/EPICS_AND_TICKETS.md` §10 (verdict, garanties IMPLEMENTED/FUTURE, tech debt) ;
+`docs/roadmap/MASTER_ROADMAP.md` §4 (`GATE DATA`).
+
+- **Ce qui a été livré** : `market_data/content_hash.py` (SHA-256 streamé de l'artefact CSV
+  source) ; propagation dans `data_manifest.json` (`content_hash`, `snapshot_id =
+  "local_csv:sha256:<hash>"`, `period_start`/`period_end` du dataset source complet,
+  `source_timeframe`) via `optimizer_process.py`→`job_store.finalize_job()`; compatibilité legacy
+  prouvée (READ OLD / WRITE NEW, aucun backfill) ; contrôle de stabilité filesystem (taille +
+  `mtime_ns`) entre chargement et hachage, détecte une mutation ordinaire sans second SHA-256.
+- **Séquence réelle du gate** (non réécrite) : `AF-DATA-04` (audit) → **`NOT READY`** (2 critères
+  manquants + 1 risque TOCTOU) → `AF-DATA-04A` (correctif minimal, même journée) → revalidation
+  réelle → **`PASS`**.
+- **Validation Perfect Revolution réelle (2026-08-15)** : `NASDAQ Perfect Revolution V1.1` +
+  `DEFAULT_PARAMS`, `nasdaq_3m.csv` complet (1 000 000 lignes, lecture seule, taille/mtime
+  inchangés), via le **vrai pipeline job** (pas un script isolé). **114 trades**, stats
+  strictement identiques entre un calcul direct (`engine.load_data`+`run_backtest`) et le job
+  pipeline réel — cohérent avec la référence historique `PH0-OCI-01` (114 trades, 999 869 points
+  d'equity, verdict Windows/OCI déjà IDENTIQUE). Manifeste réel produit :
+  `provider="local_csv"`, `content_hash` SHA-256 réel, `snapshot_id` cohérent,
+  `period_start`/`period_end` réels, `source_timeframe="M3"`. Job non versionné
+  (`results/job_gate_data_validation/`, hors dépôt Git, `results/` non suivi).
+- **Ce qui reste `FUTURE`** (ne pas sur-promettre) : catalogue `DatasetVersion`
+  persistant/interrogeable (PostgreSQL, ADR 0007 toujours `Proposed`) ; `DATA-ADVANCED`
+  (Dukascopy, corporate actions, sync incrémental) ; sélection/lignes après filtrage
+  (`opt_start_date`/`opt_end_date`/`max_rows`), `DatasetSplitPlan`, `HoldoutAccessEvent`,
+  `ResearchRun` — **Track R**, prochaine étape (voir `EPICS_AND_TICKETS.md` §11-12 :
+  `AF-R-01`/`AF-V-01`/`AF-F-01` tous `READY` en parallèle, aucun commencé).
+- **Baseline tests** : 588 passed (546 avant `AF-DATA-*`, +42 nouveaux tests sur ce jalon).

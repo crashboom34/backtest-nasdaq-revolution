@@ -20,6 +20,10 @@ from typing import List, Optional
 
 from job_artifacts import ARCHIVE_SOURCE_FILES, build_job_archive
 from market_data.backtest_manifest import build_backtest_manifest, save_backtest_manifest
+# Alias explicite : évite que le paramètre `content_hash` (str) de write_data_manifest()/
+# compute_source_content_hash() ne masque la fonction dans leur propre portée — risque de
+# shadowing déjà anticipé lors de la revue Standards d'AF-DATA-01.
+from market_data.content_hash import content_hash as compute_content_hash
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -441,23 +445,158 @@ def write_archive(job_dir: str) -> Optional[str]:
 # MANIFESTE REPRODUCTIBLE (Data Center Phase 11 — additif)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def compute_source_content_hash(data_file: str) -> Optional[str]:
+    """Identité de contenu (SHA-256, `market_data.content_hash`) du fichier source local utilisé
+    par ce run — voir EPICS_AND_TICKETS.md, AF-DATA-02. C'est le hash de l'ARTEFACT SOURCE, pas
+    encore un `DatasetVersion` sémantique complet (voir AF-DATA-01/02, "Out of scope").
+
+    HASH ONCE : à appeler une seule fois par run, au moment où le fichier source vient d'être
+    chargé avec succès (voir optimizer_process.py) — jamais recalculé ici ni dans
+    `write_data_manifest()`/`finalize_job()`, qui se contentent de propager la valeur reçue.
+
+    Best-effort explicite, à la même politique que `write_data_manifest()` et
+    `market_data.backtest_manifest._current_git_commit()` : un calcul de provenance impossible
+    (fichier illisible/déplacé entre le chargement et cet appel) ne doit jamais faire planter le
+    job — retourne `None` plutôt que de lever. C'est un échec de calcul de provenance, distinct
+    d'un échec de chargement des données (déjà géré, bien plus tôt, en amont de cet appel).
+
+    GARANTIE EXACTE (AF-DATA-04A, formulée honnêtement — ne pas sur-promettre) : ce hash certifie
+    les octets du fichier source **tels qu'observés au moment de cet appel**, via une lecture
+    streamée dédiée (`market_data.content_hash`). Ce n'est **pas** une preuve cryptographique
+    atomique que ces octets sont exactement ceux déjà parsés dans le DataFrame utilisé par le
+    backtest (le chargement et ce hachage sont deux lectures disque indépendantes du même
+    fichier). `optimizer_process.py` complète cette garantie par un contrôle de stabilité léger
+    et non cryptographique (`capture_source_signature`/`assert_source_signature_unchanged` —
+    taille + `mtime_ns`, PAS un second SHA-256), qui détecte une modification ORDINAIRE du
+    fichier survenue entre le chargement et ce hachage — c'est le threat model réel de ce
+    pipeline CSV local mono-processus (aucun écrivain concurrent connu), pas une protection
+    contre un acteur malveillant capable de falsifier taille et horodatage en même temps que le
+    contenu.
+    """
+    try:
+        return compute_content_hash(data_file)
+    except OSError as exc:
+        print(f"[job_store] content_hash non calculé pour {data_file!r} (non bloquant) : {exc}")
+        return None
+
+
+def build_local_csv_snapshot_id(content_hash_value: Optional[str]) -> Optional[str]:
+    """Référence de snapshot content-addressed, typée par source, pour le chemin CSV local
+    (AF-DATA-04A) : `"local_csv:sha256:" + content_hash`.
+
+    Distincte de `content_hash` brut (le digest cryptographique seul) : `snapshot_id` porte en
+    plus le type de source (`local_csv`) et l'algorithme (`sha256`), explicites — un futur
+    provider (EODHD/Dukascopy, `DATA-ADVANCED`) pourra utiliser sa propre convention de
+    `snapshot_id` sans collision ni migration de schéma (confirmé via `domain-modeling`,
+    2026-08-15 : pas une duplication sémantique de `content_hash`, pas un `DatasetVersion`
+    catalogué non plus — juste une référence de snapshot content-addressed typée).
+
+    Retourne `None` si `content_hash_value` est `None` (rien à référencer).
+    """
+    if content_hash_value is None:
+        return None
+    return f"local_csv:sha256:{content_hash_value}"
+
+
+def compute_source_period_bounds(time_series) -> "tuple[Optional[str], Optional[str]]":
+    """Bornes (`period_start`, `period_end`) du dataset SOURCE COMPLET, en ISO-8601 UTC explicite
+    — AVANT tout filtrage `opt_start_date`/`opt_end_date`/`max_rows` (ces filtres appartiennent au
+    Track R, jamais à l'identité du dataset source — voir EPICS_AND_TICKETS.md, AF-DATA-04A).
+
+    Fuseau : UTC, explicite (`+00:00`) — même convention déjà établie par
+    `engine.py::_add_market_time_columns()` (`df["time"].dt.tz_localize("UTC")`), jamais une
+    nouvelle hypothèse de fuseau inventée ici.
+
+    `time_series` : la colonne `time` (naïve, considérée UTC par convention du dépôt) du
+    DataFrame source déjà chargé — aucune nouvelle lecture de fichier.
+
+    Retourne `(None, None)` si la série est vide (rien à borner).
+    """
+    if len(time_series) == 0:
+        return None, None
+    start = time_series.min().tz_localize("UTC").isoformat()
+    end = time_series.max().tz_localize("UTC").isoformat()
+    return start, end
+
+
+class SourceMutatedDuringLoadError(RuntimeError):
+    """Le fichier source a changé (taille et/ou mtime) entre le chargement du DataFrame et le
+    calcul du `content_hash` — la provenance de ce run ne peut pas être certifiée fiable.
+
+    Volontairement une exception NON capturée par ce module (propagée telle quelle à l'appelant,
+    voir `optimizer_process.py`) : contrairement à `compute_source_content_hash()` (best-effort,
+    ne lève jamais), une mutation réellement DÉTECTÉE est un signal de provenance faux qui ne doit
+    jamais être absorbé silencieusement en `content_hash=None` — voir AF-DATA-04A, "comportement
+    si mutation détectée". Ce comportement reste strictement local à ce cas précis, la politique
+    d'erreurs générale du reste du module (best-effort) est inchangée.
+    """
+
+
+def capture_source_signature(data_file: str) -> "tuple[int, int]":
+    """Signature filesystem légère `(taille, mtime_ns)` du fichier source, via `os.stat()`.
+
+    PAS une signature cryptographique — un contrôle de cohérence minimal pour détecter une
+    modification ORDINAIRE du fichier pendant la fenêtre chargement→hachage (AF-DATA-04A), pas
+    une preuve d'intégrité opposable à un acteur malveillant capable de falsifier taille et
+    horodatage. C'est le threat model réel de ce pipeline CSV local mono-processus.
+
+    Lève `FileNotFoundError`/`OSError` si `data_file` n'est pas accessible — propagée telle
+    quelle, cohérent avec `market_data.content_hash.content_hash()`.
+    """
+    st = os.stat(data_file)
+    return (st.st_size, st.st_mtime_ns)
+
+
+def assert_source_signature_unchanged(data_file: str, signature_before) -> None:
+    """Lève `SourceMutatedDuringLoadError` si la signature filesystem actuelle de `data_file`
+    diffère de `signature_before` (capturée avant le chargement, voir `capture_source_signature`).
+
+    Ne calcule JAMAIS de second `content_hash` — un seul SHA-256 complet par run reste un
+    invariant absolu (HASH ONCE, AF-DATA-02/04A) ; ce contrôle est intentionnellement limité aux
+    métadonnées filesystem, jamais un second passage cryptographique sur le contenu.
+    """
+    signature_after = capture_source_signature(data_file)
+    if signature_after != signature_before:
+        raise SourceMutatedDuringLoadError(
+            f"Le fichier source {data_file!r} a changé pendant le chargement/hachage : "
+            f"signature avant={signature_before!r}, après={signature_after!r}. "
+            "Provenance non certifiable pour ce run."
+        )
+
+
 def write_data_manifest(
-    job_dir: str, config_dict: dict, meta: dict, source_timeframe: Optional[str] = None
+    job_dir: str,
+    config_dict: dict,
+    meta: dict,
+    source_timeframe: Optional[str] = None,
+    content_hash: Optional[str] = None,
+    snapshot_id: Optional[str] = None,
+    period_start: Optional[str] = None,
+    period_end: Optional[str] = None,
 ) -> None:
     """Écrit data_manifest.json — manifeste reproductible additif (voir
-    market_data.backtest_manifest, CLAUDE.md Phase 11).
+    market_data.backtest_manifest, DOMAIN_MODEL.md §2).
 
     Best-effort avec les métadonnées aujourd'hui disponibles dans config_dict/meta : ce pipeline
     ne track pas encore explicitement asset/timeframe/snapshot structurés (data_file est un
     chemin CSV brut, pas un couple provider/asset/timeframe). `source_timeframe`, s'il est
     fourni, vient d'une inférence sur les données réellement chargées (voir
     market_data.resample.infer_timeframe_from_series(), appelée par optimizer_process.py) —
-    jamais deviné ici. Reste "unknown" si non fourni. Jamais inclus dans archive.zip (voir
-    ARCHIVE_SOURCE_FILES, liste explicite non affectée par ce nouveau fichier).
+    jamais deviné ici. Reste "unknown" si non fourni. `content_hash`, s'il est fourni, vient de
+    `compute_source_content_hash()` — calculé une seule fois par optimizer_process.py juste après
+    le chargement des données (HASH ONCE, PROPAGATE MANY), jamais recalculé ici. Reste `None` si
+    non fourni (chemin legacy, identique au comportement d'avant AF-DATA-02 — voir
+    EPICS_AND_TICKETS.md, "compatibilité legacy"). `snapshot_id`, s'il est fourni, vient de
+    `build_local_csv_snapshot_id()` (AF-DATA-04A). `period_start`/`period_end`, s'ils sont
+    fournis, viennent de `compute_source_period_bounds()` sur le DataFrame source COMPLET, avant
+    tout filtrage Track R (AF-DATA-04A). Les trois restent `None` si non fournis (même chemin
+    legacy que `content_hash`). Jamais inclus dans archive.zip (voir ARCHIVE_SOURCE_FILES, liste
+    explicite non affectée par ce nouveau fichier).
 
     N'écrase jamais un manifeste existant (immuable — FileExistsError silencieusement ignorée).
     Une erreur d'écriture ne fait jamais échouer la génération des artefacts du job : ce fichier
-    est additif, les 5 artefacts historiques restent prioritaires.
+    est additif, les artefacts déjà écrits plus haut dans finalize_job() (metrics/best_strategies/
+    report/logs/archive) restent prioritaires.
     """
     data_file = config_dict.get("data_file", "") or ""
     instrument = os.path.splitext(os.path.basename(data_file))[0] or "unknown"
@@ -468,6 +607,10 @@ def write_data_manifest(
             instrument=instrument,
             provider_symbol=instrument,
             source_timeframe=source_timeframe or "unknown",
+            content_hash=content_hash,
+            snapshot_id=snapshot_id,
+            period_start=period_start,
+            period_end=period_end,
             strategy_version=meta.get("strategy_name", "unknown"),
             repo_dir=os.path.dirname(os.path.abspath(__file__)),
         )
@@ -491,6 +634,10 @@ def finalize_job(
     df_rows_used: int,
     log_lines: List[str],
     source_timeframe: Optional[str] = None,
+    content_hash: Optional[str] = None,
+    snapshot_id: Optional[str] = None,
+    period_start: Optional[str] = None,
+    period_end: Optional[str] = None,
 ) -> None:
     """
     Génère tous les artefacts finaux du job dans job_dir.
@@ -498,6 +645,15 @@ def finalize_job(
 
     `source_timeframe` : code inféré depuis les données réelles (voir
     market_data.resample.infer_timeframe_from_series()), transmis à write_data_manifest().
+
+    `content_hash` : identité de contenu (SHA-256) du fichier source, calculée UNE SEULE FOIS par
+    optimizer_process.py juste après le chargement des données (voir
+    `compute_source_content_hash()`) — simplement propagée ici jusqu'à `write_data_manifest()`,
+    jamais recalculée (HASH ONCE, PROPAGATE MANY, AF-DATA-02). Reste `None` si non fourni (chemin
+    legacy, identique au comportement d'avant AF-DATA-02).
+
+    `snapshot_id`/`period_start`/`period_end` : AF-DATA-04A, mêmes règles de propagation simple
+    (calculés une fois en amont, jamais recalculés ici, `None` par défaut = chemin legacy).
     """
     top_results = [r for r in all_results if r.get("score", 0) > 0]
     top_results.sort(key=lambda r: r["score"], reverse=True)
@@ -507,7 +663,11 @@ def finalize_job(
     write_report_html(job_dir, meta, config_dict)
     write_logs(job_dir, log_lines)
     write_archive(job_dir)
-    write_data_manifest(job_dir, config_dict, meta, source_timeframe=source_timeframe)
+    write_data_manifest(
+        job_dir, config_dict, meta,
+        source_timeframe=source_timeframe, content_hash=content_hash,
+        snapshot_id=snapshot_id, period_start=period_start, period_end=period_end,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

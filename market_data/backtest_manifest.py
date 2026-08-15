@@ -1,20 +1,23 @@
 """
 market_data/backtest_manifest.py — Manifeste reproductible d'un backtest (Data Center Phase 11).
 
-Capacité additive : produit et sauvegarde un manifeste décrivant précisément quelles données et
-quelle configuration ont servi à un backtest, pour pouvoir le reproduire plus tard. N'est PAS
-branché automatiquement dans job_store.py/run_job.py à cette étape — même principe que
-engine.load_data_from_source() (Phase 1) : capacité disponible et testée, adoption comme chemin
-par défaut du pipeline de jobs laissée à une décision explicite séparée, pour ne pas risquer de
-régression sur les jobs réellement utilisés (voir AI_HANDOFF.md).
+Produit et sauvegarde un manifeste décrivant précisément quelles données et quelle configuration
+ont servi à un backtest, pour pouvoir le reproduire plus tard. **Branché dans le pipeline de jobs
+réel depuis AF-DATA-02/04A (2026-08-15)** : `optimizer_process.py` → `job_store.finalize_job()` →
+`job_store.write_data_manifest()` → `build_backtest_manifest()`/`save_backtest_manifest()` — un
+`data_manifest.json` réel est écrit pour chaque nouveau job (voir `EPICS_AND_TICKETS.md`,
+`GATE DATA = PASS`). Cette docstring décrivait auparavant ce module comme "pas branché
+automatiquement" — c'était vrai à sa création (Phase 11), plus vrai depuis `AF-DATA-02`.
 
-Champs minimaux requis (CLAUDE.md, Phase 11) : fournisseur, instrument, symbole fournisseur,
-type d'actif, snapshot, hash, période, unité source, unité dérivée, timezone, séance, gestion
-des barres partielles, options de rééchantillonnage, version de la stratégie, version du moteur,
+Champs minimaux d'un manifeste (voir `docs/architecture/DOMAIN_MODEL.md` §2 "Dataset vs
+DatasetVersion / Snapshot", et ADR 0008) : fournisseur, instrument, symbole fournisseur, type
+d'actif, snapshot, hash, période, unité source, unité dérivée, timezone, séance, gestion des
+barres partielles, options de rééchantillonnage, version de la stratégie, version du moteur,
 commit Git si disponible, date du lancement.
 
 Un manifeste, une fois écrit, n'est jamais modifié ni écrasé (immuable, comme les données
-brutes — voir CLAUDE.md : "Ne modifie jamais les anciens manifestes ou résultats").
+brutes — principe READ OLD / WRITE NEW, jamais de backfill rétroactif, voir
+`docs/roadmap/MASTER_ROADMAP.md`).
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ ENGINE_VERSION = "1.0"
 @dataclass(frozen=True)
 class BacktestManifest:
     """Manifeste reproductible d'un backtest — voir docstring du module pour la liste des
-    champs minimaux requis (CLAUDE.md, Phase 11)."""
+    champs minimaux (DOMAIN_MODEL.md §2, ADR 0008)."""
 
     provider: str
     instrument: str

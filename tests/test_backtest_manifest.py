@@ -124,3 +124,69 @@ def test_build_backtest_manifest_never_contains_a_secret():
     dump = json.dumps(manifest.__dict__)
     assert "api_token" not in dump
     assert "api_key" not in dump
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Compatibilité legacy explicite — AF-DATA-03 (LEGACY / INCOMPLETE PROVENANCE).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _legacy_manifest_json():
+    """Un dict JSON-sérialisable représentant un data_manifest.json valide, une clé par champ de
+    BacktestManifest — dérivé de `_REQUIRED_FIELDS` pour rester synchronisé si le schéma évolue
+    (une seule liste de champs à maintenir, pas deux). Nouvelle copie fraîche à chaque appel :
+    jamais un dict de module partagé/mutable entre tests."""
+    values = dict.fromkeys(_REQUIRED_FIELDS)
+    values.update({
+        "provider": "local_csv", "instrument": "nasdaq_3m", "provider_symbol": "nasdaq_3m",
+        "source_timeframe": "unknown", "timezone": "UTC", "session": "regular",
+        "partial_bar_handling": "kept_and_flagged", "resample_options": {},
+        "strategy_version": "NASDAQ Perfect Revolution V1.1", "engine_version": "1.0",
+        "launched_at": "2026-01-01T00:00:00+00:00",
+    })
+    return values
+
+
+def test_load_backtest_manifest_reads_an_explicit_legacy_null_content_hash(tmp_path):
+    """B. Un ancien manifeste avec content_hash=None (JSON `null`) reste lisible, et la
+    distinction LEGACY / INCOMPLETE PROVENANCE reste vérifiable programmatiquement."""
+    path = tmp_path / "data_manifest.json"
+    path.write_text(json.dumps(_legacy_manifest_json()), encoding="utf-8")
+
+    manifest = load_backtest_manifest(path)
+
+    assert manifest is not None
+    assert manifest.content_hash is None
+
+
+def test_load_backtest_manifest_tolerates_a_field_missing_from_an_older_schema(tmp_path):
+    """C. Robustesse générique du loader face à un champ manquant.
+
+    Note honnête (vérifié via `git log --follow -- market_data/backtest_manifest.py`, un seul
+    commit d'introduction, `content_hash` déjà présent dès l'origine) : aucun format historique
+    réel de data_manifest.json n'a jamais existé sans ce champ — ce test ne prétend donc pas
+    reproduire un format passé réel. Il protège le loader contre une future évolution additive
+    du schéma (ajout d'un nouveau champ requis) qui casserait sinon la lecture des manifestes
+    déjà écrits — exigence explicite AF-DATA-03 : "ne laisse pas une évolution additive casser
+    les manifestes historiques"."""
+    path = tmp_path / "data_manifest.json"
+    incomplete = _legacy_manifest_json()
+    del incomplete["launched_at"]  # simule un champ requis absent d'un ancien format
+    path.write_text(json.dumps(incomplete), encoding="utf-8")
+
+    assert load_backtest_manifest(path) is None  # jamais d'exception, jamais un objet partiel
+
+
+def test_load_backtest_manifest_never_modifies_the_file_it_reads(tmp_path):
+    """F. La lecture d'un manifeste ne modifie jamais le fichier lu (octets/mtime inchangés)."""
+    manifest = build_backtest_manifest(
+        provider="local_csv", instrument="nasdaq_3m", provider_symbol="nasdaq_3m",
+        source_timeframe="M3", git_commit=None,
+    )
+    path = save_backtest_manifest(tmp_path / "data_manifest.json", manifest)
+    original_bytes = path.read_bytes()
+    original_mtime = path.stat().st_mtime_ns
+
+    load_backtest_manifest(path)
+
+    assert path.read_bytes() == original_bytes
+    assert path.stat().st_mtime_ns == original_mtime

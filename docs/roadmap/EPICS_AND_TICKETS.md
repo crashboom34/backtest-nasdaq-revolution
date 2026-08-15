@@ -1,175 +1,931 @@
-# Epics et tickets
+# Epics et tickets — AlphaForge V2
 
-> Voir `docs/INDEX.md` pour la navigation. Produit via le skill `to-tickets`, adapté à cette
-> mission : un document consolidé unique (pas de publication GitHub Issues ni de fichiers
-> `.scratch/` — décision explicite de l'utilisateur pour cette mission de planification). Tickets
-> précis pour les Phases 0 et 1 ; macroscopiques au-delà. Un ticket bloqué par une décision non
-> prise référence explicitement `DECISION_BACKLOG.md` ou l'ADR concernée — jamais de fausse
-> précision sur un travail qui dépend encore d'un choix non tranché.
-
-## Epics par phase
-
-| Epic | Phase | Résumé | Bloqué par |
-|---|---|---|---|
-| **E0 — Architecture, Oracle Cloud et préparation** | 0 | Documents d'architecture, ADR (dont [ADR 0015](../adr/0015-oracle-cloud-infrastructure-payg.md) — Oracle Cloud Infrastructure PAYG retenu), roadmap, benchmark local puis OCI, protections de coût | Aucune |
-| **E1 — Serveur de staging OCI** | 1 | Docker Compose sur instance OCI, orchestrateur, Redis, PostgreSQL, stockage persistant OCI, secrets, HTTPS, sauvegardes, observabilité minimale, arrêt automatique | E0 (Go/No-Go validé) |
-| **E2 — Industrialisation du Data Center** | 2 | Téléchargement incrémental, calendrier branché, provenance corrigée, corporate actions branchées | E0 (partiel), bénéficie de E1 |
-| **E3 — Fiabilité scientifique** | 3 | Out-of-sample, walk-forward, Monte-Carlo, règles Champion formalisées | E2 |
-| **E4 — Refonte UI/UX** | 4 | Décomposition `app.py`, design system, Playwright | E1, E2, E3 (services stables) |
-| **E5 — Multi-actifs et portefeuille** | 5 | Modèle d'instruments étendu, portefeuille, exposition | E3 |
-| **E6 — Éditeur de stratégies** | 6 | DSL ou hybride (selon ADR 0014), sécurité, versionnement | ADR 0014 tranchée |
-| **E7 — Module Options** | 7 | Sous-système isolé (ADR 0011) | E1 (infrastructure générique) ; jamais bloquant pour les autres |
-| **E8 — Durcissement / commercialisation** | 8 | Authentification, rôles, audit — **si décidé** | Décision explicite de l'utilisateur (`DECISION_BACKLOG.md`) |
+> Voir `docs/INDEX.md` pour la navigation. Roadmap source de vérité : `MASTER_ROADMAP.md` (révisée,
+> `AF-RM-01-QC` validée, 2026-08-15). Modèle de domaine source de vérité : `DOMAIN_MODEL.md`
+> (révisé, `AF-DOM-01-QC` validé, 2026-08-14). Dépendances transversales : `DEPENDENCY_MAP.md`
+> (non modifié). Risques : `RISK_REGISTER.md`. Décisions ouvertes : `DECISION_BACKLOG.md`.
+>
+> **Recalcul complet (2026-08-15, mission `AF-TICKETS-01`)** : ce document est désormais organisé
+> par **tracks AlphaForge** (`AF-DATA`, `AF-R`, `AF-F`, `AF-V`, `AF-S`, `AF-EFAST`, `AF-EPREC`,
+> `AF-D`, `AF-P`, `AF-U`, `AF-DSL`, `AF-O`, `AF-INFRA`), pas par les anciennes Phases 0-8. Les
+> tickets `PH0-OCI-01`→`PH0-OCI-10` et `PH1-01`→`PH1-08` restent **préservés avec leurs IDs
+> d'origine, non renumérotés, non dupliqués sous un nouvel ID `AF-INFRA-*`** — voir §"Tickets
+> historiques préservés". Aucun ancien ID n'est réutilisé pour un nouveau ticket AlphaForge.
+>
+> **CHECKPOINT DATA FOUNDATION (2026-08-15)** : `AF-DATA-01`→`AF-DATA-04A` **DONE**,
+> **`GATE DATA = PASS`** — voir §10 pour le verdict complet (preuves, garanties IMPLEMENTED/
+> FUTURE) et §11-12 pour la frontière d'exécution actuelle (`AF-R-01`/`AF-V-01`/`AF-F-01` READY).
 
 ---
 
-## Phase 0 — tickets précis
+## 1. Verdict sur l'ancien `EPICS_AND_TICKETS.md`
+
+L'ancienne organisation en Epics `E0`-`E8` calqués sur les Phases 0-8 linéaires est
+**SUPERSEDED AS EXECUTION STRUCTURE** — elle ne reflète plus les dépendances réelles validées par
+`AF-RM-01-QC` (le Data Center n'était pas un track autonome, l'UI était positionnée comme une
+Phase tardive unique, Discovery et Portfolio suivaient l'ordre des Phases plutôt que leurs vraies
+dépendances). **Aucun contenu utile ne disparaît** : chaque item `E0`-`E8`/`T-*` est retrouvable
+dans le mapping §2 ci-dessous, soit comme ticket historique préservé (`PH0-*`/`PH1-*`, toujours
+d'actualité, non superseded), soit re-dérivé en ticket `AF-*` avec un scope corrigé par les
+dépendances réelles.
+
+Deux sous-ensembles bien distincts de l'ancien fichier ont un sort différent :
+- **`PH0-OCI-01`→`PH0-OCI-10` et `PH1-01`→`PH1-08`** (tickets précis, Phase 0/1) : **PAS
+  superseded** — c'est le contenu réel du track `INFRA` (continu), toujours ouvert, toujours
+  d'actualité, préservé **tel quel** ci-dessous (§"Tickets historiques préservés").
+- **Les Epics `E2`-`E8` et leurs tickets macroscopiques `T-*`** (Phases 2 à 8) : **superseded**
+  comme structure — leur contenu est re-dérivé dans les nouveaux tracks `AF-DATA`/`AF-R`/`AF-V`/
+  `AF-F`/`AF-S`/`AF-EFAST`/`AF-D`/`AF-P`/`AF-U`/`AF-DSL`/`AF-O` ci-dessous, avec un scope corrigé
+  par le graphe de dépendances de `MASTER_ROADMAP.md`. Voir mapping §2.
+
+---
+
+## 2. Mapping ancien → nouveau
+
+| Ancien item | Statut | Nouveau Track/Ticket | Note |
+|---|---|---|---|
+| `E0` — Architecture, OCI, préparation | DONE (documentaire) | — | Contenu livré, voir `docs/` |
+| `PH0-01` — Documents d'architecture | DONE | — | Livré ; voir "Tickets historiques préservés" |
+| `PH0-OCI-01` — Validation Linux réelle | **DONE, clos définitivement** | — | `PH0-OCI-01-BUG` inclus ; jamais remis en travail restant |
+| `E1` / `PH1-01`→`PH1-08` — Serveur de staging | **PRESERVED, non superseded** | `AF-INFRA` (mapping) | IDs et contenu inchangés, voir §"Tickets historiques préservés" |
+| `PH0-OCI-02`→`PH0-OCI-10` | **PRESERVED, non superseded** | `AF-INFRA` (mapping) | IDs et contenu inchangés |
+| `E2` — Industrialisation Data Center (`T-DC-1`→`T-DC-7`) | SUPERSEDED (re-dérivé) | `AF-DATA-*` | Scope corrigé : plusieurs briques (`BacktestManifest`, `_content_hash`) déjà existantes, pas "à créer" |
+| `E3` — Fiabilité scientifique (`T-VAL-1`→`T-VAL-6`) | SUPERSEDED (re-dérivé) | `AF-V-*` | `T-VAL-1` (audit look-ahead) reste pertinent, repris en note dans `AF-V-01` |
+| `E4` — Refonte UI/UX (`T-UI-*`) | SUPERSEDED (re-dérivé) | `AF-U-01` | Plus jamais une Phase tardive unique — tranches continues |
+| `E5` — Multi-actifs/portefeuille (`T-MA-1`→`T-MA-3`) | SUPERSEDED (re-dérivé) | `AF-P-01` | Dépendance technique recalculée (`V` + 2 `StrategyDefinition`) |
+| `E6` — Éditeur de stratégies (`T-DSL-1`→`T-DSL-3`) | SUPERSEDED (re-dérivé) | `AF-DSL-01` | Toujours `DECISION-PENDING`, ADR 0014 |
+| `E7` — Options (`T-OPT-1`→`T-OPT-3`) | SUPERSEDED (re-dérivé) | `AF-O-01` | Isolation inchangée |
+| `E8` — Durcissement/commercialisation (`T-HARD-1`→`T-HARD-2`) | SUPERSEDED (re-dérivé, **partiellement corrigé**) | Hors tracks (produit) + `AF-INFRA` | Sécurité d'exploitation/audit/backups/secrets **ne sont pas conditionnels** à la commercialisation — voir §9 |
+| Registries/Knowledge Base (nouveau, absent de l'ancien fichier) | NOUVEAU | `AF-F-*` | N'existait dans aucun ancien epic — introduit par le Domain Model |
+| Strategy Discovery (nouveau) | NOUVEAU | `AF-D-*` | Idem |
+| Precision Engine Contract (nouveau) | NOUVEAU | `AF-EPREC-*` | Idem |
+| Research Scope/SearchSpace (nouveau) | NOUVEAU | `AF-S-*`/`AF-EFAST-*` | Idem |
+| Experiment/ResearchRun (nouveau) | NOUVEAU | `AF-R-*` | Idem |
+
+---
+
+## 3. Epics par track (remplace les Epics `E0`-`E8`)
+
+| Track | Epic | Statut | Bloqué par |
+|---|---|---|---|
+| **AF-DATA** | Data Center — Provenance & Qualité (`DATA-FOUNDATION`) | **DONE — `GATE DATA = PASS`** (2026-08-15) | — |
+| **AF-EPREC** | Precision Engine — Contract d'abord | **READY** (1er ticket, non commencé) | Aucun (Domain Model stabilisé) |
+| **AF-R** | Reproducibility & Research Foundations | **READY** (débloqué, non commencé) | — (`GATE DATA` satisfait) |
+| **AF-V** | Scientific Validation | **READY** (débloqué, non commencé) | — (`GATE DATA` satisfait) |
+| **AF-F** | Strategy Knowledge / Registries | **READY** (débloqué, non commencé) | — (`GATE DATA` satisfait) |
+| **AF-S** | Research Scope / SearchSpace | BLOCKED | `AF-F` (catalogue minimal réel) |
+| **AF-EFAST** | Fast Backtest / Feature Computation | BLOCKED | `AF-F` (catalogue minimal réel) |
+| **AF-D** | Strategy Discovery | BLOCKED | `GATE V` (entrée obligatoire) + `AF-F`/`AF-S`/`AF-EFAST` matures |
+| **AF-P** | Portfolio | FUTURE | `GATE PORTFOLIO` |
+| **AF-U** | UI / Strategy Laboratory | FUTURE (continu) | Stabilité des services backend, par tranche |
+| **AF-DSL** | Strategy Authoring | DECISION-PENDING | ADR 0014 |
+| **AF-O** | Options / Derivatives | FUTURE (isolé) | Aucune (jamais bloquant pour le spot) |
+| **AF-INFRA** | OCI / Staging / Workers | PRESERVED, en cours | Voir tickets historiques préservés |
+
+---
+
+## 4. Tickets détaillés — Wave 1 (granularité maximale)
+
+### AF-DATA-01 — Content-hash réel et stable pour le CSV local
+
+**Status** : **DONE** (2026-08-15 — `market_data/content_hash.py`, 9 tests, `/code-review` passé)
+
+**Track / Wave** : `AF-DATA` (`DATA-FOUNDATION`) / Wave 1.
+
+**Why now** : c'est le seul verrou qui débloque `AF-R`, `AF-V`, `AF-F` via `GATE DATA` (voir
+`MASTER_ROADMAP.md` §3-4). Aucune dépendance, réutilise du code déjà existant et testé.
+
+**What to build** : une fonction pure calculant un hash sha256 stable du contenu du fichier CSV
+local réellement utilisé (`nasdaq_3m.csv` aujourd'hui), sans jamais lire/écrire le fichier source
+lui-même autrement qu'en lecture.
+
+**Current evidence / existing code** : `market_data/eodhd/storage.py::_content_hash(payload:
+bytes) -> str` existe déjà (sha256) mais est spécifique au chemin EODHD (raw/normalisé) — pas
+branché sur le CSV local. `market_data/backtest_manifest.py` possède déjà le champ
+`content_hash: Optional[str]` dans `BacktestManifest`, actuellement toujours `None` en pratique
+(voir `AF-DATA-02`).
+
+**Décision finale de seam (2026-08-15, corrige une analyse `codebase-design` antérieure de ce
+même ticket qui recommandait une co-localisation dans `market_data/backtest_manifest.py`)** : le
+seam retenu et implémenté est un **nouveau module dédié `market_data/content_hash.py`**, pas une
+co-localisation dans `backtest_manifest.py`. Raison (ré-analyse `codebase-design`, mission
+`AF-DATA-01` d'implémentation) : `content_hash()` est une primitive générique du domaine
+`market_data` (identité d'un artefact fichier), tandis que `BacktestManifest` en est un
+**consommateur**, pas son propriétaire — une co-localisation aurait créé une dépendance à
+rebours. `content_hash.py` ne dépend d'aucun sous-système fournisseur (ni EODHD ni
+`backtest_manifest`), reste réutilisable par toute future source locale. Une unification future
+avec `eodhd/storage.py::_content_hash()` reste une amélioration possible, **hors scope** de ce
+ticket.
+
+**Dependencies** : aucune.
+
+**Gate relationship** : contribue à `GATE DATA` (nécessaire mais pas suffisant seul — voir
+`AF-DATA-02`).
+
+**Files/modules concerned (réel)** : `market_data/content_hash.py` (nouveau module),
+`tests/test_content_hash.py` (nouveaux tests, 9).
+
+**In scope** : hash sha256 du contenu binaire du fichier ; déterminisme (même fichier → même
+hash, deux exécutions consécutives) ; sensibilité au contenu (fichier modifié → hash différent,
+test synthétique sur un fichier temporaire, jamais sur `nasdaq_3m.csv` lui-même).
+
+**Out of scope** : ne matérialise **pas** encore une entité `DatasetVersion` cataloguée/
+interrogeable au sens `DOMAIN_MODEL.md` §2 — seulement une preuve de provenance attachée à un run
+(écart de vocabulaire confirmé par `domain-modeling`, 2026-08-15 : `BacktestManifest` reste un
+constat par-run, pas encore un catalogue réutilisable entre runs — voir `AF-F`/DATA-ADVANCED pour
+la matérialisation future). Pas de branchement sur EODHD (déjà couvert). Pas de refactor de
+`_content_hash()` existant.
+
+**Acceptance criteria** :
+- [x] Une fonction pure `content_hash(path) -> str` retourne un sha256 hexadécimal du contenu du
+      fichier.
+- [x] Le même fichier hashé deux fois produit le même résultat.
+- [x] Un fichier temporaire de test modifié produit un résultat différent.
+- [x] Le fichier source n'est jamais modifié par la fonction (lecture seule).
+- [x] `nasdaq_3m.csv` n'est ni modifié ni déplacé par les tests.
+
+**Tests expected** : `/tdd` — tests unitaires purs, aucune dépendance à `job_store.py` ni à un job
+réel (voir `AF-DATA-02` pour l'intégration).
+
+**Non-regression / legacy compatibility** : sans objet à ce stade (fonction pure, non branchée).
+
+**Risks** : lire un fichier volumineux entièrement en mémoire pour le hasher — acceptable à la
+taille actuelle de `nasdaq_3m.csv` (mesurée dans `CURRENT_STATE.md`), à surveiller si la taille
+change significativement (hors scope ici).
+
+**Rollback** : fonction additive, aucun appelant existant — suppression triviale si besoin.
+
+**Effort** : S. **Uncertainty** : low.
+
+**Skills Claude Code recommended** : `tdd`.
+
+**Manual authorization required** : aucune (code additif, pas encore branché).
+
+---
+
+### AF-DATA-02 — Propager le content_hash réel jusqu'à `data_manifest.json`
+
+**Status** : **DONE** (2026-08-15 — `job_store.compute_source_content_hash`/`write_data_manifest`/
+`finalize_job` étendus, `optimizer_process.py` câblé, HASH ONCE vérifié, `/code-review` passé)
+
+**Track / Wave** : `AF-DATA` / Wave 1.
+
+**Why now** : c'est le ticket qui rend `content_hash` réellement visible dans les artefacts d'un
+nouveau run — sans lui, `AF-DATA-01` reste une fonction inutilisée.
+
+**What to build** : `job_store.write_data_manifest()` (déjà branché dans
+`finalize_job_outputs()`, déjà appelé pour chaque nouveau job) calcule et transmet un
+`content_hash` réel (via `AF-DATA-01`), un `snapshot_id` (identité stable du fichier utilisé,
+ex. nom + hash), et si disponibles `period_start`/`period_end` réels (déjà calculables depuis les
+données chargées, voir `source_timeframe` déjà inféré par `market_data.resample
+.infer_timeframe_from_series()`) à `build_backtest_manifest()`.
+
+**Current evidence / existing code** : `job_store.py` lignes 444-478 — l'appel à
+`build_backtest_manifest()` existe déjà et écrit déjà `data_manifest.json` pour chaque job, mais
+sans passer `content_hash=`/`snapshot_id=`/`period_start=`/`period_end=` (restent `None`
+aujourd'hui). C'est une modification d'un call-site existant, pas une nouvelle fonctionnalité de
+bout en bout.
+
+**Dependencies** : `AF-DATA-01` (fonction de hash disponible).
+
+**Gate relationship** : condition principale de `GATE DATA`.
+
+**Files/modules likely concerned** *(indicatif)* : `job_store.py::write_data_manifest()`,
+`tests/test_job_store.py`.
+
+**In scope** : propagation des champs déjà définis dans `BacktestManifest` ; aucun nouveau champ
+sur la dataclass.
+
+**Out of scope** : calendrier/DST, corporate actions, sync EODHD/Dukascopy (`DATA-ADVANCED`,
+track continu séparé — voir `MASTER_ROADMAP.md`).
+
+**Acceptance criteria** :
+- [x] Un nouveau job sur `nasdaq_3m.csv` produit un `data_manifest.json` avec `content_hash` non
+      vide.
+- [x] Deux jobs successifs sur le même fichier produisent le même `content_hash`.
+- [x] `snapshot_id` identifie le fichier utilisé de façon stable (finalisé par `AF-DATA-04A`, voir
+      plus bas — absent de la portée initiale de ce ticket, ajouté après l'audit `GATE DATA`).
+- [x] Aucune régression sur les artefacts historiques déjà produits par `finalize_job()`
+      (`write_metrics`, `write_best_strategies`, `write_report_html`, `write_logs`,
+      `write_archive` — 5 fonctions productrices des 7 fichiers de `ARCHIVE_SOURCE_FILES`).
+
+**Tests expected** : `/tdd` — extension de `tests/test_job_store.py::test_write_data_manifest_
+creates_a_valid_manifest` pour vérifier un `content_hash` réel non vide.
+
+**Non-regression / legacy compatibility** : `write_data_manifest()` garde son comportement
+`try/except` actuel (best-effort, jamais bloquant pour le job) — voir `AF-DATA-03` pour le test
+explicite de compatibilité legacy.
+
+**Risks** : ralentir la finalisation du job si le hash est recalculé à chaque appel plutôt que mis
+en cache — à mesurer, mitigation possible (cache par chemin+mtime) si le coût est significatif,
+**non anticipée sans mesure réelle**.
+
+**Rollback** : `git diff job_store.py` localisé, comportement `try/except` déjà en place limite le
+risque d'un job cassé.
+
+**Effort** : S. **Uncertainty** : low.
+
+**Skills Claude Code recommended** : `tdd`, `implement`.
+
+**Manual authorization required** : autorisation explicite de modifier `job_store.py` (code
+applicatif) — à demander au moment de l'implémentation, hors périmètre de cette mission
+documentaire.
+
+---
+
+### AF-DATA-03 — Compatibilité legacy explicite (jobs sans provenance complète)
+
+**Status** : **DONE** (2026-08-15 — 8 tests confirmant une garantie déjà acquise par construction,
+aucune correction de code nécessaire, `/code-review` passé)
+
+**Track / Wave** : `AF-DATA` / Wave 1.
+
+**Why now** : condition explicite du principe "pas de backfill destructif" — doit être prouvée,
+pas seulement supposée, avant de clore `GATE DATA`.
+
+**What to build** : documentation + tests confirmant qu'un ancien job (sans `data_manifest.json`,
+ou avec un `data_manifest.json` à `content_hash=None`) reste lisible et utilisable, interprété
+explicitement comme **LEGACY / INCOMPLETE PROVENANCE**, sans jamais être réécrit rétroactivement.
+
+**Current evidence / existing code** : cette garantie est **largement déjà acquise par
+construction**, pas à construire depuis zéro : `save_backtest_manifest()` lève `FileExistsError`
+si un manifeste existe déjà (jamais écrasé, capturée silencieusement dans
+`write_data_manifest()`) ; `load_backtest_manifest()` retourne `None` de façon tolérante si le
+fichier est absent, illisible ou invalide (jamais d'exception). Ce ticket **documente et teste**
+cette garantie explicitement pour les besoins de `GATE DATA`, il ne l'implémente pas de zéro.
+
+**Dependencies** : `AF-DATA-02` (pour comparer un job "nouveau" complet à un job "ancien"
+incomplet).
+
+**Gate relationship** : condition de `GATE DATA` ("job historique sans ces informations reste
+lisible").
+
+**Files/modules likely concerned** *(indicatif)* : `tests/test_job_store.py`,
+`tests/test_backtest_manifest.py`, note dans `docs/architecture/DATA_ARCHITECTURE.md` (hors
+périmètre de cette mission — à proposer séparément, pas modifié ici).
+
+**In scope** : test explicite chargeant un job directory simulé sans `data_manifest.json` et
+vérifiant qu'aucune fonction de lecture ne lève d'exception ; test confirmant qu'aucun ancien
+`data_manifest.json`/`config_used.json`/`metrics.json`/`results.csv` n'est jamais réécrit par le
+nouveau chemin.
+
+**Out of scope** : construire un outil de migration/backfill rétroactif — **interdit** (voir
+`MASTER_ROADMAP.md`, principe "pas de backfill destructif").
+
+**Acceptance criteria** :
+- [x] Un job directory sans `data_manifest.json` continue de fonctionner (affichage, reprise) sans
+      exception.
+- [x] `load_backtest_manifest()` sur un fichier absent/invalide retourne `None`, jamais
+      d'exception (test explicite, pas seulement lu dans le code).
+- [x] Aucun test ne modifie un artefact historique existant.
+- [x] La distinction "LEGACY / INCOMPLETE PROVENANCE" vs "provenance complète" est vérifiable
+      programmatiquement (ex. `content_hash is None`).
+
+**Tests expected** : `/tdd`.
+
+**Non-regression / legacy compatibility** : c'est l'objet même du ticket.
+
+**Risks** : aucun risque de régression identifié — ticket principalement défensif/probatoire.
+
+**Rollback** : sans objet (tests + documentation, aucun changement de comportement).
+
+**Effort** : S. **Uncertainty** : low.
+
+**Skills Claude Code recommended** : `tdd`.
+
+**Manual authorization required** : aucune pour la documentation ; autorisation standard pour tout
+test touchant potentiellement un vrai job directory (à exécuter sur des fixtures, jamais sur un
+job historique réel).
+
+---
+
+### AF-DATA-04 — Quality Gate DATA
+
+**Status** : **DONE (audit)** — verdict initial **`GATE DATA = NOT READY`** (2026-08-15), 3 gaps
+concrets trouvés (`snapshot_id` jamais peuplé, `period_start`/`period_end` jamais peuplés,
+fenêtre TOCTOU chargement→hachage non documentée/non mitigée). **Ne pas réécrire l'histoire** :
+ce ticket n'est pas passé du premier coup — voir `AF-DATA-04A` ci-dessous pour le correctif, puis
+la revalidation réelle qui a mené à **`GATE DATA = PASS`** (2026-08-15, même journée).
+
+**Track / Wave** : `AF-DATA` / Wave 1. **Ce ticket a établi le verdict initial de `GATE DATA` —
+c'est `AF-DATA-04A` + la revalidation qui ont effectivement franchi le gate.**
+
+**Why now** : `GATE DATA` débloque `AF-R`, `AF-V`, `AF-F` (voir `MASTER_ROADMAP.md` §4) — sans une
+vérification explicite et testée, le gate ne serait qu'une déclaration non prouvée.
+
+**What to build** : la suite de tests de non-régression/reproductibilité qui **prouve**
+`GATE DATA`, plus la vérification explicite de non-régression sur Perfect Revolution.
+
+**Gate relationship** — `GATE DATA` traduit en critères vérifiables (repris de
+`MASTER_ROADMAP.md` §4 et affiné). **État au moment de l'audit initial (2026-08-15, verdict
+NOT READY)** :
+- [x] Pour un **nouveau** run scientifique : source réellement identifiée (`provider`,
+      `instrument`).
+- [ ] `snapshot_id` identifiable pour le dataset utilisé. **FAIL à l'audit** — jamais peuplé par
+      `write_data_manifest()`. **Fermé par `AF-DATA-04A`.**
+- [x] `content_hash` réel et non vide.
+- [ ] `period_start`/`period_end` réels quand disponibles. **FAIL à l'audit** — jamais peuplés
+      alors que trivialement disponibles depuis le DataFrame déjà chargé. **Fermé par
+      `AF-DATA-04A`.**
+- [x] `source_timeframe` réel (déjà inféré aujourd'hui, non régressé).
+- [x] Provenance enregistrée dans `data_manifest.json`.
+- [x] Mêmes données → même identité/hash (test de déterminisme, `AF-DATA-01`).
+- [x] Modification des données → identité/hash différent (test synthétique, `AF-DATA-01`).
+- [x] Job historique sans ces informations reste lisible (`AF-DATA-03`).
+- [ ] **Perfect Revolution non régressée** : test planifié à l'audit, **pas exécuté** (mission
+      documentaire). **Exécuté réellement lors de la revalidation post-`AF-DATA-04A`** (voir
+      ci-dessous) : 114 trades, stats strictement identiques entre calcul direct et pipeline job,
+      cohérent avec la référence historique `PH0-OCI-01`. ✅
+
+**Gap supplémentaire trouvé et fermé** : fenêtre TOCTOU (chargement du DataFrame vs relecture pour
+le hash) non documentée/non mitigée à l'audit — hors de la checklist formelle du ticket mais
+identifiée comme risque réel par `/codebase-design`/`/code-review`/MCP Codex. Fermée par
+`AF-DATA-04A` (contrôle de stabilité filesystem, pas un second hash).
+
+**Explicitement hors scope de `GATE DATA` minimal** (per mission, ne pas sur-demander) : Dukascopy,
+corporate actions complètes, calendriers DST/holidays avancés — ces éléments appartiennent à
+`DATA-ADVANCED` (track continu), pas au gate minimal.
+
+**Tests expected** :
+- Suite pytest existante toujours verte après `AF-DATA-01/02/03` — **confirmé (546/546 puis
+  571/571 puis 588/588 au fil des tickets)**.
+- Un test dédié comparant, sur `NASDAQ Perfect Revolution V1.1` + `DEFAULT_PARAMS`, la sortie de
+  `engine.run_backtest()` (trades/equity/stats) **avant et après** le branchement du
+  `content_hash` réel — doit être **strictement identique**.
+- **Exécuté réellement le 2026-08-15** (autorisation explicite séparée, après `AF-DATA-04A`) :
+  1 000 000 lignes, **114 trades**, stats identiques valeur par valeur entre un calcul direct
+  (`engine.load_data`+`run_backtest`) et le vrai job pipeline (`job_gate_data_validation`),
+  cohérent avec la référence historique `PH0-OCI-01` (114 trades, 999 869 points d'equity, verdict
+  Windows/OCI déjà IDENTIQUE). Résultat non versionné (voir `AI_HANDOFF.md` pour la trace de
+  preuve), `results/job_gate_data_validation/` non commité (dossier de résultats, hors dépôt Git).
+
+**Non-regression / legacy compatibility** : c'est l'objet même de ce ticket — confirmé, aucun
+ancien job modifié (vérifié par `stat` avant/après sur un job pré-existant).
+
+**Risks** : un couplage accidentel entre le calcul du hash et le chemin de calcul du moteur —
+mitigé en gardant `AF-DATA-01`/`AF-DATA-02`/`AF-DATA-04A` strictement additifs (aucune
+modification de `engine.py`, confirmé par `/code-review` et MCP Codex).
+
+**Rollback** : sans objet (tests).
+
+**Effort** : S. **Uncertainty** : low.
+
+**Skills Claude Code recommended** : `tdd`, `code-review` (revue finale du gate).
+
+**Manual authorization required** : backtest complet de non-régression — **autorisé et exécuté le
+2026-08-15**, voir preuve ci-dessus.
+
+---
+
+### AF-DATA-04A — Finaliser l'identité du snapshot CSV, les bornes source et la cohérence load/hash
+
+**Status** : **DONE** (2026-08-15 — ticket correctif minimal créé après le verdict `NOT READY`
+d'`AF-DATA-04`, pas planifié à l'origine)
+
+**Track / Wave** : `AF-DATA` / Wave 1.
+
+**Why now** : fermer les 2 checkboxes manquantes de `GATE DATA` (`snapshot_id`,
+`period_start`/`period_end`) + le risque TOCTOU trouvé en sus par l'audit, sans transformer
+`AF-DATA-04` en gros ticket d'implémentation (principe explicite : gap trouvé → `NOT READY` → un
+ticket correctif minimal séparé, pas une correction silencieuse dans le même ticket).
+
+**What to build** :
+- `snapshot_id = "local_csv:sha256:" + content_hash` (référence de snapshot content-addressed
+  typée — **pas** un `DatasetVersion` catalogué, voir §11 hors-scope).
+- `period_start`/`period_end` = bornes min/max de `df["time"]` du dataset source **complet**,
+  avant tout filtrage `opt_start_date`/`opt_end_date`/`max_rows` (Track R), format ISO-8601 UTC
+  explicite.
+- Contrôle de stabilité source léger (`capture_source_signature`/`assert_source_signature_
+  unchanged`, taille+`mtime_ns`, **pas** un second SHA-256) entre chargement du DataFrame et
+  calcul du hash — lève `SourceMutatedDuringLoadError` (non capturée) si une mutation ordinaire
+  est détectée, avant la phase de calcul lourd.
+
+**Current evidence / existing code** : construit entièrement sur `AF-DATA-01`/`AF-DATA-02` déjà
+en place — aucune nouvelle architecture, aucun catalogue.
+
+**Dependencies** : `AF-DATA-04` (audit ayant révélé le gap).
+
+**Gate relationship** : ferme les 2 checkboxes `GATE DATA` restées `FAIL` à l'audit + le risque
+TOCTOU trouvé en sus.
+
+**Files/modules concerned (réel)** : `job_store.py` (+167 : `build_local_csv_snapshot_id`,
+`compute_source_period_bounds`, `capture_source_signature`, `assert_source_signature_unchanged`,
+`SourceMutatedDuringLoadError`), `optimizer_process.py` (+45, câblage), `tests/test_job_store.py`
+(+15 tests), `tests/test_data_manifest_e2e.py` (nouveau, 2 tests subprocess réels).
+
+**Out of scope (respecté)** : `DatasetVersionRepository`/`DatasetCatalog`/PostgreSQL/migration
+DB/snapshot physique automatique ; `ResearchRun`/`DatasetSplitPlan`/`HoldoutAccessEvent` (Track
+R) ; second hash complet ; verrou OS.
+
+**Acceptance criteria** :
+- [x] `snapshot_id` réel, format exact `local_csv:sha256:<content_hash>`, écrit dans le manifeste.
+- [x] `period_start`/`period_end` réels, bornes du dataset source complet, non altérés par les
+      filtres Track R (prouvé par un test e2e dédié avec filtres actifs).
+- [x] Contrôle de stabilité : un seul SHA-256 par run (`HASH ONCE` toujours respecté, test dédié),
+      mutation détectée (seam déterministe, pas de course réelle) → `SourceMutatedDuringLoadError`.
+- [x] Compatibilité legacy : les trois nouveaux champs restent `None` si non fournis, aucun ancien
+      test cassé.
+- [x] Test end-to-end permanent (subprocess réel, CSV synthétique) prouvant le vrai câblage, pas
+      des valeurs injectées.
+
+**Tests expected** : `/tdd` — 15 tests unitaires + 2 tests subprocess réels.
+
+**Non-regression / legacy compatibility** : confirmée — 588/588 (571 + 17 nouveaux) après
+implémentation.
+
+**Risks** : Data Clump noté (`content_hash`/`snapshot_id`/`period_start`/`period_end`/
+`source_timeframe` répétés dans 4 signatures, a franchi le seuil des 3 occurrences de Fowler) —
+voir §13 "Tech debt" ci-dessous, **pas corrigé maintenant** (pas un risque bloquant).
+
+**Rollback** : additif, `git diff` localisé à 4 fichiers.
+
+**Effort** : M. **Uncertainty** : low (construit sur du code déjà validé).
+
+**Skills Claude Code recommended** : `domain-modeling`, `codebase-design`, `tdd`, `implement`,
+`code-review`.
+
+**Manual authorization required** : aucune au-delà de celle déjà donnée pour ce ticket correctif.
+
+---
+
+*(Verdict final `GATE DATA` détaillé, garanties IMPLEMENTED/FUTURE, et tech debt : voir §10
+"`GATE DATA` — récapitulatif" plus bas, mis à jour avec le verdict final.)*
+
+---
+
+### AF-EPREC-01 — Precision Engine Contract
+
+**Status** : **READY**
+
+**Track / Wave** : `AF-EPREC` / Wave 1 (parallèle, indépendant de `AF-DATA`).
+
+**Why now** : seul prérequis = Domain Model stabilisé (`AF-DOM-01-QC`, déjà fait). Peut démarrer
+le même jour qu'`AF-DATA-01`, sans coordination.
+
+**What to build** : la spécification/interface (documentaire, architecture) du futur Precision
+Engine — `ExecutionModel`/`Order`/`OrderType`/`Position`/`Fill` (`DOMAIN_MODEL.md` §10), incluant
+les policies nommées (`commission_policy`/`slippage_policy`/`spread_policy`/`margin_policy`) déjà
+actées comme **une seule** entité composite (pas 4 entités top-level).
+
+**Current evidence / existing code** : `engine.py` reste **CURRENT REFERENCE ENGINE, IMPLEMENTED +
+TESTED** — ce ticket ne le modifie pas, ne le renomme pas. C'est un travail de spécification pure.
+
+**Dependencies** : aucune.
+
+**Gate relationship** : ne contribue à aucun gate directement — prérequis de `AF-EPREC-02` et de
+`GATE PRECISION` (Wave 4).
+
+**In scope** : contrat d'interface complet (types, invariants, modes d'erreur, ordonnancement) —
+document de spécification, pas de code.
+
+**Out of scope** : toute implémentation (`AF-EPREC-02`+) ; tout renommage d'`engine.py`.
+
+**Acceptance criteria** :
+- [ ] Chaque concept `DOMAIN_MODEL.md` §10 a une définition d'interface précise (signature +
+      invariants + modes d'erreur).
+- [ ] Le contrat est explicitement comparable au comportement actuel d'`engine.py` (base du futur
+      test de conformance, `GATE PRECISION`).
+- [ ] Aucune implémentation livrée par ce ticket.
+
+**Tests expected** : sans objet à ce stade (spécification).
+
+**Non-regression / legacy compatibility** : `engine.py` non touché.
+
+**Risks** : sur-spécifier avant d'avoir un second cas d'usage réel — mitigé en s'en tenant au
+contrat déjà esquissé dans `DOMAIN_MODEL.md`, pas une nouvelle invention.
+
+**Rollback** : sans objet (documentation).
+
+**Effort** : M. **Uncertainty** : medium (prembattre un contrat sans second moteur réel pour le
+challenger).
+
+**Skills Claude Code recommended** : `codebase-design`, `domain-modeling`.
+
+**Manual authorization required** : aucune (documentation).
+
+---
+
+## 5. Tickets — Wave 1 suite (granularité maximale/bonne, débloqués par `GATE DATA = PASS`)
+
+### AF-R-01 — Experiment / ResearchRun — schéma minimal + stockage fichier
+
+**Status** : **READY** (`GATE DATA = PASS`, 2026-08-15 — débloqué, non commencé)
+
+**What to build** : structures `Experiment` (durable, `hypothesis` optionnel) et `ResearchRun`
+(exécution concrète immuable), stockées en fichiers (job directory existant, pas une nouvelle base
+de données) — **ne prétend pas que PostgreSQL est nécessaire** à cette première implémentation
+(ADR 0007 reste `Proposed`, non tranchée).
+
+**Dependencies** : `GATE DATA`.
+
+**In scope** : schéma minimal, persistance fichier réutilisant le job directory déjà existant.
+
+**Out of scope** : PostgreSQL, UI, `SearchSpace` (dérivé par `ResearchRun`, jamais stocké sur
+`Experiment` — voir `DOMAIN_MODEL.md`/`AF-DOM-01-QC`).
+
+**Acceptance criteria** :
+- [ ] Un `ResearchRun` référence un `DatasetVersion` (via `content_hash`/`snapshot_id` d'`AF-DATA`)
+      par identifiant, pas par copie de valeur.
+- [ ] Le job directory historique reste inchangé pour les jobs qui n'utilisent pas encore ce
+      schéma.
+
+**Effort** : M. **Uncertainty** : medium. **Skills recommended** : `domain-modeling`, `tdd`.
+
+### AF-R-02 — Capture git_sha / seed / version logicielle par run
+
+**Status** : BLOCKED (`AF-R-01`)
+
+**What to build** : chaque nouveau `ResearchRun` capture automatiquement le `git_sha` (réutilise
+`market_data.backtest_manifest._current_git_commit()`, déjà existant), un `seed` explicite, et la
+version logicielle (`engine_version`, déjà existant dans `BacktestManifest`).
+
+**Dependencies** : `AF-R-01`.
+
+**Effort** : S. **Uncertainty** : low. **Skills recommended** : `tdd`.
+
+### AF-R-03 — DatasetSplitPlan / HoldoutAccessEvent — fondations
+
+**Status** : BLOCKED (`AF-R-01`, `AF-DATA` pour l'identité du `DatasetVersion` partitionné)
+
+**What to build** : fondations du plan de partition (train/test/holdout) d'un `DatasetVersion`, et
+de l'audit d'accès au holdout (`HoldoutAccessEvent` référence `research_run_id` +
+`dataset_version_id` directement — voir `AF-DOM-01-QC`). Invariant : un holdout accédé ne peut
+jamais être décrit "intouché" sans vérifier les événements.
+
+**Dependencies** : `AF-R-01`, `AF-DATA-02` (identité réelle du dataset).
+
+**Effort** : M. **Uncertainty** : medium (premier cas d'usage réel encore absent — garder minimal).
+**Skills recommended** : `domain-modeling`, `tdd`.
+
+---
+
+### AF-V-01 — OOS / holdout intouché — première `ValidationRun` réelle
+
+**Status** : **READY** (`GATE DATA = PASS`, 2026-08-15 — débloqué, non commencé)
+
+**Why now** : `V` ne dépend que de `DATA-FOUNDATION` + `CURRENT REFERENCE ENGINE` (déjà
+implémenté) — **ne bloque pas** sur le futur Precision Engine (`AF-EPREC`).
+
+**What to build** : première exécution réelle d'une validation Out-of-Sample sur
+`CURRENT REFERENCE ENGINE` + Perfect Revolution, produisant une `ValidationEvidence` réelle.
+
+**Current evidence / existing code** : `TEST_AND_VALIDATION_ARCHITECTURE.md` — architecture déjà
+préparée, 0 % implémenté.
+
+**Dependencies** : `GATE DATA`.
+
+**Note historique reprise** : couvre l'intention de l'ancien `T-VAL-1` (audit look-ahead bias dans
+`engine.py`/`on_bar()`) comme prérequis d'hygiène avant la première `ValidationRun` — à vérifier
+en ouverture de ce ticket, pas un ticket séparé.
+
+**Acceptance criteria** :
+- [ ] Une période holdout est définie et jamais utilisée pour ajuster quoi que ce soit avant le
+      verdict final.
+- [ ] `ValidationEvidence` produite et lisible.
+
+**Effort** : M. **Uncertainty** : medium. **Skills recommended** : `tdd`.
+
+### AF-V-02 — Walk-Forward
+
+**Status** : BLOCKED (`AF-V-01`). **Effort** : M. **Skills recommended** : `tdd`.
+
+**What to build** : moteur walk-forward sur `CURRENT REFERENCE ENGINE`, `ValidationEvidence` dédiée.
+
+### AF-V-03 — Monte-Carlo
+
+**Status** : BLOCKED (`AF-V-01`). **Effort** : M. **Skills recommended** : `tdd`.
+
+### AF-V-04 — Parameter Stability
+
+**Status** : BLOCKED (`AF-V-01`). **Effort** : M. **Skills recommended** : `tdd`.
+
+### AF-V-05 — Stress / Noise
+
+**Status** : BLOCKED (`AF-V-01`). **Effort** : M. **Uncertainty** : medium (protocole exact encore
+à affiner). **Skills recommended** : `tdd`, `domain-modeling`.
+
+### AF-V-06 — `ValidationSpecification` / `ValidationEvidence` typés par `validation_type`
+
+**Status** : BLOCKED (`AF-V-01`)
+
+**What to build** : structure typée par type de validation (pas un dict opaque) — correction déjà
+actée par `AF-DOM-01-QC`. Sert de socle commun à `AF-V-02`→`AF-V-05`.
+
+**Dependencies** : `AF-V-01`. **Devrait en réalité précéder `AF-V-02`→`AF-V-05` dans l'ordre
+d'exécution réel** (noté ici pour granularité, séquencement réel laissé à l'implémentation).
+
+**Effort** : S. **Uncertainty** : low. **Skills recommended** : `domain-modeling`, `tdd`.
+
+### AF-V-07 — `ValidationPolicyVersion` (fondation)
+
+**Status** : BLOCKED (`AF-V-06`). **Effort** : S. **Uncertainty** : medium (frontières de
+"Champion" encore `OPEN QUESTION`, voir `DOMAIN_MODEL.md` §13). **Skills recommended** :
+`domain-modeling`.
+
+---
+
+### AF-F-01 — Knowledge Base foundation
+
+**Status** : **READY** (`GATE DATA = PASS`, 2026-08-15 — débloqué, non commencé)
+
+**What to build** : premiers fichiers de référence déclaratifs (`KnowledgeSource`/`Reference`,
+Git-file-based, immuables — décision `PostgreSQL`/`CatalogEntry` reste `PROPOSED`, ADR 0007 non
+tranchée, **ne pas la présumer nécessaire ici**).
+
+**Dependencies** : `GATE DATA`. **Effort** : M. **Uncertainty** : medium. **Skills recommended** :
+`domain-modeling`.
+
+### AF-F-02 — Strategy Registry additif
+
+**Status** : BLOCKED (`AF-F-01`)
+
+**What to build** : couche d'introspection additive sur les stratégies existantes.
+
+**IMPORTANT — contrainte non négociable** : le premier Strategy Registry **ne remplace pas**
+`glob strategies/*.py` — la découverte Python actuelle continue de fonctionner à l'identique.
+Perfect Revolution (`perfect_revolution_v1.py`) reste inchangée. Le Registry est un
+adapter/introspection additif par-dessus, jamais un remplacement destructif.
+
+**Dependencies** : `AF-F-01`.
+
+**Acceptance criteria** :
+- [ ] `glob strategies/*.py` continue de fonctionner sans modification après ce ticket.
+- [ ] `perfect_revolution_v1.py` non modifié.
+- [ ] Le Registry expose les stratégies existantes en plus du mécanisme glob, pas à sa place.
+
+**Effort** : M. **Uncertainty** : medium. **Skills recommended** : `codebase-design`, `tdd`.
+
+### AF-F-03 — Indicator Registry
+
+**Status** : BLOCKED (`AF-F-02`). **Effort** : M. **Skills recommended** : `domain-modeling`.
+
+### AF-F-04 — Feature Registry
+
+**Status** : BLOCKED (`AF-F-03`). **Effort** : M. **Skills recommended** : `domain-modeling`.
+
+### AF-F-05 — Signal Registry
+
+**Status** : BLOCKED (`AF-F-04`). **Effort** : M. **Skills recommended** : `domain-modeling`.
+
+---
+
+## 6. Tickets — Wave 2 (granularité moyenne)
+
+### AF-S-01 — `ResearchScope` → `SearchSpace` (modèle + taille théorique)
+
+**Status** : BLOCKED (`AF-F` — catalogue minimal réel)
+
+**What to build** : modèle `ResearchScope` (dual-sémantique `timeframes`, voir `AF-DOM-01-QC`) et
+calcul de taille théorique de `SearchSpace` — **pas d'exécution réelle** à ce stade.
+
+**Effort** : M. **Uncertainty** : medium. **Skills recommended** : `domain-modeling`.
+
+### AF-S-02 — Résolution de compatibilité (candidats valides)
+
+**Status** : BLOCKED (`AF-S-01`). **Effort** : M. **Uncertainty** : medium.
+
+### AF-EFAST-01 — Cache versionné + benchmark first
+
+**Status** : BLOCKED (`AF-F` — catalogue minimal réel)
+
+**What to build** : cache versionné par `dataset content_hash + FeatureVersion + paramètres +
+timeframe + version logicielle`, **benchmark avant tout choix technique**.
+
+**IMPORTANT** : **ne décide pas prématurément** Polars/Numba ni l'architecture de cache finale —
+ce ticket produit des mesures, pas une décision d'implémentation figée. Réutilise le protocole
+déjà défini dans `BENCHMARK_PLAN.md`.
+
+**Effort** : M. **Uncertainty** : high (dépend des résultats du benchmark). **Skills
+recommended** : aucun skill Claude Code spécifique — mesure d'abord.
+
+---
+
+## 7. Tickets — Waves suivantes (macro / placeholder explicite)
+
+> Les tickets ci-dessous sont volontairement macroscopiques : l'architecture de leurs sous-domaines
+> n'est pas encore assez décidée pour un découpage précis sans inventer de fausse précision.
+
+### AF-D-01 — Random Baseline (exigence explicite)
+
+**Status** : BLOCKED (`GATE V`, `AF-F`/`AF-S`/`AF-EFAST` matures)
+
+**What to build** : `Random Baseline`, toujours produite en premier avant toute méthode
+sophistiquée, comparée à budget de calcul comparable.
+
+**Critère explicite** (repris de `MASTER_ROADMAP.md` §4, `GATE D` reformulée) : la valeur d'une
+méthode sophistiquée **n'est pas** "doit toujours battre Random sur chaque run" — elle peut se
+démontrer par qualité, efficacité de recherche, couverture, stabilité des paramètres, ou coût de
+recherche, individuellement ou combinés.
+
+**Effort** : M. **Uncertainty** : medium. **Skills recommended** : `tdd`, `domain-modeling`.
+
+### AF-D-02 — Combination Engine progressif (macro)
+
+**Status** : FUTURE (bloqué par `AF-D-01`). Paires → triplets → recherche plus sophistiquée.
+Représentation déclarative interne, **sans DSL utilisateur** (voir `AF-DSL`, non-prérequis).
+
+### AF-D-03 — Méthodes sophistiquées (macro)
+
+**Status** : FUTURE. Evolutionary/Genetic, Bayesian, CMA-ES — chacune comparée à `AF-D-01` à
+budget comparable, gatée par `GATE D`.
+
+### AF-D-04 — Genetic Programming
+
+**Status** : **FUTURE explicite, uniquement si justifié par un besoin réel** — jamais un
+prérequis des premiers prototypes `AF-D-01`→`AF-D-03`.
+
+**Anti-overfitting (rappel, rattaché à `AF-D`/`AF-R`, pas un epic séparé)** : FOUNDATION (holdout
+intouché + `AF-R-03`, nested validation, comptage de candidats, `AF-D-01`, stabilité des
+paramètres, contrôle de complexité) s'applique dès `AF-D-01`. RECOMMENDED (DSR, PBO/CSCV, contrôle
+de fausses découvertes, sensibilité régime/marché croisé) seulement au-delà de quelques centaines
+de candidats — **ne bloque pas les premiers travaux `AF-D`.**
+
+### AF-P-01 — Portfolio (macro epic)
+
+**Status** : FUTURE (`GATE PORTFOLIO`)
+
+**Dépendance technique** (réelle) : `AF-V` + au moins 2 `StrategyDefinition` validées — peuvent
+venir d'`AF-F` seul (hand-authored), **pas artificiellement dépendant de `AF-D`**.
+**Réalité produit** : `AF-D` sera la source principale de candidats à l'échelle en pratique — les
+deux sont montrées séparément, jamais confondues (voir `MASTER_ROADMAP.md` §3).
+
+Prévu à terme (non détaillé en tickets, macro) : capital partagé, allocation, exposition,
+corrélation, concentration, drawdown, validation de portefeuille, `StrategyHealth` (FUTURE),
+`MarketRegime`. **Aucun de ces éléments n'est READY maintenant.**
+
+### AF-U-01 — UI / Strategy Laboratory (macro epic, tranches verticales continues)
+
+**Status** : FUTURE (continu, déclenché par service backend stabilisé — **jamais** une refonte
+générale permanente)
+
+Tranches futures indicatives : Research Scope UI, aperçu `SearchSpace`, Laboratoire de stratégies,
+Validation, Résultats, Champions, Portfolio, Administration. Chaque tranche est un ticket propre,
+créé **au moment où** le service backend correspondant est stable — pas avant, pas en avance de
+phase. Streamlit reste interface uniquement, jamais moteur d'exécution.
+
+### AF-DSL-01 — Strategy Authoring (macro epic)
+
+**Status** : **DECISION-PENDING** (ADR 0014)
+
+Le DSL utilisateur ne bloque ni les Registries (`AF-F`), ni `StrategyDefinition` interne, ni
+`AF-D`. Tout ticket d'implémentation DSL reste `BLOCKED`/`DECISION-PENDING` tant qu'ADR 0014 n'est
+pas tranchée.
+
+### AF-O-01 — Options / Derivatives (macro epic, isolé)
+
+**Status** : FUTURE (isolé, jamais bloquant)
+
+IG démo lecture seule uniquement à ce stade. Ne bloque jamais spot/`AF-D`/`AF-P`. ADR 0011 reste
+`Proposed`.
+
+---
+
+## 8. `AF-INFRA` — epic de rattachement (pas de duplication)
+
+`AF-INFRA` ne crée **aucun** nouveau ticket dupliquant `PH0-OCI-02`→`PH0-OCI-10` ou
+`PH1-01`→`PH1-08` — ces tickets **existants** couvrent déjà Docker Compose, stockage, secrets,
+arrêt automatique, protections budgétaires, HTTPS, sauvegardes, observabilité (voir
+§"Tickets historiques préservés" ci-dessous). `AF-INFRA` sert uniquement de point de rattachement/
+mapping pour de futurs tickets non encore représentés (aucun identifié à ce stade).
+
+ADR 0006 (RQ vs Celery) reste `Decision pending`. ADR 0007 (PostgreSQL) reste `Proposed`.
+
+---
+
+## 9. Sécurité / Observabilité / Backup — non conditionnels à la commercialisation
+
+**Correction explicite de l'ancien regroupement (`AF-TICKETS-01`)** : secrets (`PH0-OCI-05`,
+`PH1-05`), sauvegarde/restauration (`PH1-07`), observabilité (`PH1-08`), protections budgétaires
+(`PH0-OCI-07`), arrêt automatique (`PH0-OCI-06`), audit technique — **ne sont pas conditionnels à
+une hypothétique commercialisation**. Ils vivent sous `AF-INFRA`/durcissement et sont déjà couverts
+par des tickets `PH0-OCI-*`/`PH1-*` existants, requis bien avant toute décision produit.
+Seuls restent conditionnels à une décision explicite de commercialisation : authentification
+multi-utilisateur avancée, rôles commerciaux, facturation (`T-HARD-1`/`T-HARD-2`, macro, hors
+tracks).
+
+---
+
+## 10. `GATE DATA` — verdict final : **PASS** (2026-08-15)
+
+Liste complète des critères vérifiables dans `AF-DATA-01`(hash), `AF-DATA-02`(propagation),
+`AF-DATA-03`(compatibilité legacy), `AF-DATA-04`(gate, audit initial) et `AF-DATA-04A`(correctif).
+Aucun critère de `GATE DATA` n'est laissé à l'état de prose non vérifiable.
+
+**`GATE DATA = PASS`**, confirmé par 10/10 critères de la checklist `AF-DATA-04`, `/code-review`
+(2 axes) et MCP Codex (revue indépendante, verdict atteint séparément). **Séquence réelle, non
+réécrite** : `AF-DATA-04` (audit) → **`NOT READY`** (2 gaps + 1 risque TOCTOU trouvés) →
+`AF-DATA-04A` (correctif minimal) → revalidation réelle (Perfect Revolution, 114 trades,
+1 000 000 lignes) → **`PASS`**. Ce gate n'a pas été franchi du premier coup.
+
+**IMPLEMENTED (Track DATA, CSV local)** : identité de l'artefact source (SHA-256 réel, streamé,
+`market_data/content_hash.py`) ; référence de snapshot content-addressed typée (`snapshot_id =
+"local_csv:sha256:" + content_hash`) ; bornes du dataset source complet (`period_start`/
+`period_end`, ISO-8601 UTC) ; `source_timeframe` honnête ; manifeste immuable par job
+(`data_manifest.json`) ; compatibilité legacy prouvée (READ OLD / WRITE NEW, aucun backfill) ;
+contrôle metadata (taille+`mtime_ns`) contre une mutation ordinaire pendant la fenêtre
+chargement→hachage ; non-régression Perfect Revolution prouvée en conditions réelles (114 trades,
+stats identiques, cohérent avec la référence historique `PH0-OCI-01`).
+
+**FUTURE (ne pas prétendre déjà livré)** : catalogue `DatasetVersion` persistant/interrogeable
+(PostgreSQL ou autre, ADR 0007 toujours `Proposed`) ; copie physique content-addressed
+automatique ; verrouillage de fichier ; protection contre un acteur malveillant falsifiant
+taille+horodatage simultanément au contenu ; `DATA-ADVANCED` (Dukascopy, corporate actions
+complètes, calendriers DST/holidays avancés, sync incrémental) ; sélection/lignes effectivement
+consommées après filtrage (`opt_start_date`/`opt_end_date`/`max_rows`, `DatasetSplitPlan`,
+`HoldoutAccessEvent`, `ResearchRun`) — **Track R**, jamais Track DATA (frontière validée,
+`GATE DATA` ne dépend d'aucun de ces éléments).
+
+**Tech debt notée, non bloquante** : le groupe de paramètres `(content_hash, snapshot_id,
+period_start, period_end, source_timeframe)` apparaît désormais identique dans 4 signatures
+(`optimizer_process.py`, `finalize_job`, `write_data_manifest`, `build_backtest_manifest`) — a
+franchi le seuil des "3 occurrences" de Fowler, candidat sérieux pour un futur objet de valeur
+(ex. `SourceProvenance`). Pas un ticket, pas de code maintenant — à considérer si un 6e champ de
+provenance s'ajoute un jour.
+
+---
+
+## 11. CURRENT EXECUTION QUEUE — WAVE 1
+
+**TERMINÉ (2026-08-15)** — `DATA-FOUNDATION` complète, `GATE DATA = PASS` :
+1. ✅ `AF-DATA-01` — content_hash réel et stable pour le CSV local.
+2. ✅ `AF-DATA-02` — propagation dans `data_manifest.json`.
+3. ✅ `AF-DATA-03` — compatibilité legacy (documentation + tests).
+4. ✅ `AF-DATA-04` — Quality Gate DATA (audit → `NOT READY`).
+5. ✅ `AF-DATA-04A` — correctif minimal (`snapshot_id`/bornes source/contrôle de stabilité).
+6. ✅ Revalidation réelle (Perfect Revolution, 114 trades) → **`GATE DATA = PASS`**.
+
+**READY NOW** (débloqués par `GATE DATA = PASS`, zéro dépendance croisée entre eux, aucun
+commencé) :
+- `AF-R-01` — Experiment/ResearchRun, schéma minimal + stockage fichier.
+- `AF-V-01` — OOS/holdout intouché, première `ValidationRun` réelle.
+- `AF-F-01` — Knowledge Base foundation.
+- `AF-EPREC-01` — Precision Engine Contract (déjà `READY` depuis le début, indépendant de
+  `AF-DATA` — à vérifier s'il a déjà été traité séparément avant de le redémarrer).
+
+Cet ordre reste dérivé directement des dépendances déclarées — `AF-R-01`/`AF-V-01`/`AF-F-01` ne
+sont *pas* présentés comme séquentiels entre eux, aucun gagnant unique n'est imposé par le graphe.
+
+---
+
+## 12. Prochaine action unique
+
+> **Il n'y a plus un gagnant unique imposé par le graphe** — `AF-R-01`, `AF-V-01`, `AF-F-01` sont
+> tous les trois `READY` en parallèle depuis `GATE DATA = PASS`, sans dépendance croisée entre eux
+> (voir §11). Prétendre qu'un seul est "la" prochaine action serait une fausse précision.
+
+**Recommandation, pas une contrainte du graphe** : `AF-R-01` en premier, par la hiérarchie de
+principes (`MASTER_ROADMAP.md` §1 — Reproductibilité, rang #2, immédiatement après Fiabilité) et
+parce qu'`AF-R-01`/`AF-R-02`/`AF-R-03` sont eux-mêmes des prérequis progressifs pour que les
+futures `ValidationRun`/candidats Discovery soient réellement traçables — mais `AF-V-01` ou
+`AF-F-01` sont des choix tout aussi valides selon la priorité produit du moment.
+
+**Important** : cette mission (checkpoint documentaire) **ne commence l'implémentation d'aucun
+ticket Track R/V/F** — cette section indique seulement où reprendre, elle n'autorise rien de
+nouveau.
+
+---
+
+## 13. Décisions bloquantes encore ouvertes
+
+- ADR 0006 (RQ vs Celery) — `Decision pending`, bloque uniquement `AF-INFRA`/workers distribués.
+- ADR 0007 (PostgreSQL) — `Proposed`, ne bloque **pas** `AF-R-01`/`AF-F-01` (stockage fichier
+  suffisant pour la première implémentation).
+- ADR 0014 (DSL) — `Decision pending`, bloque `AF-DSL-01`+ uniquement, jamais `AF-F`/`AF-D`.
+- `GATE PRECISION` comme condition supplémentaire de `GATE CHAMPION` — `PROPOSED TARGET`, non
+  tranché (`MASTER_ROADMAP.md` §4).
+- Frontières exactes de "Champion" — `OPEN QUESTION` (`DOMAIN_MODEL.md` §13), affecte `AF-V-07`.
+- Toutes les décisions de `docs/roadmap/DECISION_BACKLOG.md` (non modifié) restent valides.
+- **Rappel statuts ADR réels (vérifiés au 2026-08-15)** : seul **ADR 0015 est `Accepted`**. Aucun
+  autre ADR référencé dans ce document n'est présenté comme `Accepted`.
+
+---
+
+## 14. Tickets historiques préservés
+
+> Contenu **identique** à l'ancien `EPICS_AND_TICKETS.md` — aucune modification, aucune
+> renumérotation. `PH0-OCI-01` et `PH0-OCI-01-BUG` sont **clos définitivement** (voir statuts
+> ci-dessous) et n'apparaissent plus jamais comme travail restant. `PH0-OCI-02`→`PH0-OCI-10` et
+> `PH1-01`→`PH1-08` restent **ouverts**, non superseded — c'est le contenu réel du track `INFRA`
+> continu.
 
 ### PH0-01 — Documents d'architecture et ADR de la Phase 0
 
-**What to build** : l'ensemble des documents `docs/architecture/*.md`, `docs/roadmap/*.md`,
-`docs/adr/0005-*.md` à `0015-*.md` (dont l'ADR Oracle Cloud), `docs/INDEX.md` — livrés par cette
-mission.
-
-**Blocked by** : Aucune — peut démarrer immédiatement.
-
-**Contexte** : audit factuel du dépôt du 2026-08-06 (voir `docs/architecture/CURRENT_STATE.md`).
-
-**Fichiers/modules concernés** : `docs/` uniquement, aucun fichier de code.
-
-- [ ] Tous les documents listés existent et sont liés depuis `docs/INDEX.md`.
-- [ ] Aucun ADR existant renuméroté.
-- [ ] `/code-review` exécuté sur l'ensemble (conformité + cohérence architecturale).
-
-**Tests attendus** : revue documentaire uniquement (`/code-review`), pas de test logiciel.
-**Risques** : incohérence entre documents — mitigé par la revue finale.
-**Rollback** : sans objet (documentation, aucun système modifié).
-**Estimation** : L.
-**Skills recommandés** : `codebase-design`, `domain-modeling`, `to-tickets`, `code-review`.
-**Autorisations manuelles requises** : aucune (documentation).
-**Statut** : ready-for-agent (déjà largement réalisé par cette mission elle-même).
-
-### PH0-02 et PH0-03 — remplacés par PH0-OCI-03/09/10 ci-dessous
-
-Depuis la décision [ADR 0015](../adr/0015-oracle-cloud-infrastructure-payg.md) (Oracle Cloud
-Infrastructure PAYG retenu), le fournisseur n'est plus un choix ouvert entre plusieurs serveurs
-dédiés loués à l'essai (ancienne portée de PH0-02/PH0-03) — le protocole de benchmark est
-maintenant exécuté d'abord localement puis sur OCI, et le choix se limite au dimensionnement du
-profil OCI. **PH0-02 et PH0-03 sont retirés en tant que tickets autonomes** ; leur contenu est
-repris et précisé par PH0-OCI-03 (définir le benchmark), PH0-OCI-09 (exécuter le benchmark OCI) et
-PH0-OCI-10 (choisir la forme finale de VM) ci-dessous — pas de doublon, pas de perte d'exigence.
+**Statut** : DONE. Livré par les missions documentaires de ce dépôt (voir `docs/INDEX.md`).
+Détail complet préservé dans l'historique Git de ce fichier (avant `AF-TICKETS-01`, 2026-08-15).
 
 ### PH0-OCI-01 — Valider la portabilité Linux en conditions réelles
 
-**What to build** : confirmation, sur une instance Linux réelle (OCI, palier gratuit suffisant),
-que le pipeline existant (`app.py`, `engine.py`, `job_launcher.py`, `optimizer_process.py`,
-`requirements-server.txt`) s'installe et s'exécute sans adaptation majeure.
-
-**Blocked by** : PH0-01 (documents d'architecture, dont `CURRENT_STATE.md` §3, déjà livré).
-
-**Contexte** : l'audit du 2026-08-06 (`CURRENT_STATE.md` §3) n'a trouvé aucune dépendance
-Windows dure dans le pipeline applicatif (seuls `get_data.py`/`check_mt5.py`, non importés par
-l'app, et `metatrader5` dans `requirements.txt`, déjà absent de `requirements-server.txt`) — ce
-ticket **vérifie** cette conclusion en conditions réelles, il ne repart pas de zéro.
-
-**Fichiers/modules concernés** : initialement, aucun changement de code prévu (audit seul). Un
-bug réel trouvé pendant l'audit a été traité séparément, comme prévu, dans le ticket dédié
-`PH0-OCI-01-BUG` ci-dessous (`optimization_store.py`, `optimizer_process.py`) — autorisé
-explicitement dans une session ultérieure. Corrections de portabilité A-E dans `.streamlit/
-config.toml`, `lancer_app.bat`, `pytest.ini` (nouveau), `lancer_app.sh` (nouveau),
-`.gitattributes` (nouveau).
-
-**Statut : PH0-OCI-01 clôturable — validation Linux réelle OCI complète (2026-08-14).**
-
-**État (audit du 2026-08-06, corrections du 2026-08-07, voir [`LINUX_PORTABILITY_REPORT.md`](../architecture/LINUX_PORTABILITY_REPORT.md))** :
-Docker/WSL2/CI se sont révélés indisponibles sur le poste de développement — l'exécution réelle
-sur instance Linux n'a toujours pas pu avoir lieu (aucune ressource OCI créée, hors périmètre des
-deux sessions). Réalisé à la place : audit statique exhaustif (32 catégories, aucun bloquant),
-vérification réelle de résolution des wheels Linux via `pip download --platform` (tous les
-paquets de `requirements-server.txt` résolvent), 14 tests dynamiques légers sous Windows
-(14/14), **puis correction et validation d'un bug réel trouvé pendant l'audit** (reprise de job
-`resume_run_id` silencieusement cassée en mode job-directory — voir `PH0-OCI-01-BUG` ci-dessous)
-et des 4 corrections de portabilité applicables sans machine Linux (Streamlit headless,
-encodage explicite, configuration pytest, lanceur `.sh`, `.gitattributes`). Décision à l'époque :
-**Go conditionnel** — reste uniquement l'exécution réelle sur instance OCI.
-
-**Validation Linux réelle sur OCI (2026-08-14)** : instance OCI réelle provisionnée
-(`backtester-ph0-oci-01`, `VM.Standard.E4.Flex` temporaire — voir
-[`LINUX_PORTABILITY_REPORT.md` §15](../architecture/LINUX_PORTABILITY_REPORT.md) pour le détail
-complet et la note sur le caractère temporaire de ce shape). Tous les critères encore ouverts
-sont désormais vérifiés en conditions réelles : dépendances installées (51 paquets, aucune
-compilation), suite pytest **546/546 passed** avec les vraies données (`nasdaq_3m.csv`, SHA256
-identique Windows/OCI), `lancer_app.sh` exécuté réellement (mode Git `100755`, Streamlit headless
-réel, HTTP 200 sur `/_stcore/health` et `/`), backtest complet réel
-(`NASDAQ Perfect Revolution V1.1`, `DEFAULT_PARAMS`, 1 000 000 lignes) avec **verdict IDENTIQUE**
-à l'exécution Windows de référence (114 trades, 999 869 points d'equity, stats identiques valeur
-par valeur — seule différence trouvée : terminateur de ligne CSV cosmétique, `os.linesep`, sans
-impact numérique). Reprise de job (`resume_run_id`) reconfirmée réellement sous Linux via
-`tests/test_job_resume.py` (subprocess réel, inclus dans les 546/546).
-
-- [x] Portabilité confirmée par audit statique + résolution réelle des dépendances Linux
-      (`pip download --platform`) — voir rapport, aucun bloquant.
-- [x] Tests légers exécutés (import, chemins, job directory, JSON, backtest, optimisation,
-      Streamlit headless, secrets, chemins absolus) — 14/14, sous Windows (limite documentée).
-- [x] **Bug de reprise de job (`resume_run_id`) corrigé et testé** (`tests/test_job_resume.py`,
-      11 tests, rouge avant/vert après) — voir ticket `PH0-OCI-01-BUG` ci-dessous.
-- [x] Corrections de portabilité A-D appliquées (Streamlit headless, encodage UTF-8 explicite,
-      `pytest.ini`, `lancer_app.sh`) + E (`.gitattributes`) — suite complète 546/546 verte.
-- [x] `pip install -r requirements-server.txt` réussit **réellement** sur une instance OCI —
-      **exécuté le 2026-08-14**, 51 paquets installés, `pip check` sans conflit (voir rapport §15).
-- [x] `app.py` démarre et sert l'interface (mode `headless=true`) **réellement sur OCI** —
-      **exécuté le 2026-08-14** via `./lancer_app.sh`, HTTP 200 confirmé sur `/_stcore/health` et
-      `/` (voir rapport §15).
-- [x] Un backtest simple s'exécute sur OCI et produit un résultat identique (aux flottants près)
-      à l'exécution locale Windows de référence — **exécuté le 2026-08-14** (backtest complet réel,
-      pas seulement "simple"), verdict **IDENTIQUE** (voir rapport §15).
-- [x] `lancer_app.sh` exécuté réellement sous Linux (droit d'exécution à positionner au commit,
-      Windows ne peut pas écrire le bit Unix) — **exécuté le 2026-08-14** : mode Git confirmé
-      `100755`, lancé via `./lancer_app.sh` (pas `bash lancer_app.sh`), voir rapport §15.
-
-**Tests attendus** : comparaison du résultat OCI vs résultat Windows de référence, procédure
-détaillée en section 11 du rapport de portabilité.
-**Risques** : un blocage Linux non anticipé retarderait la Phase 0 — risque réduit par l'audit
-statique, la vérification réelle des dépendances et la correction du bug de reprise (aucun signal
-négatif restant), mais pas éliminé tant que l'exécution réelle sur OCI n'a pas eu lieu.
-**Rollback** : sans objet pour la partie validation. Pour les corrections de code : `git diff`
-localisé (2 fichiers de code modifiés, voir compte rendu), aucun format de fichier historique
-changé.
+**Statut : DÉFINITIVEMENT CLOS (2026-08-14)** — validation Linux réelle complète sur OCI (546/546
+pytest, `lancer_app.sh` réel HTTP 200, backtest comparatif Windows/OCI verdict IDENTIQUE). Voir
+`LINUX_PORTABILITY_REPORT.md` §15 pour le détail complet. **N'apparaît plus jamais comme travail
+restant.** Détail complet des critères et de l'historique préservé dans l'historique Git de ce
+fichier (avant `AF-TICKETS-01`).
 
 ### PH0-OCI-01-BUG — Reprise de job (`resume_run_id`) cassée en mode job-directory
 
-**What to build** : `resume_run_id` doit retrouver les combinaisons déjà testées d'un job source
-(`results/{resume_run_id}/tested.json`) et ne pas les recalculer.
-
-**Blocked by** : PH0-OCI-01 (audit, qui a découvert ce bug).
-
-**Contexte** : trouvé pendant l'audit de portabilité, pas une régression de cette session — le
-mécanisme existait mais n'avait jamais été testé en conditions réelles du pipeline
-`results/job_xxx/` avant `LINUX_PORTABILITY_REPORT.md`.
-
-- [x] Test de reproduction écrit et rouge avant correction
-      (`tests/test_job_resume.py::TestJobResumeEndToEnd::test_resume_finds_combinations_already_tested_by_a_prior_job`).
-- [x] Cause exacte identifiée : `load_tested_hashes(config.resume_run_id)` sans `job_dir`
-      résolvait vers `optimization_history/` au lieu du dossier frère `results/{resume_run_id}/`.
-- [x] Correction minimale appliquée : `optimization_store.resolve_sibling_job_dir()` (nouvelle
-      fonction pure, ne crée aucun répertoire) + un appel modifié dans `optimizer_process.py`.
-- [x] Test vert après correction, 11/11 tests du fichier passent, aucune régression sur les 535
-      tests préexistants (546/546 au total).
-
-**Tests attendus** : `tests/test_job_resume.py` (11 tests, dont reproduction bout en bout via
-subprocess réel, cas négatifs — inexistant/sans résultat/partiel/pas de collision — et
-non-régression du mode classique).
-**Risques** : aucun risque résiduel identifié — correction localisée, testée, comportement hors
-reprise inchangé (test dédié).
-**Rollback** : `git diff optimization_store.py optimizer_process.py` — 2 fichiers, changement
-minimal, facilement réversible si besoin.
-**Skills utilisés** : `tdd`, `implement`, `code-review`.
-**Autorisations manuelles requises** : aucune supplémentaire — correction couverte par
-l'autorisation explicite donnée pour cette session.
-**Estimation** : S.
-**Skills recommandés** : aucun skill Claude Code spécifique — exécution manuelle supervisée.
-**Autorisations manuelles requises** : création d'une instance OCI (palier Always Free) —
-autorisation explicite requise avant toute création de ressource cloud.
+**Statut : CLOS.** Bug trouvé pendant l'audit de portabilité, corrigé et testé
+(`tests/test_job_resume.py`, 11/11, inclus dans les 546/546). Détail complet préservé dans
+l'historique Git de ce fichier (avant `AF-TICKETS-01`).
 
 ### PH0-OCI-02 — Préparer un squelette Docker Compose local
 
@@ -177,7 +933,7 @@ autorisation explicite requise avant toute création de ressource cloud.
 démarrant l'interface Streamlit actuelle et une instance PostgreSQL vide, pour valider la
 structure avant tout déploiement cloud.
 
-**Blocked by** : PH0-OCI-01.
+**Blocked by** : PH0-OCI-01 (clos — ce ticket peut démarrer).
 
 **Contexte** : [ADR 0009](../adr/0009-docker-compose-for-staging.md) (Docker Compose retenu),
 [ADR 0007](../adr/0007-postgresql-for-metadata.md) (PostgreSQL). Ce squelette local est le point
@@ -206,7 +962,7 @@ OCI.
 
 **Blocked by** : PH0-OCI-02.
 
-**Contexte** : reprend et précise l'ancien PH0-02 (voir note de remplacement ci-dessus) — le
+**Contexte** : reprend et précise l'ancien PH0-02 (remplacement acté avant `AF-RM-01`) — le
 protocole lui-même (tailles de données, combinaisons, workers, mesures) est déjà défini dans
 `BENCHMARK_PLAN.md` §1, ce ticket produit la procédure d'exécution reproductible, pas un nouveau
 protocole.
@@ -229,7 +985,7 @@ dans une marge de variance acceptable (à définir).
 EODHD, normalisé Parquet, résultats de jobs, sauvegardes PostgreSQL) — voir
 `docs/roadmap/DECISION_BACKLOG.md`.
 
-**Blocked by** : PH0-OCI-01.
+**Blocked by** : PH0-OCI-01 (clos).
 
 **Contexte** : [ADR 0008](../adr/0008-market-data-storage-strategy.md) fixe déjà la stratégie
 générale (raw immuable/normalisé Parquet/dérivé) ; ce ticket l'instancie spécifiquement sur les
@@ -254,7 +1010,7 @@ réversibilité de chaque choix.
 au démarrage, ou OCI Vault) et permissions minimales du compte de service utilisé par
 l'application.
 
-**Blocked by** : PH0-OCI-01.
+**Blocked by** : PH0-OCI-01 (clos).
 
 **Contexte** : `docs/architecture/SECURITY_AND_OPERATIONS.md` §1-2 — règles déjà respectées en
 local pour EODHD/IG, à étendre à OCI (clé API OCI elle-même, secrets applicatifs).
@@ -277,7 +1033,7 @@ explicite requise.
 après durée maximale, indépendant des alertes budgétaires (voir
 `SECURITY_AND_OPERATIONS.md` §7 — "principe non négociable").
 
-**Blocked by** : PH0-OCI-01.
+**Blocked by** : PH0-OCI-01 (clos).
 
 **Contexte** : cycle à la demande décrit dans `docs/architecture/COMPUTE_AND_JOBS.md` §6, étape
 10. Ce ticket définit **comment** (API OCI, script planifié, autre), sans encore l'implémenter.
@@ -326,10 +1082,9 @@ validé) confirmant que tout est prêt pour un déploiement OCI réel, sans enco
 
 **Blocked by** : PH0-OCI-02, PH0-OCI-04, PH0-OCI-05, PH0-OCI-06, PH0-OCI-07.
 
-**Contexte** : porte d'entrée vers la Phase 1 (`docs/roadmap/MASTER_ROADMAP.md`, critères Go/No-Go
-de la Phase 0).
+**Contexte** : porte d'entrée vers le track `INFRA` (Phase 1 historique), critères Go/No-Go.
 
-- [ ] Checklist Go/No-Go de `MASTER_ROADMAP.md` (Phase 0) entièrement cochée.
+- [ ] Checklist Go/No-Go entièrement cochée.
 
 **Tests attendus** : sans objet (checklist).
 **Risques/Rollback** : sans objet.
@@ -345,7 +1100,7 @@ de la Phase 0).
 **Blocked by** : PH0-OCI-03 (protocole reproductible défini), PH0-OCI-07 (protections
 budgétaires **impérativement en place avant**).
 
-**Contexte** : reprend et précise l'ancien PH0-02 (voir note de remplacement ci-dessus), ciblé
+**Contexte** : reprend et précise l'ancien PH0-02 (remplacement acté avant `AF-RM-01`), ciblé
 spécifiquement sur OCI plutôt que sur "au moins un fournisseur" générique.
 
 - [ ] Les 3 tailles de données × 3 volumes de combinaisons × 4 niveaux de workers sont mesurés
@@ -370,7 +1125,9 @@ issue de PH0-OCI-09.
 
 **Blocked by** : PH0-OCI-09.
 
-**Contexte** : reprend et précise l'ancien PH0-03 (voir note de remplacement ci-dessus).
+**Contexte** : reprend et précise l'ancien PH0-03 (remplacement acté avant `AF-RM-01`). **Note** :
+`backtester-ph0-oci-01` (`VM.Standard.E4.Flex`) était une forme **temporaire** dédiée à
+`PH0-OCI-01` (clos) — ce ticket reste sur le choix **final** de staging, décision distincte.
 
 - [ ] Profil choisi documenté avec les mesures qui le justifient (référence au benchmark).
 - [ ] `requirements-server.txt` installé et validé sur la forme choisie (au-delà de la validation
@@ -384,21 +1141,13 @@ issue de PH0-OCI-09.
 **Autorisations manuelles requises** : engagement de dépense récurrente (staging permanent),
 autorisation explicite requise.
 
----
-
-## Phase 1 — tickets précis
-
-> Prérequis de phase : Phase 0 terminée avec critères Go/No-Go validés (voir
-> `MASTER_ROADMAP.md`). Les tickets ci-dessous supposent qu'une instance OCI de staging peut être
-> créée dans le respect des protections de coût déjà définies en PH0-OCI-06/07.
-
 ### PH1-01 — Prototype file de travaux (RQ vs Celery)
 
 **What to build** : deux prototypes minimaux (un job factice publié/consommé) démontrant le
 comportement de reprise après crash, le suivi de progression, et l'annulation, pour RQ et pour
 Celery.
 
-**Blocked by** : PH0-OCI-08 (déploiement de staging prêt) — remplace l'ancien PH0-03, retiré.
+**Blocked by** : PH0-OCI-08 (déploiement de staging prêt).
 
 **Contexte** : ADR 0006 (`Decision pending`) — aucune décision technologique prise avant preuve.
 
@@ -423,7 +1172,7 @@ périmètre de la mission actuelle, purement architecture).
 (`app.py` inchangé) et une instance PostgreSQL vide, accessible en HTTPS sur l'instance OCI de
 staging via un reverse proxy — étend le squelette local de PH0-OCI-02 à l'instance OCI réelle.
 
-**Blocked by** : PH0-OCI-08 (déploiement de staging prêt) — remplace l'ancien PH0-03, retiré.
+**Blocked by** : PH0-OCI-08 (déploiement de staging prêt).
 
 **Contexte** : ADR 0009 (Docker Compose staging), ADR 0007 (PostgreSQL métadonnées).
 
@@ -559,77 +1308,8 @@ CPU/RAM/disque du serveur, alerte simple si un job ne progresse plus.
 
 ---
 
-## Phases 2 à 8 — epics avec tickets macroscopiques
-
-### Phase 2 — Industrialisation du Data Center
-
-- **T-DC-1** — Corriger `job_store.write_data_manifest()` pour relier le vrai `content_hash`
-  (EODHD ou CSV local). Bloqué par : ADR 0008 acceptée.
-- **T-DC-2** — Brancher `detect_missing_trading_days()` sur un vrai contrôle qualité de
-  production. Bloqué par : ADR 0013 acceptée.
-- **T-DC-3** — Paramètre calendrier optionnel dans `market_data.resample`. Bloqué par : T-DC-2.
-- **T-DC-4** — Reprise après interruption du téléchargement EODHD (checkpoint par fenêtre).
-  Bloqué par : aucune décision ouverte identifiée — peut démarrer après Phase 1.
-- **T-DC-5** — Suivi de quota cumulatif côté client EODHD. Bloqué par : aucune.
-- **T-DC-6** — Brancher dividendes/splits/titres radiés au catalogue. Bloqué par : ADR 0007
-  (catalogue PostgreSQL) recommandé mais pas strictement bloquant.
-- **T-DC-7** — Migrer `settings/data_catalog.json` (code mort) vers PostgreSQL. Bloqué par :
-  PH1-02 (PostgreSQL disponible).
-
-### Phase 3 — Fiabilité scientifique
-
-- **T-VAL-1** — Audit ciblé du look-ahead bias dans `engine.py`/`on_bar()`. Bloqué par : aucune.
-- **T-VAL-2** — Période out-of-sample (jamais utilisée avant verdict final). Bloqué par : T-DC-1
-  (provenance fiable nécessaire pour crédibiliser les résultats).
-- **T-VAL-3** — Moteur walk-forward. Bloqué par : T-VAL-2.
-- **T-VAL-4** — Moteur Monte-Carlo. Bloqué par : T-VAL-2.
-- **T-VAL-5** — Formalisation des règles Champion (`/domain-modeling` avec l'utilisateur). Bloqué
-  par : T-VAL-3, T-VAL-4.
-- **T-VAL-6** — Modèle d'exécution réaliste (commission, latence, financement overnight, gaps).
-  Bloqué par : aucune décision ouverte, mais dépend de priorisation utilisateur.
-
-### Phase 4 — Refonte UI/UX
-
-- **T-UI-1** à **T-UI-N** — un ticket par onglet migré (Maintenance, Historique manuel, Data
-  Center déjà fait, Optimisation en dernier — voir ADR 0010). Chaque ticket bloqué par la
-  stabilité du backend qu'il consomme (Phase 1-3 selon l'onglet).
-- **T-UI-DESIGN** — Design system formalisé (tokens, composants). Bloqué par : aucune (peut être
-  préparé en parallèle, voir `DEPENDENCY_MAP.md` règle 5).
-
-### Phase 5 — Multi-actifs et portefeuille
-
-- **T-MA-1** — Audit du couplage mono-actif réel de `engine.py` (avant tout chiffrage précis).
-  Bloqué par : Phase 3 terminée.
-- **T-MA-2** — Modèle d'instrument étendu par classe d'actif. Bloqué par : T-MA-1.
-- **T-MA-3** — `Portfolio`, exposition, allocation. Bloqué par : T-MA-2.
-
-### Phase 6 — Éditeur de stratégies
-
-- **T-DSL-1** — Prototype DSL minimal reproduisant `perfect_revolution_v1.py`. Bloqué par :
-  décision préalable non requise pour un prototype (mais la généralisation l'est — voir ADR 0014).
-- **T-DSL-2** — Décision ADR 0014 tranchée avec preuves du prototype.
-- **T-DSL-3** — Implémentation complète (DSL ou hybride) si retenue. Bloqué par : T-DSL-2.
-
-### Phase 7 — Module Options
-
-- **T-OPT-1** — Modèle de domaine `OptionContract`/`OptionChain`. Bloqué par : Phase 1
-  (infrastructure générique disponible).
-- **T-OPT-2** — Étude des sources de données d'options réelles disponibles (coût, couverture).
-  Bloqué par : `DECISION_BACKLOG.md` — "Options historiques réelles ou théoriques".
-- **T-OPT-3** — Moteur de valorisation théorique (Black-Scholes ou équivalent). Bloqué par :
-  T-OPT-1.
-
-### Phase 8 — Durcissement / commercialisation
-
-- **T-HARD-1** — Authentification et rôles. Bloqué par : décision explicite de commercialisation
-  (`DECISION_BACKLOG.md`).
-- **T-HARD-2** — Audit de conformité. Bloqué par : T-HARD-1 et décision produit hors périmètre
-  architectural de cette mission.
-
----
-
 ## Principe de non-précision
 
-Aucun ticket des Phases 2 à 8 ci-dessus n'est estimé en jours/points — leur ordre de grandeur
-(S/M/L/XL) est donné au niveau de la phase dans `MASTER_ROADMAP.md`, pas au niveau du ticket
-individuel, tant qu'ils n'ont pas été affinés au moment de leur prise en charge réelle.
+Aucun ticket macro des sections 6-7 ci-dessus n'est estimé en jours/points précis — leur ordre de
+grandeur (S/M/L/XL) reste indicatif tant qu'ils n'ont pas été affinés au moment de leur prise en
+charge réelle, exactement comme dans l'ancienne organisation par Phases.

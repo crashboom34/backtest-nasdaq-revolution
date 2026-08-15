@@ -311,13 +311,16 @@ dans une session ultérieure, avec autorisation explicite.
 
 ## 13. Décision Go/No-Go
 
-**Audit initial (2026-08-06/07)** : **Go conditionnel** — rien dans l'analyse statique et les
-tests dynamiques sous Windows n'indiquait de blocage réel pour un déploiement Linux/OCI, mais
-aucune exécution Linux réelle n'avait eu lieu (Docker/WSL2/CI tous indisponibles cette
-session-là). La seule étape capable de transformer ce "Go conditionnel" en confirmation
-définitive était un premier test réel sur une instance OCI (Palier B, section 11).
+> **Note historique — état au 2026-08-06/07** : **Go conditionnel** — rien dans l'analyse
+> statique et les tests dynamiques sous Windows n'indiquait de blocage réel pour un déploiement
+> Linux/OCI, mais aucune exécution Linux réelle n'avait eu lieu (Docker/WSL2/CI tous
+> indisponibles cette session-là). La seule étape capable de transformer ce "Go conditionnel" en
+> confirmation définitive était un premier test réel sur une instance OCI (Palier B, section 11).
 
-**Validation OCI réelle (2026-08-14)** : cette étape a été exécutée intégralement, sur une
+> **État factuel actuel — validation du 2026-08-14** (remplace la limitation ci-dessus, celle-ci
+> est levée) : voir paragraphe suivant.
+
+Cette étape a été exécutée intégralement, sur une
 instance OCI réellement provisionnée (`backtester-ph0-oci-01`), avec autorisation explicite à
 chaque étape. Toutes les conditions ci-dessous sont désormais satisfaites en conditions réelles
 — voir section 15 pour le détail complet :
