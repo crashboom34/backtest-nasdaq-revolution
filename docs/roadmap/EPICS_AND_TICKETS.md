@@ -509,8 +509,8 @@ challenger).
 
 ### AF-R-01 — Experiment / ResearchRun — schéma minimal + stockage fichier
 
-**Status** : **DONE** (2026-08-15, `research_run.py` — validé localement, non commité, voir
-"Track R Foundation = COMPLETE" ci-dessous §11bis)
+**Status** : **DONE** (2026-08-15, `research_run.py` — committé et poussé,
+`90e3e29c4c994c4bb54e571240a4121d5d2b16ee`, voir "Track R Foundation = COMPLETE" ci-dessous §11)
 
 **What to build** : structures `Experiment` (durable, `hypothesis` optionnel) et `ResearchRun`
 (exécution concrète immuable), stockées en fichiers (job directory existant, pas une nouvelle base
@@ -534,7 +534,8 @@ de données) — **ne prétend pas que PostgreSQL est nécessaire** à cette pre
 
 ### AF-R-02 — Capture git_sha / seed / version logicielle par run
 
-**Status** : **DONE** (2026-08-15, `research_run.py` — validé localement, non commité)
+**Status** : **DONE** (2026-08-15, `research_run.py` — committé et poussé,
+`90e3e29c4c994c4bb54e571240a4121d5d2b16ee`)
 
 **What to build** : chaque nouveau `ResearchRun` capture automatiquement le `git_sha` (réutilise
 `market_data.backtest_manifest._current_git_commit()`, déjà existant), un `seed` explicite, et la
@@ -546,7 +547,8 @@ version logicielle (`engine_version`, déjà existant dans `BacktestManifest`).
 
 ### AF-R-03 — DatasetSplitPlan / HoldoutAccessEvent — fondations
 
-**Status** : **DONE** (2026-08-15, `dataset_split.py` — validé localement, non commité)
+**Status** : **DONE** (2026-08-15, `dataset_split.py` — committé et poussé,
+`90e3e29c4c994c4bb54e571240a4121d5d2b16ee`)
 
 **What to build** : fondations du plan de partition (train/test/holdout) d'un `DatasetVersion`, et
 de l'audit d'accès au holdout (`HoldoutAccessEvent` référence `research_run_id` +
@@ -863,8 +865,9 @@ provenance s'ajoute un jour.
 5. ✅ `AF-DATA-04A` — correctif minimal (`snapshot_id`/bornes source/contrôle de stabilité).
 6. ✅ Revalidation réelle (Perfect Revolution, 114 trades) → **`GATE DATA = PASS`**.
 
-**TRACK R FOUNDATION = COMPLETE (2026-08-15, validé localement, NON COMMITÉ)** — pas un `GATE R`
-officiel (ce nom n'existe pas dans la roadmap, voir §12 historique ci-dessous) :
+**TRACK R FOUNDATION = COMPLETE (2026-08-15, committé et poussé —
+`90e3e29c4c994c4bb54e571240a4121d5d2b16ee`, `origin/master`)** — pas un `GATE R` officiel (ce nom
+n'existe pas dans la roadmap, voir §12 historique ci-dessous) :
 1. ✅ `AF-R-01` — Experiment/ResearchRun, schéma minimal + stockage fichier.
 2. ✅ `AF-R-02` — capture `git_sha`/`seed`/`engine_version`.
 3. ✅ `AF-R-03` — DatasetSplitPlan/HoldoutAccessEvent, fondations (cardinalité corrigée en revue).

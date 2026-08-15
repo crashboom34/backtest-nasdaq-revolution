@@ -77,8 +77,11 @@ exacte du logiciel et quelle graine ont produit ce run ?" :
   comme valeur par défaut (même constante, pas une deuxième source de vérité dupliquée).
 
 **Working tree dirty (audité, non traité)** : `git_sha` identifie `HEAD`, pas nécessairement les
-modifications locales non commitées (le cas réel de ce dépôt pendant tout Track R, volontairement
-non commité). AF-R-02 n'ajoute PAS de champ `git_dirty`/snapshot du working tree/hash de patch :
+modifications locales non commitées — c'était le cas réel de ce dépôt pendant tout le
+développement de Track R, resté volontairement non commité jusqu'à son checkpoint final
+(`90e3e29c4c994c4bb54e571240a4121d5d2b16ee`, poussé sur `origin/master`). La limite générale reste
+valable pour tout futur travail non commité au-dessus de ce checkpoint. AF-R-02 n'ajoute PAS de
+champ `git_dirty`/snapshot du working tree/hash de patch :
 `BacktestManifest.git_commit`, le précédent direct que ce ticket réutilise, n'a jamais eu ce champ
 non plus malgré la même limite théorique — rester cohérent avec ce précédent plutôt que
 sur-construire. Limite documentée, pas résolue silencieusement.

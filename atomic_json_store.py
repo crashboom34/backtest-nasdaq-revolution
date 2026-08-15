@@ -5,8 +5,9 @@ Extrait de `research_run.py` (motif lui-même mirroré de `market_data/backtest_
 moment où une TROISIÈME implémentation quasi identique allait apparaître dans `dataset_split.py`
 — Rule of Three, déjà signalée comme point de vigilance par les revues `/code-review` d'AF-R-01/02
 ("duplication de l'écriture atomique — pas encore 3 occurrences"). `market_data/backtest_manifest.py`
-n'est délibérément PAS migré vers ce module : déjà committé/poussé (checkpoint DATA FOUNDATION),
-hors scope de ce ticket non commité — voir `docs/roadmap/EPICS_AND_TICKETS.md`.
+n'est délibérément PAS migré vers ce module : déjà committé/poussé au moment d'AF-R-03 (checkpoint
+DATA FOUNDATION), hors scope de ce ticket — voir `docs/roadmap/EPICS_AND_TICKETS.md`. (Ce module a
+depuis lui-même été committé/poussé avec le reste de Track R, `90e3e29c4c994c4bb54e571240a4121d5d2b16ee`.)
 
 Motif : dataclasses `frozen`, écriture atomique (fichier temporaire + `os.replace()`), jamais
 écrasées (`FileExistsError` explicite si le fichier existe déjà), lecture tolérante (`None` si

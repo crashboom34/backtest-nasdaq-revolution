@@ -809,12 +809,13 @@ git rm --cached .streamlit/credentials.toml
   (Dukascopy, corporate actions, sync incrémental) ; sélection/lignes après filtrage
   (`opt_start_date`/`opt_end_date`/`max_rows`).
 
-**TRACK R FOUNDATION = COMPLETE (2026-08-15, non commité)** — `Experiment`/`ResearchRun`
-(`research_run.py`, `AF-R-01`), capture `git_sha`/`seed`/`engine_version` (`AF-R-02`),
-`DatasetSplitPlan`/`HoldoutAccessEvent` (`dataset_split.py`, `AF-R-03`), plomberie partagée
-(`atomic_json_store.py`). **Pas de `GATE R` officiel** — la roadmap ne définit aucun gate de ce
-nom (`GATE R` a été renommée `GATE DATA` en revue `AF-RM-01-QC`, voir `MASTER_ROADMAP.md`) ; ce
-track reste consommateur de `GATE DATA`, pas producteur d'un gate propre.
+**TRACK R FOUNDATION = COMPLETE — committé et poussé (2026-08-15, `90e3e29c4c994c4bb54e571240a4121d5d2b16ee`,
+`origin/master`)** — `Experiment`/`ResearchRun` (`research_run.py`, `AF-R-01`), capture
+`git_sha`/`seed`/`engine_version` (`AF-R-02`), `DatasetSplitPlan`/`HoldoutAccessEvent`
+(`dataset_split.py`, `AF-R-03`), plomberie partagée (`atomic_json_store.py`). **Pas de `GATE R`
+officiel** — la roadmap ne définit aucun gate de ce nom (`GATE R` a été renommée `GATE DATA` en
+revue `AF-RM-01-QC`, voir `MASTER_ROADMAP.md`) ; ce track reste consommateur de `GATE DATA`, pas
+producteur d'un gate propre.
 
 - **IMPLEMENTED/TESTED** : `Experiment` (durable, `hypothesis` optionnelle) ; `ResearchRun`
   (immuable, `dataset_snapshot_id` **obligatoire**, `git_sha` auto-détecté via le mécanisme
@@ -835,4 +836,4 @@ track reste consommateur de `GATE DATA`, pas producteur d'un gate propre.
   convention d'appel (répertoire du bon plan), pas par vérification structurelle — dette acceptée
   tant qu'aucun appelant réel n'existe, à durcir avant la première vraie Validation.
 - **Baseline tests** : 588 passed (546 avant `AF-DATA-*`, +42 nouveaux tests sur ce jalon) → 705
-  passed après Track R Foundation (non commité).
+  passed avant la création du checkpoint Track R Foundation (`90e3e29c`, committé et poussé).

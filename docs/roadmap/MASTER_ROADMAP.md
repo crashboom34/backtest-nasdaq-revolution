@@ -383,9 +383,10 @@ document.
 
 > **`DATA-FOUNDATION` est TERMINÉE — `GATE DATA = PASS` (2026-08-15, `AF-DATA-01`→`AF-DATA-04A`,
 > voir `EPICS_AND_TICKETS.md` §10 pour le verdict complet).** **`TRACK R FOUNDATION` est
-> également TERMINÉE (2026-08-15, `AF-R-01`→`AF-R-03`, validée localement, non commitée — voir
-> `EPICS_AND_TICKETS.md` §11 ; pas de `GATE R` officiel, ce nom n'existe pas dans ce document,
-> voir la correction `AF-RM-01-QC` ci-dessous).** `V` et `F` restent tous les deux débloqués et
+> également TERMINÉE (2026-08-15, `AF-R-01`→`AF-R-03`, committée et poussée —
+> `90e3e29c4c994c4bb54e571240a4121d5d2b16ee`, `origin/master` — voir `EPICS_AND_TICKETS.md` §11 ;
+> pas de `GATE R` officiel, ce nom n'existe pas dans ce document, voir la correction
+> `AF-RM-01-QC` ci-dessous).** `V` et `F` restent tous les deux débloqués et
 > `READY` en parallèle, sans dépendance croisée entre eux (voir `EPICS_AND_TICKETS.md` §11-12, qui
 > recommande désormais `AF-V-01` sans en faire une contrainte — premier consommateur réel d'un
 > `DatasetSplitPlan`). Cette section historique (ci-dessous) reste préservée pour la traçabilité de
