@@ -837,3 +837,56 @@ producteur d'un gate propre.
   tant qu'aucun appelant réel n'existe, à durcir avant la première vraie Validation.
 - **Baseline tests** : 588 passed (546 avant `AF-DATA-*`, +42 nouveaux tests sur ce jalon) → 705
   passed avant la création du checkpoint Track R Foundation (`90e3e29c`, committé et poussé).
+
+## 14. TRACK V — première `ValidationRun` réelle, `AF-V-01 = DONE` (2026-08-23, non commité)
+
+**Statut : `AF-V-01` DONE. `GATE V` reste NON passée** (exige `OOS`+`WalkForward`+`MonteCarlo`+
+`ParameterStability`, voir `MASTER_ROADMAP.md` §4 — seul `OOS` existe, résultat inconclusif).
+Détail complet : `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-01`), `DOMAIN_MODEL.md` §12,
+`docs/adr/0017-ig-demo-dataset-snapshot-identity-and-timezone-assumption.md`.
+
+- **Phase A (préparation, jamais d'exécution)** : premier `DatasetSplitPlan` basé sur un provider
+  externe (IG démo, epic `IX.D.NASDAQ.IFD.IP`, `MINUTE_3`, distinct de `nasdaq_3m.csv` MT5).
+  Acquisition RAW read-only (4800 bougies, lecture seule), normalisation, `dataset_snapshot_id
+  = "ig_demo:sha256:<hash>"` (nouvelle convention, même forme que `local_csv:sha256:<hash>`),
+  `split_plan_id="af-v01-ig-demo-nasdaq-m3-2026-08"` (`TRAIN`/`FINAL_HOLDOUT`, bornes choisies
+  uniquement par disponibilité de données, jamais par performance). Audit exhaustif
+  (`git log --all`, `results/`, ce fichier) : **aucune exposition antérieure** de
+  `Perfect Revolution`/`DEFAULT_PARAMS` à ce dataset IG — `IG STRATEGY EXPOSURE = NONE FOUND`.
+- **Correctif fuseau horaire IG (2026-08-23, `/domain-modeling` + `/tdd`)** : `market_data/ig/
+  normalize.py::normalize_price_records()` lisait `snapshotTime` (heure locale/serveur ambiguë,
+  confusion documentée par IG Labs — "prices API timezone is messy") au lieu de `snapshotTimeUTC`
+  (champ non ambigu, également présent dans chaque réponse réelle IG mais jusque-là ignoré). Corrigé
+  : `snapshotTimeUTC` devient l'unique source de `time`, obligatoire sur CHAQUE enregistrement,
+  **aucun offset fixe codé en dur** (vérifié par test dédié avec un écart artificiel absurde).
+  Preuve : 0 divergence sur les 4800 enregistrements réels déjà acquis. Dataset normalisé
+  régénéré depuis le RAW existant (aucune ré-acquisition réseau).
+- **Exécution réelle, exactement une fois (2026-08-23)** : `NASDAQ Perfect Revolution V1.1` +
+  `DEFAULT_PARAMS` (non modifiés, identiques à la référence MT5 du §13) sur `FINAL_HOLDOUT`
+  IG, via `engine.run_backtest()` (CURRENT REFERENCE ENGINE, coûts par défaut). Résultat :
+  **`n_trades=0`, `net_ret_pct=0.0`** — vérifié : 2400 bougies réelles dans la fenêtre (5 jours
+  ouvrés présents), aucun bug de filtrage temporel, résultat honnête de la sélectivité de la
+  stratégie sur un échantillon court (~1 semaine). `validation_run_id=
+  "af-v01-ig-demo-final-holdout-oos"`, exactement 1 `HoldoutAccessEvent`, exactement 1
+  `ValidationRun`. `strategy_params` persisté identique champ à champ à `DEFAULT_PARAMS` actuel
+  (aucun retuning).
+- **Limite méthodologique trouvée en clôture, non corrigée (hors périmètre)** : `engine.run_backtest()`
+  calcule les indicateurs (EMA/ATR) uniquement sur les bougies de la fenêtre filtrée, jamais sur
+  `TRAIN` qui la précède — biais de "cold start" plausible, préexistant (partagé par le split
+  train/test de l'optimiseur), documenté dans l'ADR-0017 pour toute lecture future de cette
+  `ValidationRun`.
+- **Preuve FRESH, distincte de la retrospective OOS evidence (§13/`GATE DATA`)** : cette
+  `ValidationRun` IG n'a aucune exposition antérieure connue, contrairement à l'evidence MT5
+  (`GATE DATA`, backtest complet antérieur sur `nasdaq_3m.csv`, voir `DOMAIN_MODEL.md` §12). Ne
+  jamais fusionner les deux catégories dans un futur rapport/Champion.
+- **`code-review` de clôture (3 axes parallèles : Scientific correctness, Standards, Spec)** : a
+  trouvé et corrigé un défaut de documentation stale (`DOMAIN_MODEL.md` affirmait encore le gap
+  `snapshotTimeUTC` "non corrigé" après son correctif réel) — convergence 3/3 agents. Aucun autre
+  défaut bloquant.
+- **MCP Codex** : indisponible pendant cette session (erreur de version serveur, `gpt-5.6-sol`) —
+  revue adversariale effectuée directement, signalé sans bloquer.
+- **`AF-V-02` (Walk-Forward)** : mécaniquement débloqué par `AF-V-01 = DONE`, mais **non démarré**
+  — aucune décision de le lancer n'a été prise.
+- **Tests** : 756 passed (752 baseline + 4 nouveaux tests IG), 0 régression.
+- **Non commité au moment de la rédaction** — voir la revue de clôture pour la liste exacte des
+  fichiers proposés/exclus.

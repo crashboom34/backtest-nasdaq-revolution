@@ -122,7 +122,22 @@ _ZONE_ORDER = ("TRAIN", "VALIDATION", "DISCOVERY_OOS", "FINAL_HOLDOUT")
 @dataclass(frozen=True)
 class SplitBoundary:
     """Frontière `[start, end)` d'une zone — borne de fin exclue (deux zones adjacentes peuvent
-    partager exactement `a.end == b.start` sans se chevaucher)."""
+    partager exactement `a.end == b.start` sans se chevaucher).
+
+    **Écart confirmé, non corrigé ici (revue MCP Codex, AF-V-01, 2026-08-15)** : cette exclusivité
+    de `end` est l'invariant **déclaré** par ce module — l'exécution réelle via
+    `engine.run_backtest(start_date=, end_date=)` (mécanisme préexistant, partagé avec
+    `optimizer.py::TrainTestConfig`, non modifié par ce ticket) filtre en réalité sur un intervalle
+    **fermé** des deux côtés (`engine.py:89-90` : `time_paris >= start_date` **et**
+    `time_paris <= end_date`, jamais `< end_date`). Une bougie tombant exactement sur la frontière
+    partagée entre deux zones adjacentes (`a.end == b.start`) serait donc incluse dans les DEUX
+    zones si les deux étaient un jour exécutées. **Vérifié sans impact sur l'évidence réelle
+    d'AF-V-01** : `TRAIN` n'a jamais été exécutée dans ce ticket (seul `FINAL_HOLDOUT` l'a été), et
+    aucune bougie n'existe exactement à la frontière `2025-05-19T00:00:00+00:00` dans
+    `nasdaq_3m.csv` (vérifié directement). **Dette explicite pour tout ticket futur qui exécuterait
+    deux zones adjacentes du même plan** (ex. `AF-V-02` Walk-Forward comparant `TRAIN`/
+    `FINAL_HOLDOUT`) : ne pas supposer l'exclusivité de `end` appliquée par le moteur sans la
+    revérifier, ou corriger `engine.py` avec autorisation explicite avant d'en dépendre."""
 
     start: str
     end: str
@@ -165,7 +180,15 @@ class HoldoutAccessEvent:
     (correction de cardinalité, voir docstring du module). `dataset_snapshot_id` reste EN PLUS,
     direct (jamais remplacé) — les deux champs sont asserted par l'appelant, jamais croisés/
     validés l'un contre l'autre par ce module (confirmé MCP Codex : une divergence serait une
-    donnée incohérente à traiter comme telle, pas à résoudre silencieusement ici)."""
+    donnée incohérente à traiter comme telle, pas à résoudre silencieusement ici).
+
+    `validation_run_id` : **optionnel** (AF-V-01, premier vrai consommateur) — QUELLE exécution de
+    validation précise a déclenché cet accès, quand l'accès provient d'une `ValidationRun`
+    formelle (`validation_run.py`). Reste `None` pour un accès sans `ValidationRun` (inspection
+    manuelle, `reason` libre) — `HoldoutAccessEvent` garde son contrat général, ce champ ne le
+    restreint pas à un seul type d'appelant. Sans lui, deux `ValidationRun` distinctes réutilisant
+    le même `(split_plan_id, research_run_id)` seraient indiscernables sans jointure implicite sur
+    le timestamp — même principe déjà appliqué à `dataset_snapshot_id`/`split_plan_id`."""
 
     split_plan_id: str
     dataset_snapshot_id: str
@@ -174,6 +197,7 @@ class HoldoutAccessEvent:
     locked_state: str
     accessed_at: str
     event_id: str
+    validation_run_id: Optional[str] = None
 
 
 def _parse_offset_aware(value: str, field_name: str) -> datetime:
@@ -253,10 +277,12 @@ def build_holdout_access_event(
     locked_state: str = "locked",
     accessed_at: Optional[str] = None,
     event_id: Optional[str] = None,
+    validation_run_id: Optional[str] = None,
 ) -> HoldoutAccessEvent:
     """Construit un `HoldoutAccessEvent`. `reason` obligatoire (chaîne non vide). `locked_state`
     doit être `"locked"` ou `"unlocked"` — déclaratif, jamais recalculé/vérifié techniquement.
     `event_id` auto-généré (UUID4) si non fourni — voir docstring de `HoldoutAccessEvent`.
+    `validation_run_id` optionnel (AF-V-01) — voir docstring de `HoldoutAccessEvent`.
 
     `split_plan_id` et `dataset_snapshot_id` sont tous les deux obligatoires et **asserted par
     l'appelant** — ce module ne vérifie pas que `split_plan_id` référence réellement
@@ -283,6 +309,10 @@ def build_holdout_access_event(
         locked_state=locked_state,
         accessed_at=accessed_at or datetime.now(timezone.utc).isoformat(),
         event_id=validate_portable_identifier(event_id or uuid.uuid4().hex, "event_id"),
+        validation_run_id=(
+            validate_portable_identifier(validation_run_id, "validation_run_id")
+            if validation_run_id is not None else None
+        ),
     )
 
 
@@ -359,22 +389,35 @@ def load_holdout_access_event(path: Union[str, Path]) -> Optional[HoldoutAccessE
     return load_tolerant(path, HoldoutAccessEvent)
 
 
-def list_holdout_access_events(events_dir: Union[str, Path]) -> List[HoldoutAccessEvent]:
+def list_holdout_access_events(
+    events_dir: Union[str, Path], expected_split_plan_id: Optional[str] = None,
+) -> List[HoldoutAccessEvent]:
     """Liste tous les `HoldoutAccessEvent` valides d'`events_dir`, triés par nom de fichier
     (donc chronologiquement, grâce à l'horodatage en préfixe). Répertoire absent -> liste vide,
-    jamais d'exception (même état "legacy normal" qu'un fichier absent)."""
+    jamais d'exception (même état "legacy normal" qu'un fichier absent).
+
+    `expected_split_plan_id` (optionnel, AF-V-01 — durcissement, pas un Event Repository
+    générique) : quand fourni, exclut tout événement dont `split_plan_id` ne correspond pas —
+    défense structurelle contre un répertoire mal construit/partagé par erreur entre deux plans,
+    en plus (jamais à la place) de la convention d'appel déjà établie ("passer le bon répertoire").
+    `None` (défaut) préserve le comportement historique, rétrocompatible."""
     events_path = Path(events_dir)
     if not events_path.is_dir():
         return []
     events = []
     for file in sorted(events_path.glob("*.json")):
         event = load_holdout_access_event(file)
-        if event is not None:
-            events.append(event)
+        if event is None:
+            continue
+        if expected_split_plan_id is not None and event.split_plan_id != expected_split_plan_id:
+            continue
+        events.append(event)
     return events
 
 
-def has_holdout_access_events(events_dir: Union[str, Path]) -> bool:
+def has_holdout_access_events(
+    events_dir: Union[str, Path], expected_split_plan_id: Optional[str] = None,
+) -> bool:
     """Constat factuel — "au moins un événement existe dans CE répertoire d'audit". **Jamais**
     `is_untouched()` : une absence retournée signifie "aucune consultation enregistrée dans
     l'audit Track R", jamais une garantie physique absolue (voir docstring du module,
@@ -382,5 +425,7 @@ def has_holdout_access_events(events_dir: Union[str, Path]) -> bool:
 
     **Portée (précision MCP Codex, correction de cardinalité)** : `events_dir` est typiquement
     scopé par `split_plan_id`, pas par `dataset_snapshot_id` — plusieurs plans distincts pouvant
-    partager un snapshot, l'appelant doit passer le répertoire du plan précis qu'il audite."""
-    return len(list_holdout_access_events(events_dir)) > 0
+    partager un snapshot, l'appelant doit passer le répertoire du plan précis qu'il audite.
+    `expected_split_plan_id` (optionnel, AF-V-01) durcit ce constat structurellement — voir
+    `list_holdout_access_events()`."""
+    return len(list_holdout_access_events(events_dir, expected_split_plan_id)) > 0

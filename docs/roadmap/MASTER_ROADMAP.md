@@ -62,7 +62,7 @@ backtest plus fiable ; voir `TEST_AND_VALIDATION_ARCHITECTURE.md`).
 | **DATA** | Data Center (Provenance & Qualité) | §2 (Dataset/DatasetVersion/DatasetSnapshot, DataQualityReport, MarketCalendar, CorporateAction) | **EXISTING** pour l'ingestion brute (module `market_data/`, 31 fichiers, connecteurs EODHD/IG/CSV déjà validés — commit `a28a6e5`) ; PARTIAL/PROPOSED pour `content_hash`/`DatasetVersion` immuables. Scindé `DATA-FOUNDATION` (étroit, alimente `GATE DATA`) / `DATA-ADVANCED` (large, aucun gate) — voir §3 |
 | **R** | Reproducibility & Research Foundations | §7 (Experiment/ResearchRun), §12 (Holdout/DatasetSplitPlan) | PROPOSED — fondation, aucun code. **Consomme** le `DatasetVersion` produit par `DATA`, ne le produit pas |
 | **F** | Strategy Knowledge / Registries | §3 (Knowledge Base), §4 (Registries), §5 (StrategyTemplate/StrategyDefinition) | PROPOSED, additif à l'existant |
-| **V** | Scientific Validation | §11 (Validation scientifique) | PROPOSED, architecture déjà préparée (`TEST_AND_VALIDATION_ARCHITECTURE.md`), 0 % implémenté |
+| **V** | Scientific Validation | §11 (Validation scientifique) | PARTIAL — `AF-V-01` (OOS, premier sous-composant) **DONE (2026-08-23)**, résultat performance-inconclusive (`n_trades=0`) ; `WalkForward`/`MonteCarlo`/`ParameterStability` toujours 0 % implémenté. `GATE V` **non passée** — voir §4 |
 | **S** | Research Scope / SearchSpace | §6 | PROPOSED |
 | **E-FAST** | Fast Backtest / Feature Computation | Architecture/performance — pas un sous-domaine métier propre (voir `codebase-design`, confirmé en revue) | PROPOSED |
 | **E-PRECISION** | Precision Execution | §10 (ExecutionModel) | PROPOSED — `engine.py` reste **CURRENT REFERENCE ENGINE, IMPLEMENTED + TESTED**, jamais renommé Precision Engine avant conformance testée |
@@ -391,6 +391,14 @@ document.
 > recommande désormais `AF-V-01` sans en faire une contrainte — premier consommateur réel d'un
 > `DatasetSplitPlan`). Cette section historique (ci-dessous) reste préservée pour la traçabilité de
 > la décision `AF-RM-01-QC`, elle ne décrit plus l'action à mener maintenant.
+>
+> **`AF-V-01` est désormais TERMINÉE (2026-08-23)** — première `ValidationRun` réelle (fresh
+> external final holdout, dataset IG démo), `n_trades=0`, performance-inconclusive. **`GATE V`
+> reste NON passée** (exige `OOS`+`WalkForward`+`MonteCarlo`+`ParameterStability`, voir §4) —
+> détail complet : `EPICS_AND_TICKETS.md` (ticket `AF-V-01`), `DOMAIN_MODEL.md` §12,
+> `docs/adr/0017-ig-demo-dataset-snapshot-identity-and-timezone-assumption.md`. `AF-V-02`
+> (Walk-Forward) est mécaniquement débloqué mais **non démarré** — aucune décision de le lancer
+> n'est actée par cette seule mise à jour documentaire.
 
 **Corrigé `AF-RM-01-QC` (2026-08-15)** — la version `AF-RM-01` recommandait "Track R jusqu'à
 GATE R" avec la justification "maximise le nombre de tracks débloqués". Cette justification était

@@ -37,8 +37,10 @@ from .normalize import normalize_price_records
 
 # Format de date exigé par IG pour les paramètres de requête from/to de GET /prices/{epic}
 # (VERSION 3) : yyyy-MM-dd'T'HH:mm:ss — confirmé par la documentation officielle IG et
-# recoupement indépendant (2026-08-06, voir AI_HANDOFF.md). Ne pas confondre avec le format de
-# snapshotTime dans la RÉPONSE (voir market_data.ig.normalize, inchangé).
+# recoupement indépendant (2026-08-06, voir AI_HANDOFF.md). Coïncidence de forme, pas de rôle :
+# ce format de REQUÊTE est identique à celui de snapshotTimeUTC dans la RÉPONSE depuis AF-V-01
+# (2026-08-23, voir market_data.ig.normalize et docs/adr/0017-...) — snapshotTime (ambigu, jamais
+# utilisé comme source de time) a un format différent (%Y/%m/%d %H:%M:%S).
 _REQUEST_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 # Résolutions IG confirmées (bibliothèque de référence trading-ig, voir AI_HANDOFF.md) — toute

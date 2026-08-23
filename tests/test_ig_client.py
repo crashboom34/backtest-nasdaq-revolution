@@ -182,7 +182,8 @@ def test_get_market_details_calls_correct_endpoint():
 
 _SAMPLE_PRICES_BODY = {
     "prices": [
-        {"snapshotTime": "2026/08/01 00:00:00", "openPrice": {"bid": 1, "ask": 1.1},
+        {"snapshotTime": "2026/08/01 00:00:00", "snapshotTimeUTC": "2026-08-01T00:00:00",
+         "openPrice": {"bid": 1, "ask": 1.1},
          "highPrice": {"bid": 2, "ask": 2.1}, "lowPrice": {"bid": 0.5, "ask": 0.6},
          "closePrice": {"bid": 1.5, "ask": 1.6}, "lastTradedVolume": 10}
     ]

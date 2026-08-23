@@ -574,6 +574,77 @@ l'audit Track R", pas une garantie physique absolue (voir invariant §18 point 7
 snapshot, l'appelant doit auditer le plan précis qui l'intéresse, jamais un répertoire partagé
 entre plans distincts sous peine de réponse ambiguë.
 
+**Search History Leakage confirmé sur un cas réel (correctif AF-V-01, 2026-08-15,
+`/domain-modeling` réellement invoqué)** — ce paragraphe n'était jusqu'ici que théorique dans ce
+document ; il a matérialisé un précédent concret. `GATE DATA` (`AI_HANDOFF.md` §13, même journée,
+**avant** `AF-V-01`) a exécuté `NASDAQ Perfect Revolution V1.1` + `DEFAULT_PARAMS` sur
+`nasdaq_3m.csv` **complet** (même `snapshot_id` que celui utilisé ensuite par `AF-V-01`), produisant
+un grand livre de trades individuellement datés (`trades.csv`/`equity_curve.csv`, racine du dépôt)
+s'étendant jusqu'au **2026-05-18** — c'est-à-dire À L'INTÉRIEUR de la fenêtre que `AF-V-01` a
+ensuite désignée `FINAL_HOLDOUT` (`2025-05-19` → `2026-05-20`). Aucun `HoldoutAccessEvent` n'existe
+pour cet accès (Track R/`AF-R-03` n'existaient pas encore ce jour-là) — **conformément à
+l'invariant §18 point 7 ci-dessus, cette absence n'est PAS une preuve d'absence d'accès**, et ne
+doit jamais être lue comme telle.
+
+**Question tranchée (nuance explicitement testée, pas acceptée par réflexe)** : une exposition
+purement AGRÉGÉE (une seule statistique globale mélangeant plusieurs années) aurait-elle constitué
+une contamination plus faible qu'un accès pouvant isoler la sous-période ? Non pertinent ici — le
+grand livre PAR TRADE a été matérialisé en clair (fichiers CSV lisibles, racine du dépôt et
+`results/job_gate_data_validation/`), rendant la sous-période triviale à isoler après coup ; la
+distinction reste néanmoins valable pour un futur cas où seule une statistique agrégée
+multi-années, jamais isolée, aurait été produite — un tel cas resterait à trancher séparément le
+moment venu, sans réponse générale ici.
+
+**Conséquence retenue, minimale (pas de nouvelle taxonomie, pas de champ schéma ajouté)** : une
+`ValidationRun` évaluant une période déjà exposée par une exécution antérieure du même snapshot
+(formelle ou non — un job/script informel compte autant qu'un `ResearchRun` Track R) **reste une
+evidence légitime et honnête** — elle répond factuellement "comment cette configuration se
+comporte-t-elle sur cette période" — mais ne peut **jamais** être qualifiée `FINAL_HOLDOUT
+untouched`/"jamais consultée" dans un rapport, un `Champion` ou un export. Vocabulaire retenu :
+**retrospective OOS evidence** (ou *historical OOS evidence*), avec la précision explicite de
+l'exposition antérieure connue quand elle existe. `ValidationRun.validation_type` reste `"oos"` au
+niveau mécanique (le code n'a jamais revendiqué de champ "untouched" — rien à corriger dans le
+schéma, voir `validation_run.py`) ; la distinction fraîcheur/exposition est une question de
+**rapport et d'interprétation humaine**, pas de donnée structurée — construire un champ dédié
+maintenant serait prématuré (un seul cas réel connu à ce jour, voir la mise en garde §9 contre la
+sur-construction).
+
+**Premier `dataset_snapshot_id` non-`local_csv` (AF-V-01 Phase A, 2026-08-17, `/domain-modeling`
+réellement invoqué)** — le premier `DatasetSplitPlan` basé sur un provider externe (IG démo,
+epic `IX.D.NASDAQ.IFD.IP`) réutilise la **même forme** `<provider>:sha256:<hash>` que la
+convention AF-DATA existante, avec un préfixe différent : `"ig_demo:sha256:<hash>"`, `<hash>` étant
+le SHA-256 du fichier RAW JSON exact reçu de l'API IG (jamais d'une transformation/normalisation).
+Aucune modification de code : `dataset_snapshot_id` reste un `str` libre partout (`ResearchRun`,
+`DatasetSplitPlan`, `HoldoutAccessEvent`) — voir `docs/adr/0017-ig-demo-dataset-snapshot-identity-and-timezone-assumption.md`
+pour la décision complète, y compris le fuseau horaire des bornes `SplitBoundary` de ce plan
+(`snapshotTime` IG = `+02:00`, **confirmé le 2026-08-23** par recoupement avec le champ
+`snapshotTimeUTC` réellement présent dans chaque enregistrement de l'API IG — pas une déduction
+depuis une seule heure observée). **Gap de code découvert à cette occasion, corrigé le même jour
+(2026-08-23, `/tdd`, voir l'ADR §"Contrat de correction")** : `market_data/ig/normalize.py::
+normalize_price_records()` lisait jusque-là `snapshotTime` (ambigu) au lieu de `snapshotTimeUTC` —
+la colonne `time` produite n'était donc pas réellement UTC, contrairement à ce qu'affirmait son
+docstring d'alors. **État actuel (post-correctif)** : `snapshotTimeUTC` est désormais le seul champ
+source, vérifié obligatoire sur CHAQUE enregistrement (pas seulement le premier), sans offset fixe
+codé en dur — voir l'ADR pour la preuve numérique (0 divergence sur les 4800 enregistrements
+`AF-V-01`) et la conséquence qu'aurait eue le gap sur `engine.py::_add_market_time_columns()` s'il
+n'avait pas été corrigé avant la première exécution réelle du `FINAL_HOLDOUT`.
+
+**AF-V-01 = DONE (2026-08-23) — preuve FRAÎCHE, distincte de la preuve rétrospective ci-dessus.**
+La première (et unique) `ValidationRun` réelle sur ce `DatasetSplitPlan` IG
+(`validation_run_id="af-v01-ig-demo-final-holdout-oos"`) a été exécutée : `HoldoutAccessEvent = 1`,
+`ValidationEvidence = 1`, `n_trades = 0` (**performance-inconclusive**, pas un échec technique —
+vérifié : 2400 bougies réelles dans la fenêtre, résultat honnête de la sélectivité de la stratégie
+sur un échantillon court, voir ADR-0017 "Note de clôture"). Contrairement à la **retrospective OOS
+evidence** MT5 décrite plus haut (exposition antérieure connue via `GATE DATA`), cette preuve IG
+est une **fresh external final holdout evidence** : aucune exposition antérieure de
+`Perfect Revolution`/`DEFAULT_PARAMS` à ce `dataset_snapshot_id` IG n'a été trouvée (audit
+exhaustif `git log --all`, `AI_HANDOFF.md`, `results/`, voir Phase A). **Ne pas fusionner les deux
+catégories de preuve** dans un futur rapport/Champion — elles répondent à des garanties
+différentes. `GATE V` (`MASTER_ROADMAP.md` §4) reste **non passée** : elle exige `OOS` **et**
+`WalkForward` **et** `MonteCarlo` **et** `ParameterStability`, tous produisant une
+`ValidationEvidence` réelle — seul `OOS` existe à ce jour, et son unique résultat est inconclusif
+(0 trade). Aucune déclaration `ROBUST`/`CHAMPION` n'est justifiée par cette seule preuve.
+
 ---
 
 ## 13. Champions (statut existant préservé, lifecycle proposé séparément)

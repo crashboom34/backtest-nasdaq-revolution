@@ -572,7 +572,14 @@ consommateur réel d'un plan), pas un oubli.
 
 ### AF-V-01 — OOS / holdout intouché — première `ValidationRun` réelle
 
-**Status** : **READY** (`GATE DATA = PASS`, 2026-08-15 — débloqué, non commencé)
+**Status** : **DONE (2026-08-23)** — `HoldoutAccessEvent=1`, `ValidationEvidence=1`,
+`validation_run_id="af-v01-ig-demo-final-holdout-oos"`, `split_plan_id=
+"af-v01-ig-demo-nasdaq-m3-2026-08"`. **Preuve FRESH EXTERNAL FINAL HOLDOUT** (IG démo, distincte de
+la retrospective OOS evidence MT5 — voir `DOMAIN_MODEL.md` §12). Résultat : `n_trades=0`,
+**performance-inconclusive** (pas un échec technique, voir `docs/adr/0017-*.md` "Note de clôture").
+**`GATE V` reste NON passée** — voir `MASTER_ROADMAP.md` §4 (exige `OOS`+`WalkForward`+
+`MonteCarlo`+`ParameterStability`, seul `OOS` existe et son résultat est inconclusif). Aucun
+`ROBUST`/`CHAMPION` déclaré.
 
 **Why now** : `V` ne dépend que de `DATA-FOUNDATION` + `CURRENT REFERENCE ENGINE` (déjà
 implémenté) — **ne bloque pas** sur le futur Precision Engine (`AF-EPREC`).
@@ -580,25 +587,30 @@ implémenté) — **ne bloque pas** sur le futur Precision Engine (`AF-EPREC`).
 **What to build** : première exécution réelle d'une validation Out-of-Sample sur
 `CURRENT REFERENCE ENGINE` + Perfect Revolution, produisant une `ValidationEvidence` réelle.
 
-**Current evidence / existing code** : `TEST_AND_VALIDATION_ARCHITECTURE.md` — architecture déjà
-préparée, 0 % implémenté.
+**Current evidence / existing code** : `dataset_split.py`/`validation_run.py`/`validation_oos.py`
+(implémentés, `AF-R-03`/`AF-V-01`) ; `docs/adr/0017-ig-demo-dataset-snapshot-identity-and-timezone-assumption.md`
+(dataset IG, correction fuseau horaire, exécution réelle documentée en détail).
 
 **Dependencies** : `GATE DATA`.
 
 **Note historique reprise** : couvre l'intention de l'ancien `T-VAL-1` (audit look-ahead bias dans
 `engine.py`/`on_bar()`) comme prérequis d'hygiène avant la première `ValidationRun` — à vérifier
-en ouverture de ce ticket, pas un ticket séparé.
+en ouverture de ce ticket, pas un ticket séparé. **Limite trouvée en clôture, non corrigée ici**
+(hors périmètre strict) : `engine.run_backtest()` calcule les indicateurs (EMA/ATR) uniquement sur
+les bougies de la fenêtre filtrée, jamais sur `TRAIN` — biais de "cold start" plausible, documenté
+dans l'ADR-0017, à traiter par un futur ticket dédié à `engine.py` si jugé nécessaire.
 
 **Acceptance criteria** :
-- [ ] Une période holdout est définie et jamais utilisée pour ajuster quoi que ce soit avant le
+- [x] Une période holdout est définie et jamais utilisée pour ajuster quoi que ce soit avant le
       verdict final.
-- [ ] `ValidationEvidence` produite et lisible.
+- [x] `ValidationEvidence` produite et lisible.
 
 **Effort** : M. **Uncertainty** : medium. **Skills recommended** : `tdd`.
 
 ### AF-V-02 — Walk-Forward
 
-**Status** : BLOCKED (`AF-V-01`). **Effort** : M. **Skills recommended** : `tdd`.
+**Status** : **READY** (`AF-V-01` terminé — débloqué mécaniquement, **non commencé**, `GATE V`
+toujours ouverte). **Effort** : M. **Skills recommended** : `tdd`.
 
 **What to build** : moteur walk-forward sur `CURRENT REFERENCE ENGINE`, `ValidationEvidence` dédiée.
 
@@ -872,13 +884,18 @@ n'existe pas dans la roadmap, voir §12 historique ci-dessous) :
 2. ✅ `AF-R-02` — capture `git_sha`/`seed`/`engine_version`.
 3. ✅ `AF-R-03` — DatasetSplitPlan/HoldoutAccessEvent, fondations (cardinalité corrigée en revue).
 
-**READY NOW** (débloqués par `GATE DATA = PASS`, zéro dépendance croisée entre eux) :
-- `AF-V-01` — OOS/holdout intouché, première `ValidationRun` réelle. Non commencé.
+**AF-V-01 = DONE (2026-08-23, non commité localement au moment de la clôture)** — première
+`ValidationRun` réelle sur un `DatasetSplitPlan` IG démo (fresh external final holdout, distincte
+de la retrospective OOS evidence MT5) : `n_trades=0`, performance-inconclusive, `GATE V` toujours
+ouverte — voir l'entrée du ticket ci-dessus et `DOMAIN_MODEL.md` §12 pour le détail complet.
+
+**READY NOW** (débloqués, zéro dépendance croisée entre eux) :
+- `AF-V-02` — Walk-Forward, débloqué par `AF-V-01`. Non commencé.
 - `AF-F-01` — Knowledge Base foundation. Non commencé.
 - `AF-EPREC-01` — Precision Engine Contract (déjà `READY` depuis le début, indépendant de
   `AF-DATA` — à vérifier s'il a déjà été traité séparément avant de le redémarrer).
 
-Cet ordre reste dérivé directement des dépendances déclarées — `AF-V-01`/`AF-F-01` ne sont *pas*
+Cet ordre reste dérivé directement des dépendances déclarées — `AF-V-02`/`AF-F-01` ne sont *pas*
 présentés comme séquentiels entre eux, aucun gagnant unique n'est imposé par le graphe.
 
 ---
@@ -889,14 +906,19 @@ présentés comme séquentiels entre eux, aucun gagnant unique n'est imposé par
 choix parallèles (`AF-R-01`/`AF-V-01`/`AF-F-01`, tous `READY` sans dépendance croisée). C'est
 désormais fait — voir §11, Track R Foundation complète.
 
-**État actuel** : `AF-V-01` et `AF-F-01` restent tous les deux `READY`, toujours sans dépendance
-croisée entre eux — aucun gagnant unique n'est imposé par le graphe. **Recommandation, pas une
-contrainte du graphe** : `AF-V-01` en premier — c'est le premier ticket qui consommera réellement
-un `DatasetSplitPlan` (Track R n'a construit que la fondation, jamais câblée), et c'est là que la
-question laissée `FUTURE` par `AF-R-03` ("comment un `ResearchRun` référence-t-il le
-`DatasetSplitPlan` qu'il a utilisé ?") doit être tranchée avec un cas d'usage réel plutôt que
-spéculée à l'avance (voir `DOMAIN_MODEL.md` §12). `AF-F-01` reste un choix tout aussi valide selon
-la priorité produit du moment.
+**Historique (avant 2026-08-23)** : cette section recommandait `AF-V-01` en premier parmi
+`AF-V-01`/`AF-F-01`, tous deux `READY` sans dépendance croisée. C'est désormais fait — voir §11,
+`AF-V-01 = DONE`. La question laissée `FUTURE` par `AF-R-03` ("comment un `ResearchRun`
+référence-t-il le `DatasetSplitPlan` qu'il a utilisé ?") a été tranchée avec ce cas d'usage réel
+(`ValidationRun.split_plan_id` direct, voir `validation_run.py`).
+
+**État actuel** : `AF-V-02` et `AF-F-01` sont désormais tous les deux `READY`, toujours sans
+dépendance croisée entre eux — aucun gagnant unique n'est imposé par le graphe. `AF-V-02` **n'est
+pas automatiquement la priorité** du seul fait d'être débloqué : `GATE V` exige `OOS`+`WalkForward`+
+`MonteCarlo`+`ParameterStability`, et le résultat `OOS` obtenu (`n_trades=0`) reste
+performance-inconclusive — une décision produit explicite reste nécessaire avant de lancer
+`AF-V-02` (pas déjà autorisée par cette seule mise à jour documentaire). `AF-F-01` reste un choix
+tout aussi valide selon la priorité produit du moment.
 
 **Important** : cette recommandation n'autorise rien de nouveau — `AF-V-01` doit être
 explicitement autorisé par l'utilisateur avant tout travail, comme chaque ticket précédent.

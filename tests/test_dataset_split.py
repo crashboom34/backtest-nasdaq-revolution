@@ -477,6 +477,69 @@ def test_second_holdout_access_produces_a_new_event_never_overwrites_the_first(t
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-01 — HoldoutAccessEvent.validation_run_id (extension optionnelle, premier vrai
+# consommateur) + durcissement du filtrage has_holdout_access_events()/list_holdout_access_events()
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_holdout_access_event_validation_run_id_is_optional():
+    """HoldoutAccessEvent reste utilisable sans ValidationRun (accès manuel, reason libre) —
+    validation_run_id n'est PAS une contrainte nouvelle sur le contrat général existant."""
+    event = _event()
+
+    assert event.validation_run_id is None
+
+
+def test_holdout_access_event_validation_run_id_disambiguates_which_validation_triggered_access():
+    """Trouvé via /codebase-design (AF-V-01) : sans validation_run_id, deux ValidationRuns
+    distinctes réutilisant le même (split_plan_id, research_run_id) seraient indiscernables sans
+    jointure implicite sur le timestamp — même principe que dataset_snapshot_id/split_plan_id
+    directs déjà établi pour ce type."""
+    event = _event(validation_run_id="val_x")
+
+    assert event.validation_run_id == "val_x"
+
+
+@pytest.mark.parametrize("bad_id", ["val:a", "val*a", "../escape", ""])
+def test_build_holdout_access_event_rejects_unsafe_validation_run_id(bad_id):
+    """Même protection que les autres identifiants de chemin (research_run_id/split_plan_id) —
+    rejeté, jamais sanitisé, pour éviter une collision d'identité."""
+    with pytest.raises(ValueError):
+        _event(validation_run_id=bad_id)
+
+
+def test_list_holdout_access_events_can_filter_by_expected_split_plan_id(tmp_path):
+    """Durcissement (mission AF-V-01 §11) : has_holdout_access_events()/list_holdout_access_events()
+    restent scopées par convention de répertoire par défaut (rétrocompatible), mais un appelant
+    peut désormais exiger une vérification structurelle — un événement dont le split_plan_id ne
+    correspond pas à celui attendu ne doit jamais compter comme preuve pour CE plan (évite un faux
+    verdict si un répertoire est accidentellement partagé/mal construit)."""
+    correct_event = _event(split_plan_id="plan_a")
+    save_holdout_access_event(tmp_path, correct_event)
+
+    # Simule un événement mal attribué dans le même répertoire (répertoire partagé par erreur).
+    wrong_event = _event(split_plan_id="plan_b", research_run_id="run_y")
+    save_holdout_access_event(tmp_path, wrong_event)
+
+    all_events = list_holdout_access_events(tmp_path)
+    assert len(all_events) == 2  # comportement par défaut inchangé, rétrocompatible
+
+    filtered = list_holdout_access_events(tmp_path, expected_split_plan_id="plan_a")
+    assert len(filtered) == 1
+    assert filtered[0].split_plan_id == "plan_a"
+
+
+def test_has_holdout_access_events_with_expected_split_plan_id_ignores_mismatched_events(tmp_path):
+    """Si le seul événement présent appartient à un AUTRE split_plan_id, has_holdout_access_events()
+    avec expected_split_plan_id ne doit PAS le compter comme une preuve pour le plan attendu."""
+    mismatched_event = _event(split_plan_id="plan_b")
+    save_holdout_access_event(tmp_path, mismatched_event)
+
+    assert has_holdout_access_events(tmp_path) is True  # comportement par défaut inchangé
+    assert has_holdout_access_events(tmp_path, expected_split_plan_id="plan_a") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # T, U. API d'audit honnête — has_holdout_access_events(), jamais is_untouched()
 # ═══════════════════════════════════════════════════════════════════════════════
 
