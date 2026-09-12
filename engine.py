@@ -83,9 +83,17 @@ def run_backtest(
     --------
     (trades_df, equity_df, stats_dict)
     """
-    # Filtrage optionnel par dates (pour le split train/test de l'optimisateur)
-    if start_date is not None:
-        df = df[df["time_paris"] >= pd.Timestamp(start_date, tz="Europe/Paris")]
+    # ── Séparation contexte / fenêtre d'exécution (Dette A, engine layer, 2026-09-12) ──
+    # CONTEXT DATA : tout l'historique disponible AVANT start_date reste dans le DataFrame ici —
+    # start_date ne filtre PLUS le contexte, il ne bornera que la FENÊTRE D'EXÉCUTION plus bas
+    # (exec_start_idx). But : strategy.prepare() (EMA/ATR/etc.) dispose de l'historique réel au
+    # lieu d'un "cold start" artificiel à chaque fenêtre. Seule la borne de FIN est appliquée ici,
+    # AVANT prepare() : aucune donnée postérieure à end_date ne doit jamais être visible par
+    # prepare(), pour ne jamais introduire de look-ahead implicite (Perfect Revolution est causale
+    # aujourd'hui, mais ce garde-fou vaut pour toute future stratégie non causale, ex. centered
+    # rolling / normalisation globale). Dette B (sémantique [start,end) vs [start,end]) reste
+    # strictement hors scope : `<=` inchangé, comportement identique pour tous les appelants
+    # existants (optimizer.py, app.py) qui ne fournissent pas d'historique amont supplémentaire.
     if end_date is not None:
         df = df[df["time_paris"] <= pd.Timestamp(end_date, tz="Europe/Paris")]
     df = df.reset_index(drop=True)
@@ -97,6 +105,22 @@ def run_backtest(
     # qu'AJOUTER des colonnes (jamais de mutation in-place), donc safe.
     df = strategy.prepare(df.copy(deep=False), params)
     n  = len(df)
+
+    # ── Bornes de la fenêtre d'exécution (indices dans le DataFrame de contexte) ──────
+    # exec_start_idx : première bougie du CONTEXTE avec time_paris >= start_date — sémantique
+    # inclusive préservée à l'identique (Dette B hors scope). 0 si aucun start_date (comportement
+    # historique). df["time_paris"] est chronologiquement croissant, searchsorted(side="left")
+    # donne directement le premier index respectant ">=".
+    if start_date is not None:
+        exec_start_idx = int(
+            df["time_paris"].searchsorted(pd.Timestamp(start_date, tz="Europe/Paris"), side="left")
+        )
+    else:
+        exec_start_idx = 0
+    # exec_end_idx : dernière bougie du contexte — déjà tronqué à end_date ci-dessus, donc
+    # toujours n - 1 dans cette mission (nommé explicitement pour figer le contrat côté fermeture
+    # forcée plus bas, jamais `close[-1]`/`.iloc[-1]` implicite — voir docstring de la fonction).
+    exec_end_idx = n - 1
 
     close = df["close"].values
     high  = df["high"].values
@@ -131,13 +155,28 @@ def run_backtest(
     equity_curve = []
 
     warmup = getattr(strategy, "WARMUP", 130)
+    # loop_start : au moins WARMUP bougies de contexte avant la première décision, ET jamais
+    # avant exec_start_idx (la fenêtre demandée). Si assez d'historique existe avant start_date,
+    # l'exécution démarre pile à exec_start_idx (le warmup est déjà "payé" par le contexte
+    # amont). Si le contexte disponible avant start_date est plus court que WARMUP, le garde-fou
+    # WARMUP historique continue de s'appliquer (protection contre un historique insuffisant).
+    # Sans start_date (exec_start_idx=0), identique au contrat historique : loop_start == warmup.
+    loop_start = max(exec_start_idx, warmup)
 
-    report_every = max(1, n // 100)
+    # report_every/progress_cb portent sur la fenêtre RÉELLEMENT exécutée, jamais sur la
+    # longueur du contexte élargi n (qui inclut désormais l'historique amont).
+    report_every = max(1, (exec_end_idx - loop_start) // 100)
 
-    for i in range(warmup, n - 1):
+    # range(loop_start, exec_end_idx) — PAS exec_end_idx inclus : garantit structurellement
+    # i + 1 <= exec_end_idx pour toute décision d'entrée/sortie next_open-based (jamais de
+    # next_open au-delà de la fenêtre demandée). exec_end_idx reste consultable comme prix/
+    # timestamp de next_open sur la dernière décision (i = exec_end_idx - 1) et comme fermeture
+    # forcée (voir plus bas), jamais comme bougie de décision elle-même — exactement le même
+    # invariant que l'ancien `range(warmup, n - 1)` quand il n'y a pas de fenêtre.
+    for i in range(loop_start, exec_end_idx):
 
         if progress_cb and i % report_every == 0:
-            progress_cb((i - warmup) / (n - warmup))
+            progress_cb((i - loop_start) / (exec_end_idx - loop_start))
 
         context = {
             "in_pos":          in_pos,
@@ -326,8 +365,13 @@ def run_backtest(
         })
 
     # ── Fermeture forcée ──────────────────────────────────────
+    # Utilise explicitement exec_end_idx (la dernière bougie LOGIQUE de la fenêtre demandée),
+    # jamais close[-1]/.iloc[-1] : dans cette mission, exec_end_idx == n - 1 puisque le contexte
+    # est déjà tronqué à end_date en amont, mais le contrat est figé sous ce nom explicite pour
+    # ne jamais dépendre implicitement d'une coïncidence entre "dernière bougie de la fenêtre" et
+    # "dernière bougie physique du DataFrame reçu".
     if in_pos:
-        ep   = close[-1]
+        ep   = close[exec_end_idx]
         ae2  = ep - slip_out if pos_dir == "long" else ep + slip_out
         pnl  = (ae2 - actual_entry) * nb_contracts if pos_dir == "long" else (actual_entry - ae2) * nb_contracts
         costs = (spread + slip_in + slip_out) * nb_contracts
@@ -340,7 +384,7 @@ def run_backtest(
             "prix_entree":      round(actual_entry, 2),
             "stop":             round(stop_price, 2),
             "target":           round(target_price, 2),
-            "date_sortie":      str(df["time_paris"].iloc[-1]),
+            "date_sortie":      str(df["time_paris"].iloc[exec_end_idx]),
             "prix_sortie":      round(ep, 2),
             "raison_sortie":    "fin-donnees",
             "resultat_brut":    round(pnl + costs, 2),

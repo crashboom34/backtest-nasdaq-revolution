@@ -630,23 +630,39 @@ Walk-Forward — toute évaluation qui le consulterait resterait un événement 
 délibéré, pas un mécanisme interne au protocole.
 
 **Préconditions scientifiques à examiner avant exécution (réconciliation documentaire post-AF-V-01,
-2026-09-12, corrigée le 2026-09-12 — documentées séparément, non corrigées par ce ticket, aucune
-des deux prouvée comme ayant affecté `AF-V-01`)** :
-- **Dette A — warmup/cold-start des indicateurs** : `engine.run_backtest()` filtre la fenêtre
-  avant `strategy.prepare()` (`engine.py:87-98`) — les indicateurs (EMA/ATR) ne voient jamais les
-  bougies qui précèdent la fenêtre exécutée. Documenté dans `AI_HANDOFF.md` §14 et
-  `docs/adr/0017-*.md` ("Note de clôture").
-- **Dette B — sémantique des frontières `SplitBoundary`, générique** : `SplitBoundary` déclare
-  `[start, end)` (fin exclue), mais `engine.run_backtest(start_date=, end_date=)` filtre en
-  réalité sur un intervalle **fermé** des deux côtés (`time_paris >= start_date` **et**
-  `time_paris <= end_date`, jamais `< end_date`) — toute exécution de deux fenêtres temporelles
-  adjacentes peut donc provoquer une double inclusion d'une barre située exactement à la frontière
-  partagée (`a.end == b.start`). Documenté dans le docstring de `SplitBoundary`
-  (`dataset_split.py`). **Ne concerne pas spécifiquement `TRAIN`/`FINAL_HOLDOUT`** — c'est une
-  propriété générique de toute paire de fenêtres adjacentes qu'un futur protocole choisirait
-  d'exécuter (zones réelles non tranchées ici, voir ci-dessus). Sans impact vérifié sur `AF-V-01`
-  (une seule zone exécutée, aucune bougie réelle sur la frontière `2025-05-19T00:00:00+00:00`).
-  **Dette distincte de la Dette A.**
+2026-09-12, corrigée le 2026-09-12, mise à jour le 2026-09-12 après correction partielle de la
+Dette A — documentées séparément, aucune des deux prouvée comme ayant affecté `AF-V-01`)** :
+- **Dette A — warmup/cold-start des indicateurs — ENGINE LAYER CORRIGÉ, OPTIMIZER INTEGRATION
+  OPEN** : `engine.run_backtest()` ne filtre plus `start_date` avant `strategy.prepare()` —
+  l'historique disponible avant `start_date` reste visible pour le calcul des indicateurs
+  (`loop_start = max(exec_start_idx, warmup)`), et `end_date` continue d'exclure tout futur du
+  contexte de préparation. Non-régression prouvée (114 trades/`net_ret_pct` de référence
+  inchangés sans fenêtre), 791/791 tests. **Mais** `optimizer.py`/`optimizer_process.py` (dont
+  `_worker_run_single`) continuent de pré-tronquer le DataFrame sur `opt_start_date` **avant**
+  d'appeler `run_backtest()` — le split train/test de l'optimiseur ne bénéficie donc **pas encore**
+  de ce correctif. **`AF-V-02` ne doit pas être exécuté scientifiquement tant que cette
+  intégration Optimizer reste ouverte** si son protocole venait à réutiliser ce chemin. Détail
+  complet : `AI_HANDOFF.md` §16.
+- **Dette B — sémantique des frontières `SplitBoundary`, générique — toujours OPEN, non touchée
+  par la correction Engine Layer** : `SplitBoundary` déclare `[start, end)` (fin exclue), mais
+  `engine.run_backtest(start_date=, end_date=)` filtre en réalité sur un intervalle **fermé** des
+  deux côtés (`time_paris >= start_date` **et** `time_paris <= end_date`, jamais `< end_date`) —
+  toute exécution de deux fenêtres temporelles adjacentes peut donc provoquer une double inclusion
+  d'une barre située exactement à la frontière partagée (`a.end == b.start`). Documenté dans le
+  docstring de `SplitBoundary` (`dataset_split.py`, non modifié). **Ne concerne pas
+  spécifiquement `TRAIN`/`FINAL_HOLDOUT`** — propriété générique de toute paire de fenêtres
+  adjacentes qu'un futur protocole choisirait d'exécuter (zones réelles non tranchées ici, voir
+  ci-dessus). Sans impact vérifié sur `AF-V-01` (une seule zone exécutée, aucune bougie réelle sur
+  la frontière `2025-05-19T00:00:00+00:00`). **Dette distincte de la Dette A.**
+- **Écart `compute_split_dates()` — DISCOVERED / OPEN, distinct de Dette A et B, non numéroté
+  sans décision de roadmap** : `optimizer.py::compute_split_dates()` convertit le point de split
+  en chaîne `"YYYY-MM-DD"` (perte de l'heure précise) puis positionne `test_start` au lendemain —
+  peut créer un trou temporel silencieux d'au moins une journée de marché autour du split. Non
+  corrigé, non rattaché à un ticket existant.
+- **Dette WARMUP dynamique — OPEN, hors périmètre stratégie** : `strategies/perfect_revolution_v1.py`
+  conserve `WARMUP=130` (constante fixe), alors que `ema_trend_len` est paramétrable jusqu'à 500
+  dans `PARAM_SCHEMA` — convergence stricte non garantie par 130 barres pour un paramétrage
+  éloigné du défaut. Stratégie non modifiée par cette mission.
 
 ### AF-V-03 — Monte-Carlo
 

@@ -979,3 +979,54 @@ structuration). Détail complet : `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `A
 - **`AF-V-02`→`AF-V-05`** : restent **non commencés**. Leur précédence architecturale recommandée
   (`AF-V-06`) est désormais satisfaite, mais aucune décision de les lancer n'a été prise par cette
   seule clôture documentaire.
+
+## 16. Dette A — Engine Layer = DONE (2026-09-12), Optimizer Integration reste OPEN
+
+**Statut : Dette A — ENGINE LAYER DONE. Dette A — OPTIMIZER INTEGRATION reste OPEN. Dette B reste
+OPEN.** Précède toute exécution scientifique sérieuse d'`AF-V-02` (Walk-Forward) — voir
+`docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-02`, section préconditions) pour le détail
+complet et la distinction Engine/Optimizer.
+
+- **Contrat moteur corrigé (`engine.py::run_backtest()`)** : `start_date` ne filtre plus le
+  DataFrame avant `strategy.prepare()` — l'historique disponible avant `start_date` reste visible
+  pour le calcul des indicateurs (fin du "cold start" artificiel à chaque fenêtre). Seule la borne
+  `end_date` continue de tronquer le DataFrame en amont : `strategy.prepare()` ne voit **jamais**
+  de bougie postérieure à `end_date` (aucun look-ahead implicite possible pour une future
+  stratégie non causale).
+- **Début d'exécution** : `loop_start = max(exec_start_idx, warmup)` — `exec_start_idx` est le
+  premier index avec `time_paris >= start_date` (0 si absent). Démarre pile à `exec_start_idx` si
+  l'historique amont suffit ; retombe sur `warmup` si le dataset commence trop près de
+  `start_date`. Sans `start_date`, identique au contrat historique.
+- **Fin d'exécution** : `exec_end_idx` nommé explicitement (dernière bougie du contexte, déjà
+  tronqué à `end_date`). Boucle `range(loop_start, exec_end_idx)` — garantit structurellement
+  `i + 1 <= exec_end_idx` pour toute décision `next_open`-based : aucun trade ne peut s'ouvrir ou
+  se fermer au-delà de la fenêtre demandée. Fermeture forcée sur `close[exec_end_idx]`/
+  `df["time_paris"].iloc[exec_end_idx]`, jamais `close[-1]`/`.iloc[-1]` implicite.
+- **Dette B strictement préservée** : `start_date` reste inclusif (`>=`), `end_date` reste
+  inclusif (`<=`) — aucun changement de sémantique, aucun paramètre d'exclusivité ajouté.
+- **Non-régression prouvée** : sans `start_date`/`end_date`, `n_trades=114`,
+  `net_ret_pct=-1.07580480000006` sur `nasdaq_3m.csv` complet avec `DEFAULT_PARAMS` — identique à
+  la référence historique `GATE DATA` (§13). Caractérisé sur le code non modifié puis reverrouillé
+  par test après modification (`tests/test_engine.py::TestNoWindowNonRegression`). **Dépendance de
+  test historique préexistante** (`nasdaq_3m.csv`, ignoré par `.gitignore`, non versionné) — non
+  introduite par cette correction, ce test n'est donc pas portable sur un checkout dépourvu de
+  données, comme c'était déjà le cas pour le reste de `tests/test_engine.py`.
+- **`strategies/perfect_revolution_v1.py` non modifiée** — `WARMUP=130` inchangé. **Dette
+  distincte, non corrigée** : `ema_trend_len` est paramétrable jusqu'à 500 dans `PARAM_SCHEMA`,
+  alors que `WARMUP` reste une constante fixe indépendante des `params` réellement choisis —
+  convergence stricte d'un EMA(500) non garantie par 130 barres de warmup. Reste ouverte pour un
+  futur ticket dédié (contrat `required_warmup(params)`, hors périmètre ici).
+- **Tests** : `tests/test_engine.py` 27/27 (dont 15 nouveaux — séparation contexte/fenêtre + cas
+  limites), `tests/test_validation_oos.py` 13/13 (inchangé), suite complète 791/791 (776 baseline
+  + 15 nouveaux), 0 régression. `py_compile` propre. Revue `/code-review` (axes Standards/Spec)
+  effectuée avant clôture : aucun défaut bloquant, aucune correction de code nécessaire.
+- **Dette A — OPTIMIZER INTEGRATION reste explicitement OPEN** : `optimizer_process.py`/
+  `_worker_run_single` (fallback) continuent de tronquer le DataFrame sur `opt_start_date` **avant**
+  d'appeler `run_backtest()` — l'optimiseur ne bénéficie donc pas encore du correctif moteur pour
+  son propre split train/test. Non traité par cette mission (`optimizer.py`/`optimizer_process.py`
+  non modifiés).
+- **Écart `compute_split_dates()` (découvert, non corrigé, distinct de Dette A et B)** :
+  `optimizer.py::compute_split_dates()` convertit le point de split en chaîne `"YYYY-MM-DD"`
+  (perdant l'heure précise) puis positionne `test_start` au lendemain — peut créer un trou
+  temporel silencieux d'au moins une journée de marché autour du split. Statut : DISCOVERED /
+  OPEN, séparé de Dette B, non tranché par la roadmap, non corrigé ici.
