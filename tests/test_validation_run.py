@@ -15,6 +15,7 @@ Aucune base de données, aucune UI : persistance fichier pure (motif atomic_json
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime, timedelta
@@ -24,9 +25,12 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from validation_run import (
+    IncoherentValidationRunError,
     OosValidationEvidence,
+    OosValidationSpecification,
     ValidationRun,
     build_oos_validation_evidence,
+    build_oos_validation_specification,
     build_validation_run,
     load_validation_run,
     save_validation_run,
@@ -43,6 +47,12 @@ def _evidence(**kwargs):
     return build_oos_validation_evidence(**kwargs)
 
 
+def _specification(**kwargs):
+    kwargs.setdefault("holdout_start", "2025-05-19T00:00:00+00:00")
+    kwargs.setdefault("holdout_end", "2026-05-20T00:00:00+00:00")
+    return build_oos_validation_specification(**kwargs)
+
+
 def _run(**kwargs):
     kwargs.setdefault("validation_run_id", "val_x")
     kwargs.setdefault("research_run_id", "run_x")
@@ -50,6 +60,7 @@ def _run(**kwargs):
     kwargs.setdefault("dataset_snapshot_id", _SNAPSHOT_ID)
     kwargs.setdefault("strategy_name", "NASDAQ Perfect Revolution V1.1")
     kwargs.setdefault("strategy_params", {"stop_pct": 1.2, "target_pct": 6.75})
+    kwargs.setdefault("specification", _specification())
     kwargs.setdefault("evidence", _evidence())
     return build_validation_run(**kwargs)
 
@@ -273,3 +284,282 @@ def test_validation_run_module_does_not_import_engine():
 
     assert "engine" not in import_lines
     assert "optimizer" not in import_lines
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-06 — ValidationSpecification typée, cohérence type/specification/evidence, legacy
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_oos_validation_specification_is_an_explicit_type_not_an_opaque_dict():
+    """1. Une specification OOS est un type explicite, pas un dict opaque."""
+    spec = _specification()
+
+    assert isinstance(spec, OosValidationSpecification)
+
+
+def test_oos_validation_specification_requires_offset_aware_utc_bounds():
+    with pytest.raises(ValueError):
+        _specification(holdout_start="2025-05-19T00:00:00", holdout_end="2026-05-20T00:00:00+00:00")
+
+
+def test_oos_validation_specification_rejects_inverted_bounds():
+    with pytest.raises(ValueError):
+        _specification(holdout_start="2026-05-20T00:00:00+00:00", holdout_end="2025-05-19T00:00:00+00:00")
+
+
+def test_oos_validation_specification_is_distinct_from_evidence():
+    """La specification (ce qui devait être exécuté) et l'evidence (ce qui a été observé) restent
+    deux types distincts, jamais fusionnés — même si leurs valeurs coïncident pour "oos"."""
+    spec = _specification()
+    evidence = _evidence()
+
+    assert not isinstance(spec, OosValidationEvidence)
+    assert not isinstance(evidence, OosValidationSpecification)
+
+
+def test_build_validation_run_associates_type_specification_and_evidence_coherently():
+    """3. Construction cohérente : validation_type="oos" avec une OosValidationSpecification et
+    une OosValidationEvidence — le cas nominal doit réussir et porter les deux objets typés."""
+    run = _run()
+
+    assert run.validation_type == "oos"
+    assert isinstance(run.specification, OosValidationSpecification)
+    assert isinstance(run.evidence, OosValidationEvidence)
+
+
+@pytest.mark.parametrize("bad_specification", [object(), {"holdout_start": "x", "holdout_end": "y"}])
+def test_build_validation_run_rejects_specification_of_the_wrong_type(bad_specification):
+    """4. Une specification qui n'est pas du type attendu par validation_type est rejetée tôt,
+    jamais acceptée silencieusement (ni un dict, ni un objet arbitraire)."""
+    with pytest.raises(ValueError):
+        _run(specification=bad_specification)
+
+
+def test_build_validation_run_rejects_evidence_swapped_with_specification():
+    """4bis. Combinaison incohérente explicite : passer une OosValidationEvidence à la place de la
+    specification (et réciproquement) doit échouer clairement, jamais être acceptée."""
+    with pytest.raises(ValueError):
+        _run(specification=_evidence())
+
+
+def test_build_validation_run_rejects_evidence_of_the_wrong_type():
+    with pytest.raises(ValueError):
+        _run(evidence=_specification())
+
+
+def test_build_validation_run_rejects_unregistered_validation_type_even_with_valid_objects():
+    """Un validation_type non enregistré est rejeté même si specification/evidence sont par
+    ailleurs des objets valides — AF-V-06 ne préjuge d'aucune variante future non construite ici."""
+    with pytest.raises(ValueError):
+        _run(validation_type="walk_forward", specification=_specification(), evidence=_evidence())
+
+
+def test_save_and_load_validation_run_round_trips_the_new_specification(tmp_path):
+    """5. Round-trip du NOUVEAU format : la specification typée survit à l'écriture/relecture."""
+    run = _run()
+    path = save_validation_run(tmp_path / "validation_run.json", run)
+
+    loaded = load_validation_run(path)
+
+    assert loaded == run
+    assert isinstance(loaded.specification, OosValidationSpecification)
+    assert loaded.specification.holdout_start == run.specification.holdout_start
+    assert loaded.specification.holdout_end == run.specification.holdout_end
+
+
+def test_load_validation_run_tolerates_the_af_v_01_legacy_format_without_specification(tmp_path):
+    """6. Lecture du format AF-V-01 LEGACY réel : aucune clé "specification" n'a jamais existé sur
+    le disque avant AF-V-06 (confirmé sur les deux artefacts réels
+    results/validations/*/validation_run.json, non lus/modifiés ici — fixture synthétique
+    reproduisant exactement leur forme). `specification` doit être `None`, jamais reconstruite ou
+    devinée à partir de l'evidence."""
+    legacy_json = {
+        "validation_run_id": "af-v01-ig-demo-final-holdout-oos",
+        "research_run_id": "af-v01-phase-a-ig-holdout-prep",
+        "split_plan_id": "af-v01-ig-demo-nasdaq-m3-2026-08",
+        "dataset_snapshot_id": "ig_demo:sha256:" + "42" * 32,
+        "validation_type": "oos",
+        "strategy_name": "NASDAQ Perfect Revolution V1.1",
+        "strategy_params": {"stop_pct": 1.2, "target_pct": 6.75},
+        "evidence": {
+            "period_start": "2026-08-10T17:43:30+02:00",
+            "period_end": "2026-08-17T18:42:00+02:00",
+            "n_trades": 0,
+            "net_ret_pct": 0.0,
+            "profit_factor": None,
+            "win_rate": None,
+            "max_dd_pct": None,
+        },
+        "status": "completed",
+        "completed_at": "2026-08-23T08:27:48.557033+00:00",
+    }
+    path = tmp_path / "legacy_validation_run.json"
+    path.write_text(json.dumps(legacy_json), encoding="utf-8")
+
+    loaded = load_validation_run(path)
+
+    assert loaded is not None
+    assert loaded.specification is None  # jamais inventée pour un ancien enregistrement
+    assert loaded.evidence.n_trades == 0
+    assert loaded.evidence.period_start == "2026-08-10T17:43:30+02:00"
+    assert loaded.validation_run_id == "af-v01-ig-demo-final-holdout-oos"
+
+
+def test_load_validation_run_tolerates_a_second_legacy_shape_with_populated_metrics(tmp_path):
+    """D (durcissement). Deuxième forme legacy réelle représentative (métriques réellement
+    peuplées, pas seulement n_trades=0/None partout) — reproduit fidèlement
+    results/validations/val_af_v_01_perfect_revolution_oos/validation_run.json (valeurs, pas le
+    fichier lui-même, jamais lu ni modifié ici). Clé "specification" absente : doit rester
+    `None`, jamais reconstruite depuis les métriques peuplées."""
+    legacy_json = {
+        "validation_run_id": "val_af_v_01_perfect_revolution_oos",
+        "research_run_id": "run_af_v_01_perfect_revolution_oos",
+        "split_plan_id": "split_perfect_revolution_v1_final_holdout",
+        "dataset_snapshot_id": "local_csv:sha256:" + "7b" * 32,
+        "validation_type": "oos",
+        "strategy_name": "NASDAQ Perfect Revolution V1.1",
+        "strategy_params": {"stop_pct": 1.2, "target_pct": 6.75},
+        "evidence": {
+            "period_start": "2025-05-19T00:00:00+00:00",
+            "period_end": "2026-05-20T00:00:00+00:00",
+            "n_trades": 38,
+            "net_ret_pct": -2.7104728000000615,
+            "profit_factor": 0.8796237492727684,
+            "win_rate": 52.63157894736842,
+            "max_dd_pct": 13.887489160762579,
+        },
+        "status": "completed",
+        "completed_at": "2026-08-15T19:39:33.355874+00:00",
+    }
+    path = tmp_path / "legacy_populated.json"
+    path.write_text(json.dumps(legacy_json), encoding="utf-8")
+
+    loaded = load_validation_run(path)
+
+    assert loaded is not None
+    assert loaded.specification is None  # jamais reconstruite depuis des métriques peuplées
+    assert loaded.evidence.n_trades == 38
+    assert loaded.evidence.profit_factor == 0.8796237492727684
+    assert loaded.evidence.win_rate == 52.63157894736842
+    assert loaded.evidence.max_dd_pct == 13.887489160762579
+
+
+def test_load_validation_run_rejects_explicit_null_specification_as_incoherent(tmp_path):
+    """A (durcissement). `"specification": null` explicite, sur un validation_type enregistré
+    ("oos"), n'est PAS un legacy valide — `None` n'est une représentation honnête que d'une clé
+    TOTALEMENT ABSENTE (voir docstring du module). Un nouveau format qui porte `null` explicitement
+    est incohérent : jamais assimilé silencieusement au legacy réel."""
+    raw = {
+        "validation_run_id": "val_x", "research_run_id": "run_x", "split_plan_id": "plan_x",
+        "dataset_snapshot_id": _SNAPSHOT_ID, "validation_type": "oos",
+        "strategy_name": "NASDAQ Perfect Revolution V1.1", "strategy_params": {},
+        "specification": None,
+        "evidence": {
+            "period_start": "2025-05-19T00:00:00+00:00", "period_end": "2026-05-20T00:00:00+00:00",
+            "n_trades": 0, "net_ret_pct": 0.0, "profit_factor": None, "win_rate": None,
+            "max_dd_pct": None,
+        },
+        "status": "completed", "completed_at": "2026-08-23T08:27:48.557033+00:00",
+    }
+    path = tmp_path / "explicit_null_specification.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(IncoherentValidationRunError):
+        load_validation_run(path)
+
+
+def test_save_validation_run_refuses_to_persist_a_run_without_a_specification(tmp_path):
+    """C (durcissement). Un run legacy relu (`specification is None`) ne peut pas être
+    re-persisté tel quel — `specification=None` n'est une représentation valide qu'EN LECTURE
+    d'un ancien artefact, jamais un format de création valide. Le nouveau chemin ne doit jamais
+    être créé (échec avant toute écriture disque)."""
+    legacy_json = {
+        "validation_run_id": "val_x", "research_run_id": "run_x", "split_plan_id": "plan_x",
+        "dataset_snapshot_id": _SNAPSHOT_ID, "validation_type": "oos",
+        "strategy_name": "NASDAQ Perfect Revolution V1.1", "strategy_params": {},
+        "evidence": {
+            "period_start": "2025-05-19T00:00:00+00:00", "period_end": "2026-05-20T00:00:00+00:00",
+            "n_trades": 0, "net_ret_pct": 0.0, "profit_factor": None, "win_rate": None,
+            "max_dd_pct": None,
+        },
+        "status": "completed", "completed_at": "2026-08-23T08:27:48.557033+00:00",
+    }
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_text(json.dumps(legacy_json), encoding="utf-8")
+    loaded = load_validation_run(legacy_path)
+    assert loaded.specification is None  # précondition du test
+
+    new_path = tmp_path / "new_location.json"
+
+    with pytest.raises(ValueError):
+        save_validation_run(new_path, loaded)
+
+    assert not new_path.exists()  # aucune écriture, même partielle
+
+
+def test_load_validation_run_never_overwrites_or_rewrites_the_legacy_file(tmp_path):
+    """7. La lecture n'écrit jamais rien — un artefact historique n'est jamais réécrit par simple
+    chargement (round-trip de lecture seule : le fichier reste octet pour octet identique)."""
+    legacy_json = {
+        "validation_run_id": "val_x", "research_run_id": "run_x", "split_plan_id": "plan_x",
+        "dataset_snapshot_id": _SNAPSHOT_ID, "validation_type": "oos",
+        "strategy_name": "NASDAQ Perfect Revolution V1.1", "strategy_params": {},
+        "evidence": {
+            "period_start": "2025-05-19T00:00:00+00:00", "period_end": "2026-05-20T00:00:00+00:00",
+            "n_trades": 0, "net_ret_pct": 0.0, "profit_factor": None, "win_rate": None,
+            "max_dd_pct": None,
+        },
+        "status": "completed", "completed_at": "2026-08-23T08:27:48.557033+00:00",
+    }
+    path = tmp_path / "legacy.json"
+    original_bytes = json.dumps(legacy_json).encode("utf-8")
+    path.write_bytes(original_bytes)
+
+    load_validation_run(path)
+
+    assert path.read_bytes() == original_bytes
+
+
+def test_load_validation_run_raises_on_unrecognized_validation_type(tmp_path):
+    """Combinaison incohérente persistée : un validation_type non enregistré doit échouer
+    clairement, jamais être silencieusement traité comme absent/None (voir docstring du module)."""
+    raw = {
+        "validation_run_id": "val_x", "research_run_id": "run_x", "split_plan_id": "plan_x",
+        "dataset_snapshot_id": _SNAPSHOT_ID, "validation_type": "walk_forward",
+        "strategy_name": "NASDAQ Perfect Revolution V1.1", "strategy_params": {},
+        "specification": None,
+        "evidence": {
+            "period_start": "2025-05-19T00:00:00+00:00", "period_end": "2026-05-20T00:00:00+00:00",
+            "n_trades": 0, "net_ret_pct": 0.0, "profit_factor": None, "win_rate": None,
+            "max_dd_pct": None,
+        },
+        "status": "completed", "completed_at": "2026-08-23T08:27:48.557033+00:00",
+    }
+    path = tmp_path / "invalid_type.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(IncoherentValidationRunError):
+        load_validation_run(path)
+
+
+def test_load_validation_run_raises_on_specification_shape_mismatch(tmp_path):
+    """Une specification structurellement incompatible avec le type enregistré pour "oos" (champs
+    manquants/inattendus) doit échouer clairement plutôt que d'être silencieusement ignorée."""
+    raw = {
+        "validation_run_id": "val_x", "research_run_id": "run_x", "split_plan_id": "plan_x",
+        "dataset_snapshot_id": _SNAPSHOT_ID, "validation_type": "oos",
+        "strategy_name": "NASDAQ Perfect Revolution V1.1", "strategy_params": {},
+        "specification": {"unexpected_field": "value"},
+        "evidence": {
+            "period_start": "2025-05-19T00:00:00+00:00", "period_end": "2026-05-20T00:00:00+00:00",
+            "n_trades": 0, "net_ret_pct": 0.0, "profit_factor": None, "win_rate": None,
+            "max_dd_pct": None,
+        },
+        "status": "completed", "completed_at": "2026-08-23T08:27:48.557033+00:00",
+    }
+    path = tmp_path / "bad_spec.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(IncoherentValidationRunError):
+        load_validation_run(path)

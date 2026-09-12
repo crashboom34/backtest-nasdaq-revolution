@@ -908,3 +908,74 @@ Détail complet : `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-01`), `DOMAI
 - **Tests** : 756 passed (752 baseline + 4 nouveaux tests IG), 0 régression.
 - **Committé et poussé** — checkpoint `a1cde845f1e73c6443abbf3babfe7525112bbf8b` (`origin/master`),
   voir la revue de clôture pour la liste exacte des fichiers inclus dans ce commit.
+
+## 15. TRACK V — `AF-V-06 = DONE` (2026-09-12), socle `ValidationSpecification`/`ValidationEvidence` typé
+
+**Statut : `AF-V-06` DONE. `GATE V` reste NON PASSÉE** (exige `OOS`+`WalkForward`+`MonteCarlo`+
+`ParameterStability`, voir `MASTER_ROADMAP.md` §4 — toujours seul `OOS` existe, résultat toujours
+inconclusif ; `AF-V-06` ne produit **aucune** nouvelle preuve scientifique, seulement un socle de
+structuration). Détail complet : `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-06`),
+`docs/architecture/DOMAIN_MODEL.md` §7/§11 (harmonisés).
+
+- **Modèle retenu** (`validation_run.py`) : registre explicite `_VALIDATION_TYPES` (`validation_type
+  -> (classe specification, classe evidence)`) — pas un `ABC`/`Protocol` (un seul type concret,
+  `"oos"`, aujourd'hui ; une hiérarchie abstraite pour un cas unique aurait été de la
+  sur-ingénierie, même principe déjà retenu pour `ExecutionModel`). `ValidationSpecification`/
+  `ValidationEvidence` : alias `Union` extensibles, un membre par futur ticket
+  (`AF-V-02`→`AF-V-05`), sans jamais modifier `ValidationRun` elle-même.
+- **`"oos"` premier cas concret** : nouvelle `OosValidationSpecification` (2 champs
+  `holdout_start`/`holdout_end` — la fenêtre `FINAL_HOLDOUT` demandée/prévue, avant exécution) ;
+  `OosValidationEvidence` (existante depuis `AF-V-01`) **strictement inchangée** (ses 7 champs,
+  les métriques effectivement retournées par l'exécution) — la modifier aurait cassé la relecture
+  des deux artefacts réels déjà produits par `AF-V-01`
+  (`results/validations/*/validation_run.json`, jamais lus ni modifiés par ce ticket). Aucun
+  contrôle croisé `specification`/`evidence` imposé au socle commun : tautologique pour `"oos"`
+  aujourd'hui (mêmes bornes, même site d'appel dans `validation_oos.py`), potentiellement faux
+  pour un futur type — décision différée à un cas d'usage réel.
+- **Compatibilité legacy AF-V-01, durcie après revue adversariale** : `ValidationRun.specification`
+  est `Optional`, mais `None` n'est honnête que pour une clé `"specification"` **totalement
+  absente** du JSON — confirmé sur les deux artefacts réels d'`AF-V-01` — jamais reconstruite ni
+  devinée depuis l'evidence. Une revue adversariale dédiée a trouvé qu'une première version
+  confondait "clé absente" et "clé présente avec `null` explicite" (les deux passaient par
+  `dict.get(key)` avec `None` par défaut) — corrigé avec une sentinelle dédiée
+  (`_SPECIFICATION_KEY_ABSENT`) : une clé `"specification"` présente à `null` est désormais
+  rejetée comme incohérente (`IncoherentValidationRunError`), jamais assimilée au legacy réel.
+  `save_validation_run()` refuse symétriquement d'écrire un run dont `specification is None`
+  (avant toute écriture disque) — empêche qu'un enchaînement `load_validation_run()` (legacy)
+  puis `save_validation_run()` (nouveau chemin) ne produise silencieusement un fichier "moderne"
+  avec `specification: null` indiscernable d'un vrai historique.
+- **Cohérence stricte** : `build_validation_run()` rejette (`ValueError`, tôt et clair) tout
+  `validation_type` non enregistré ou toute `specification`/`evidence` d'un type Python incohérent
+  avec le registre (y compris intervertissement des deux) — jamais une combinaison incohérente
+  acceptée silencieusement.
+- **`validation_oos.py`** adapté pour produire aussi la `OosValidationSpecification` (mêmes bornes
+  `FINAL_HOLDOUT`, mêmes site d'appel que l'evidence) — signature publique inchangée, un seul
+  accès au holdout (inchangé), sémantique `HoldoutAccessEvent` inchangée. Aucun rerun réel IG,
+  aucun téléchargement, tests synthétiques uniquement.
+- **Dette assumée, explicitement documentée** : `ValidationRun`/`OosValidationSpecification`/
+  `OosValidationEvidence` n'ont aucun `__post_init__` — comme `ResearchRun`/`DatasetSplitPlan`/
+  `SplitBoundary`/`HoldoutAccessEvent` partout ailleurs dans ce dépôt, toute la validation vit dans
+  les fonctions `build_*()`. `build_validation_run()` reste le seul chemin sanctionné pour un
+  nouveau run cohérent — une construction directe de la dataclass reste techniquement possible,
+  cohérent avec le reste du dépôt, pas un défaut propre à `AF-V-06` (**dette ACCEPTABLE**). Le
+  registre `_VALIDATION_TYPES` et les alias `Union` restent deux points statiques à maintenir pour
+  un futur type, sans vérification runtime de l'alias (**dette MINOR**) — aucune reflection, aucune
+  metaclass, aucun plugin system ajoutés.
+- **Dette A (warmup/cold-start des indicateurs) et Dette B (`SplitBoundary [start,end)` vs filtrage
+  fermé réel `engine.py`) inchangées, toujours ouvertes** — `AF-V-06` ne les corrige pas,
+  `engine.py` non modifié. À traiter ou explicitement résoudre avant une exécution scientifique
+  sérieuse de `AF-V-02` (Walk-Forward).
+- **Revue adversariale + durcissement (2026-09-12)** : verdict initial B (validable avec dette
+  acceptable) sur 3 findings IMPORTANT (Cas `specification: null` non distingué du legacy ;
+  enchaînement load-legacy→save-ailleurs possible ; docstring surclaims la séparation
+  intention/observation pour `"oos"`) — les 3 corrigés avec TDD (tests écrits avant le code),
+  aucune régression.
+- **Tests** : 776 passed (773 baseline + 3 nouveaux tests de durcissement), 0 régression.
+  `py_compile` propre.
+- **`AF-V-07` (`ValidationPolicyVersion`, fondation)** : mécaniquement débloqué par
+  `AF-V-06 = DONE`, mais **non démarré** — aucune décision de le lancer n'a été prise ; les
+  frontières de "Champion" restent `OPEN QUESTION` (`DOMAIN_MODEL.md` §13), non résolues par
+  `AF-V-06`.
+- **`AF-V-02`→`AF-V-05`** : restent **non commencés**. Leur précédence architecturale recommandée
+  (`AF-V-06`) est désormais satisfaite, mais aucune décision de les lancer n'a été prise par cette
+  seule clôture documentaire.

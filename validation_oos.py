@@ -47,6 +47,12 @@ directement les bornes `[start, end)` du `DatasetSplitPlan.FINAL_HOLDOUT` réel 
 à `engine.run_backtest(start_date=..., end_date=...)` exactement comme le fait déjà
 `optimizer.py::_run_single()` pour la période de test existante (même mécanisme de filtrage
 interne déjà établi dans `engine.py`, aucune réinvention).
+
+**AF-V-06 (2026-09-12)** : construit désormais aussi une `OosValidationSpecification` (les bornes
+`FINAL_HOLDOUT` ciblées, avant exécution) en plus de l'`OosValidationEvidence` existante (ce qui a
+été observé) — voir `validation_run.py` pour le contrat typé complet. Aucun changement de
+signature, de sémantique `HoldoutAccessEvent`, ni du nombre d'accès au holdout (toujours
+exactement un).
 """
 
 from __future__ import annotations
@@ -54,7 +60,12 @@ from __future__ import annotations
 from typing import Callable, Tuple
 
 from dataset_split import DatasetSplitPlan, HoldoutAccessEvent, build_holdout_access_event
-from validation_run import ValidationRun, build_oos_validation_evidence, build_validation_run
+from validation_run import (
+    ValidationRun,
+    build_oos_validation_evidence,
+    build_oos_validation_specification,
+    build_validation_run,
+)
 
 
 def run_oos_validation(
@@ -83,6 +94,11 @@ def run_oos_validation(
         df, strategy, params, start_date=holdout.start, end_date=holdout.end,
     )
 
+    specification = build_oos_validation_specification(
+        holdout_start=holdout.start,
+        holdout_end=holdout.end,
+    )
+
     evidence = build_oos_validation_evidence(
         period_start=holdout.start,
         period_end=holdout.end,
@@ -100,6 +116,7 @@ def run_oos_validation(
         dataset_snapshot_id=split_plan.dataset_snapshot_id,
         strategy_name=strategy_name,
         strategy_params=dict(params),
+        specification=specification,
         evidence=evidence,
     )
 

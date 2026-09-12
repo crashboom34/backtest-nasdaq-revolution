@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataset_split import build_dataset_split_plan, build_split_boundary
 from validation_oos import run_oos_validation
+from validation_run import OosValidationSpecification
 
 _SNAPSHOT_ID = "local_csv:sha256:" + "ab" * 32
 
@@ -219,6 +220,39 @@ def test_run_oos_validation_uses_the_strategy_params_exactly_as_given():
 
     assert fake_engine.calls[0]["params"] == fixed_params
     assert validation_run.strategy_params == fixed_params
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-06 — run_oos_validation() produit le nouveau contrat typé (specification + evidence)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_run_oos_validation_produces_a_typed_oos_specification_matching_the_final_holdout():
+    """11. Avec un faux moteur, run_oos_validation() doit désormais construire une
+    OosValidationSpecification typée dont les bornes correspondent exactement au FINAL_HOLDOUT du
+    plan — jamais un dict, jamais une valeur devinée."""
+    split_plan = _split_plan()
+    (validation_run, event), fake_engine = _run_validation(
+        {"n_trades": 3, "net_ret_pct": 2.0, "profit_factor": 1.5, "win_rate": 66.7, "max_dd_pct": 1.0},
+        split_plan=split_plan,
+    )
+
+    assert isinstance(validation_run.specification, OosValidationSpecification)
+    assert validation_run.specification.holdout_start == split_plan.final_holdout.start
+    assert validation_run.specification.holdout_end == split_plan.final_holdout.end
+
+
+def test_run_oos_validation_produces_a_typed_evidence_still():
+    """L'evidence reste, comme avant AF-V-06, un type explicite distinct de la specification."""
+    from validation_run import OosValidationEvidence
+
+    (validation_run, event), fake_engine = _run_validation(
+        {"n_trades": 0, "net_ret_pct": 0.0},
+    )
+
+    assert isinstance(validation_run.evidence, OosValidationEvidence)
+    assert validation_run.evidence.n_trades == 0
+    assert validation_run.evidence.profit_factor is None
 
 
 def test_validation_oos_module_does_not_import_engine_directly():

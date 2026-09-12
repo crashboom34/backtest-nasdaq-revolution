@@ -610,11 +610,11 @@ dans l'ADR-0017, à traiter par un futur ticket dédié à `engine.py` si jugé 
 ### AF-V-02 — Walk-Forward
 
 **Status** : **READY** (`AF-V-01` terminé — débloqué mécaniquement, **non commencé**, `GATE V`
-toujours ouverte). **Précédence architecturale recommandée, pas un blocage technique dur** :
-`AF-V-06` (socle `ValidationSpecification`/`ValidationEvidence` typé) devrait être traité avant ce
-ticket pour éviter de retyper une `ValidationEvidence` déjà produite en format `dict` — c'est
-`AF-V-06` lui-même qui déclare cette recommandation (voir son entrée ci-dessous), ce n'est pas une
-dépendance inventée ici. **Effort** : M. **Skills recommended** : `tdd`.
+toujours ouverte). **Précédence architecturale satisfaite (2026-09-12)** : `AF-V-06` (socle
+`ValidationSpecification`/`ValidationEvidence` typé) est désormais **DONE** — ce ticket doit
+ajouter sa propre paire `WalkForwardSpecification`/`WalkForwardEvidence` au registre
+`_VALIDATION_TYPES` existant (`validation_run.py`), jamais retyper une évidence déjà produite en
+`dict`. **Effort** : M. **Skills recommended** : `tdd`.
 
 **What to build** : moteur walk-forward sur `CURRENT REFERENCE ENGINE`, `ValidationEvidence`
 dédiée. **Zones consommées : non tranchées ici, décision de conception propre à ce ticket**
@@ -651,19 +651,19 @@ des deux prouvée comme ayant affecté `AF-V-01`)** :
 ### AF-V-03 — Monte-Carlo
 
 **Status** : **READY** (`AF-V-01` terminé — débloqué mécaniquement, **non commencé**). Précédence
-recommandée (pas un blocage dur) : `AF-V-06`, même motif que `AF-V-02` ci-dessus. **Effort** : M.
-**Skills recommended** : `tdd`.
+architecturale satisfaite (`AF-V-06 = DONE`, 2026-09-12), même motif que `AF-V-02` ci-dessus.
+**Effort** : M. **Skills recommended** : `tdd`.
 
 ### AF-V-04 — Parameter Stability
 
 **Status** : **READY** (`AF-V-01` terminé — débloqué mécaniquement, **non commencé**). Précédence
-recommandée (pas un blocage dur) : `AF-V-06`, même motif que `AF-V-02` ci-dessus. **Effort** : M.
-**Skills recommended** : `tdd`.
+architecturale satisfaite (`AF-V-06 = DONE`, 2026-09-12), même motif que `AF-V-02` ci-dessus.
+**Effort** : M. **Skills recommended** : `tdd`.
 
 ### AF-V-05 — Stress / Noise
 
 **Status** : **READY** (`AF-V-01` terminé — débloqué mécaniquement, **non commencé**). Précédence
-recommandée (pas un blocage dur) : `AF-V-06`, même motif que `AF-V-02` ci-dessus. **Rappel** : ce
+architecturale satisfaite (`AF-V-06 = DONE`, 2026-09-12), même motif que `AF-V-02` ci-dessus. **Rappel** : ce
 type de validation n'est **pas** parmi les quatre exigés par `GATE V` (`OOS`+`WalkForward`+
 `MonteCarlo`+`ParameterStability`, voir `MASTER_ROADMAP.md` §4) — priorité plus faible que
 `AF-V-02`→`AF-V-04`. **Effort** : M. **Uncertainty** : medium (protocole exact encore à affiner).
@@ -671,16 +671,63 @@ type de validation n'est **pas** parmi les quatre exigés par `GATE V` (`OOS`+`W
 
 ### AF-V-06 — `ValidationSpecification` / `ValidationEvidence` typés par `validation_type`
 
-**Status** : **READY** (`AF-V-01` terminé — débloqué mécaniquement, **non commencé**).
-**Séquencement architectural confirmé (réconciliation documentaire post-AF-V-01, 2026-09-12)** :
-ce ticket est le socle commun explicitement désigné par `AF-V-02`→`AF-V-05` (chacun produit une
-`ValidationEvidence` qui a besoin de cette structure typée) — le traiter en premier évite de
-retyper une évidence déjà produite en format `dict` par un ticket antérieur. **Ce n'est pas une
-dépendance technique bloquante déclarée sur `AF-V-02`→`AF-V-05`** (chacun reste exécutable sans
-`AF-V-06`), seulement un ordre recommandé par la source elle-même pour éviter du retravail.
+**Status** : **DONE (2026-09-12)** — socle typé implémenté, revue adversariale effectuée puis
+durcissement des findings appliqué, tests verts. **Séquencement architectural confirmé
+(réconciliation documentaire post-AF-V-01, 2026-09-12)** : ce ticket était le socle commun
+explicitement désigné par `AF-V-02`→`AF-V-05` (chacun produit une `ValidationEvidence` qui a
+besoin de cette structure typée) — le traiter en premier évite de retyper une évidence déjà
+produite en format `dict` par un ticket antérieur. **Ce n'était pas une dépendance technique
+bloquante déclarée sur `AF-V-02`→`AF-V-05`** (chacun restait exécutable sans `AF-V-06`), seulement
+un ordre recommandé par la source elle-même pour éviter du retravail — désormais satisfait.
 
 **What to build** : structure typée par type de validation (pas un dict opaque) — correction déjà
 actée par `AF-DOM-01-QC`. Sert de socle commun à `AF-V-02`→`AF-V-05`.
+
+**Livré réellement (`validation_run.py`)** :
+- Registre explicite `_VALIDATION_TYPES : validation_type -> (classe specification, classe
+  evidence)` — pas un `ABC`/`Protocol` (un seul type concret aujourd'hui, `"oos"` ; jugé
+  sur-ingénierie pour un cas unique, même principe qu'`ExecutionModel`, `DOMAIN_MODEL.md` §10).
+  `ValidationSpecification`/`ValidationEvidence` : alias `Union` extensibles (un membre par futur
+  ticket, jamais de modification de `ValidationRun` elle-même).
+- **`OosValidationSpecification`** (nouveau, 2 champs `holdout_start`/`holdout_end` — la fenêtre
+  demandée/prévue) distincte d'**`OosValidationEvidence`** (existante depuis `AF-V-01`, **7 champs
+  strictement inchangés**, les métriques effectivement retournées par l'exécution). Aucun contrôle
+  croisé specification/evidence imposé au socle commun (délibéré — tautologique pour `"oos"`
+  aujourd'hui, éviterait de sur-contraindre un futur type où l'évidence refléterait une couverture
+  réelle partielle).
+- **Cohérence stricte** : `build_validation_run()` rejette (`ValueError`) tout `validation_type`
+  non enregistré ou toute `specification`/`evidence` d'un type Python incohérent avec le registre
+  (y compris intervertissement des deux) — échec tôt et clair, jamais silencieux.
+- **Rétrocompatibilité AF-V-01, durcie après revue adversariale** : `ValidationRun.specification`
+  est `Optional`, mais `None` n'est honnête que pour une clé `"specification"` **totalement
+  absente** du JSON (forme réelle confirmée des deux `ValidationRun` déjà produites par `AF-V-01`,
+  jamais lues/modifiées par ce ticket) — jamais reconstruite ni devinée. Une clé présente avec la
+  valeur `null` explicite est désormais rejetée comme incohérente (`IncoherentValidationRunError`),
+  distinguée mécaniquement de l'absence totale via une sentinelle dédiée (pas
+  `dict.get(key)`/`None` par défaut, qui confondrait les deux). `save_validation_run()` refuse
+  symétriquement d'écrire un run dont `specification is None`, avant toute écriture disque —
+  empêche qu'un enchaînement lecture-legacy puis écriture-ailleurs ne produise silencieusement un
+  fichier "moderne" avec `specification: null` indiscernable d'un vrai historique.
+- **`validation_oos.py`** adapté pour produire aussi la `OosValidationSpecification` (mêmes bornes
+  `FINAL_HOLDOUT` que l'evidence, mêmes site d'appel) — signature publique, nombre d'accès au
+  holdout (exactement un), et sémantique `HoldoutAccessEvent` strictement inchangés.
+- **Dette assumée, explicitement documentée (pas corrigée)** : `ValidationRun`/`OosValidationSpecification`/
+  `OosValidationEvidence` n'ont aucun `__post_init__` — comme `ResearchRun`/`DatasetSplitPlan`/
+  `SplitBoundary`/`HoldoutAccessEvent` partout ailleurs dans ce dépôt, toute la validation vit dans
+  les fonctions `build_*()`. `build_validation_run()` reste le seul chemin sanctionné pour un
+  nouveau run cohérent ; une construction directe de la dataclass reste techniquement possible,
+  exactement comme pour les autres dataclasses de ce dépôt (dette **ACCEPTABLE**, pas un
+  `__post_init__` ajouté par principe pour ce seul module). Le registre `_VALIDATION_TYPES` et les
+  alias `Union` restent deux points statiques à maintenir pour un futur type (dette **MINOR**,
+  aucune machinerie de reflection/plugin ajoutée).
+- **Dettes A (warmup/cold-start) et B (`SplitBoundary [start,end)` vs filtre fermé `engine.py`)
+  inchangées, toujours ouvertes** — `AF-V-06` ne les corrige pas, `engine.py` non modifié.
+
+**Tests** : 776/776 passed (773 baseline + 3 tests de durcissement), 0 régression. `py_compile`
+propre.
+
+**`GATE V` reste NON PASSÉE** — `AF-V-06` pose un socle de structuration, ce n'est ni une nouvelle
+`ValidationEvidence` scientifique ni une preuve de robustesse.
 
 **Dependencies** : `AF-V-01`.
 
@@ -688,9 +735,11 @@ actée par `AF-DOM-01-QC`. Sert de socle commun à `AF-V-02`→`AF-V-05`.
 
 ### AF-V-07 — `ValidationPolicyVersion` (fondation)
 
-**Status** : BLOCKED (`AF-V-06`) — inchangé, `AF-V-06` n'est que `READY`, pas encore `DONE`.
-**Effort** : S. **Uncertainty** : medium (frontières de "Champion" encore `OPEN QUESTION`, voir
-`DOMAIN_MODEL.md` §13). **Skills recommended** : `domain-modeling`.
+**Status** : **READY** (`AF-V-06 = DONE`, 2026-09-12 — débloqué mécaniquement, **non commencé**).
+Ne pas présumer que ce soit la priorité automatique du track : les frontières exactes de
+"Champion" restent `OPEN QUESTION` (`DOMAIN_MODEL.md` §13), non résolues par `AF-V-06` — une
+décision produit explicite reste nécessaire avant de le démarrer, comme pour tout ticket de ce
+track. **Effort** : S. **Uncertainty** : medium. **Skills recommended** : `domain-modeling`.
 
 ---
 
@@ -937,26 +986,30 @@ sur un `DatasetSplitPlan` IG démo (fresh external final holdout, distincte de l
 evidence MT5) : `n_trades=0`, performance-inconclusive, `GATE V` toujours ouverte — voir l'entrée
 du ticket ci-dessus et `DOMAIN_MODEL.md` §12 pour le détail complet.
 
-**READY NOW** (débloqués — voir note de précédence recommandée `AF-V-06` ci-dessous, distincte
-d'un blocage technique ; réconciliation documentaire post-AF-V-01, 2026-09-12) :
-- `AF-V-06` — socle `ValidationSpecification`/`ValidationEvidence` typé, débloqué par `AF-V-01`.
-  Non commencé. **Précédence architecturale recommandée sur `AF-V-02`→`AF-V-05`** — voir le
-  ticket `AF-V-06` (§5) : ce n'est pas une dépendance technique dure, seulement un ordre qui évite
-  du retypage a posteriori.
-- `AF-V-02` — Walk-Forward, débloqué par `AF-V-01`. Non commencé. Deux préconditions scientifiques
-  distinctes à examiner avant exécution (warmup/cold-start ; sémantique `SplitBoundary`) —
-  documentées dans le ticket (§5), non corrigées.
-- `AF-V-03`/`AF-V-04`/`AF-V-05` — également débloqués par `AF-V-01` (dépendance déclarée
-  satisfaite, corrigé depuis l'ancien statut `BLOCKED` affiché ici), non commencés — voir §5 pour
-  le détail et la même précédence recommandée `AF-V-06`.
+**AF-V-06 = DONE (2026-09-12)** — socle `ValidationSpecification`/`ValidationEvidence` typé par
+`validation_type` implémenté (`validation_run.py`), `"oos"` premier et seul cas concret,
+rétrocompatibilité stricte avec les deux `ValidationRun` réelles d'`AF-V-01` (durcie après revue
+adversariale : clé `specification` absente = legacy, `null` explicite = incohérence rejetée,
+legacy non re-persistable), 776/776 tests. Voir l'entrée du ticket ci-dessus pour le détail
+complet. **`GATE V` reste NON PASSÉE** — ce n'est pas une nouvelle preuve scientifique, seulement
+un socle de structuration.
+
+**READY NOW** (débloqués, précédence `AF-V-06` désormais satisfaite pour tout le track `V`) :
+- `AF-V-02` — Walk-Forward, débloqué par `AF-V-01`, précédence `AF-V-06` satisfaite. Non commencé.
+  Deux préconditions scientifiques distinctes à examiner avant exécution (warmup/cold-start ;
+  sémantique `SplitBoundary`) — documentées dans le ticket (§5), non corrigées.
+- `AF-V-03`/`AF-V-04`/`AF-V-05` — également débloqués par `AF-V-01`, précédence `AF-V-06`
+  satisfaite, non commencés — voir §5 pour le détail.
+- `AF-V-07` — `ValidationPolicyVersion` (fondation), débloqué par `AF-V-06 = DONE`. Non commencé.
+  Frontières de "Champion" toujours `OPEN QUESTION` (`DOMAIN_MODEL.md` §13) — pas résolues par
+  `AF-V-06`.
 - `AF-F-01` — Knowledge Base foundation. Non commencé.
 - `AF-EPREC-01` — Precision Engine Contract (déjà `READY` depuis le début, indépendant de
   `AF-DATA` — à vérifier s'il a déjà été traité séparément avant de le redémarrer).
 
-Cet ordre reste dérivé directement des dépendances déclarées et des recommandations déjà présentes
-dans les tickets sources — `AF-V-06`/`AF-V-02`→`AF-V-05`/`AF-F-01`/`AF-EPREC-01` ne forment *pas*
-un unique chemin séquentiel imposé par le graphe, à l'exception de la précédence `AF-V-06` →
-`AF-V-02`→`AF-V-05` explicitement recommandée par la source elle-même (ticket `AF-V-06`).
+Cet ordre reste dérivé directement des dépendances déclarées — `AF-V-02`→`AF-V-05`/`AF-V-07`/
+`AF-F-01`/`AF-EPREC-01` ne forment *pas* un unique chemin séquentiel imposé par le graphe, aucun
+gagnant unique n'est désigné entre eux par cette mise à jour documentaire.
 
 ---
 
@@ -979,20 +1032,24 @@ satisfaite) — ce n'était pas encore reflété ici. `AF-V-06` porte en plus un
 architecturale **recommandée par le ticket source lui-même** ("devrait en réalité précéder
 `AF-V-02`→`AF-V-05`") — rendue explicite dans ce document, pas inventée.
 
-**État actuel** : au sein du track `V`, `AF-V-06` est la sous-priorité recommandée par les sources
-elles-mêmes avant `AF-V-02`→`AF-V-05` (socle typé, évite un retypage a posteriori de
-`ValidationEvidence`) — **précédence architecturale conseillée, pas une dépendance technique
-dure**. Entre tracks, `AF-V-06` et `AF-F-01` restent `READY` sans dépendance croisée entre eux —
-aucun gagnant unique n'est imposé par le graphe à ce niveau. `GATE V` exige toujours
-`OOS`+`WalkForward`+`MonteCarlo`+`ParameterStability`, et le résultat `OOS` obtenu (`n_trades=0`)
-reste performance-inconclusive — une décision produit explicite reste nécessaire avant de lancer
-tout travail d'**exécution** de validation (`AF-V-02`→`AF-V-05`), **pas** avant `AF-V-06` lui-même
-(travail de structuration typée, pas une nouvelle exécution scientifique). `AF-F-01` reste un choix
-tout aussi valide selon la priorité produit du moment.
+**Historique (avant 2026-09-12, clôture AF-V-06)** : cette section recommandait `AF-V-06` en
+priorité au sein du track `V`, comme précédence architecturale conseillée sur `AF-V-02`→`AF-V-05`.
+C'est désormais fait — voir §11, `AF-V-06 = DONE`. `AF-V-07` est mécaniquement débloqué par cette
+clôture (voir §5), mais n'est pas présenté comme un gagnant automatique pour autant : les
+frontières de "Champion" restent `OPEN QUESTION`.
 
-**Important** : cette recommandation n'autorise rien de nouveau — `AF-V-06` (ou tout autre ticket
-de ce track) doit être explicitement autorisé par l'utilisateur avant tout travail, comme chaque
-ticket précédent.
+**État actuel** : `AF-V-02`→`AF-V-05`, `AF-V-07`, `AF-F-01` et `AF-EPREC-01` sont tous `READY`,
+sans dépendance croisée entre eux au niveau du graphe — aucun gagnant unique n'est imposé.
+`GATE V` exige toujours `OOS`+`WalkForward`+`MonteCarlo`+`ParameterStability`, et le résultat `OOS`
+obtenu (`n_trades=0`) reste performance-inconclusive — une décision produit explicite reste
+nécessaire avant de lancer tout travail d'**exécution** de validation (`AF-V-02`→`AF-V-05`).
+`AF-V-07` (fondation `ValidationPolicyVersion`) ne résout pas non plus, à lui seul, la question
+`OPEN` des frontières de "Champion" — il ne fait que fournir le mécanisme de versionnage des
+règles, une fois ces frontières tranchées séparément. `AF-F-01`/`AF-EPREC-01` restent des choix
+tout aussi valides selon la priorité produit du moment.
+
+**Important** : cette recommandation n'autorise rien de nouveau — chaque ticket de ce track doit
+être explicitement autorisé par l'utilisateur avant tout travail, comme chaque ticket précédent.
 
 ---
 

@@ -366,7 +366,7 @@ resterait un rapprochement ad hoc de hashes de scope, pas une intention explicit
 | Concept | Statut | Invariant propre | Relation à ResearchRun |
 |---|---|---|---|
 | **BacktestJob / OptimizationJob** | EXISTING / IMPLEMENTED, **inchangés** | "Un backtest/une campagne d'optimisation s'est exécuté(e), a produit trades/equity/stats" | Un `ResearchRun` en mode Discovery peut déclencher **de nombreux** `BacktestJob`/`OptimizationJob` internes (un par `CandidateStrategy` évalué) — ce ne sont pas des synonymes, ce sont des unités d'exécution réutilisées *à l'intérieur* d'un `ResearchRun` |
-| **ValidationRun** | PROPOSED | "Une méthode de validation précise a été appliquée à un candidat/Champion et a produit un verdict/intervalle de confiance" — invariant **différent** d'un backtest simple | Rattaché à un `CandidateStrategy` ou `Champion`, pas nécessairement à un `ResearchRun` (une validation peut être relancée indépendamment) |
+| **ValidationRun** | **PARTIAL — IMPLEMENTED pour `validation_type="oos"`** (AF-V-01 réel, AF-V-06 socle typé, `validation_run.py`) ; les autres `validation_type` (`walk_forward`/`monte_carlo`/`parameter_stability`/`stress_test`) restent PROPOSED | "Une méthode de validation précise a été appliquée à un candidat/Champion et a produit un verdict/intervalle de confiance" — invariant **différent** d'un backtest simple | Rattaché à un `CandidateStrategy` ou `Champion`, pas nécessairement à un `ResearchRun` (une validation peut être relancée indépendamment) |
 | **RobustnessTest** | **Terme à ne PAS garder comme entité séparée** — clarification `domain-modeling` : traité comme un **type** de `ValidationRun` (`validation_type = walk_forward \| monte_carlo \| parameter_stability \| stress_test \| ...`), pas une entité distincte, pour éviter la prolifération de synonymes explicitement mise en garde par l'utilisateur | — | — |
 
 ---
@@ -435,7 +435,7 @@ pass de convergence, non re-décidé ici).
 
 ---
 
-## 11. Validation scientifique (PROPOSED, architecture déjà préparée ailleurs)
+## 11. Validation scientifique (PARTIAL — socle typé IMPLEMENTED, variantes PROPOSED)
 
 *(Section préservée — voir `TEST_AND_VALIDATION_ARCHITECTURE.md` pour le détail complet, ce
 document ne fait qu'aligner le vocabulaire de domaine.)*
@@ -443,7 +443,7 @@ document ne fait qu'aligner le vocabulaire de domaine.)*
 | Concept | Statut | Relation |
 |---|---|---|
 | **ValidationCampaign** | PROPOSED | Regroupe les `ValidationRun` (walk-forward, Monte-Carlo, etc.) pour un `CandidateStrategy` donné |
-| **ValidationRun** | PROPOSED (voir §7) | Une exécution précise d'un type de validation |
+| **ValidationRun** | **PARTIAL — IMPLEMENTED pour `"oos"`** (voir §7) | Une exécution précise d'un type de validation |
 | **ParameterStability** | PROPOSED | Type de `ValidationRun` — vérifie qu'un résultat n'est pas un pic isolé |
 | **StressTest** | PROPOSED | Type de `ValidationRun` — perturbation spread/slippage/délai/gaps |
 
@@ -456,6 +456,21 @@ simulations). Chaque `ValidationRun` porte donc une **`ValidationSpecification` 
 (`WalkForwardSpecification`/`WalkForwardEvidence`, `MonteCarloSpecification`/`MonteCarloEvidence`,
 etc.) n'est **pas détaillée dans cette mission** — seule l'exigence de typage par `validation_type`
 est actée ici, pas les champs précis de chaque variante.
+
+**AF-V-06 (2026-09-12) — socle réellement implémenté** : cette exigence de typage n'est plus
+seulement actée en principe, elle est codée (`validation_run.py`) : un registre explicite
+`validation_type -> (classe specification, classe evidence)` (`_VALIDATION_TYPES`), avec `"oos"`
+comme premier et seul cas concret (`OosValidationSpecification`/`OosValidationEvidence`, cette
+dernière déjà réelle depuis `AF-V-01`). `ValidationSpecification`/`ValidationEvidence` sont des
+alias `Union` extensibles, pas une hiérarchie `ABC`/`Protocol` — jugé sur-ingénierie pour un seul
+type concret (même principe que `ExecutionModel`, §10). Rétrocompatibilité stricte avec les deux
+`ValidationRun` réelles produites par `AF-V-01` (jamais de clé `specification` avant `AF-V-06`) :
+`specification=None` n'est honnête qu'en lecture d'une clé totalement absente, jamais d'une valeur
+`null` explicite (incohérence rejetée), et n'est jamais re-persistable. **Les formes précises de
+`WalkForwardSpecification`/`MonteCarloSpecification`/`ParameterStabilitySpecification`/
+`StressSpecification` (et leurs `Evidence`) restent PROPOSED, non codées** — chaque futur ticket
+(`AF-V-02`→`AF-V-05`) ajoute sa propre paire de classes et une entrée au registre, sans modifier
+`ValidationRun` elle-même.
 
 ---
 
