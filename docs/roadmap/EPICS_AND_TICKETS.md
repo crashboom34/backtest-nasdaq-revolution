@@ -616,24 +616,37 @@ ticket pour éviter de retyper une `ValidationEvidence` déjà produite en forma
 `AF-V-06` lui-même qui déclare cette recommandation (voir son entrée ci-dessous), ce n'est pas une
 dépendance inventée ici. **Effort** : M. **Skills recommended** : `tdd`.
 
-**What to build** : moteur walk-forward sur `CURRENT REFERENCE ENGINE`, `ValidationEvidence` dédiée.
+**What to build** : moteur walk-forward sur `CURRENT REFERENCE ENGINE`, `ValidationEvidence`
+dédiée. **Zones consommées : non tranchées ici, décision de conception propre à ce ticket**
+(correction 2026-09-12 — une version antérieure de cette entrée présumait à tort une exécution de
+`TRAIN`/`FINAL_HOLDOUT`) : `TRAIN` reste la zone de recherche/ajustement selon le protocole
+retenu ; les fenêtres out-of-sample répétées (folds) proviendront de `VALIDATION` et/ou
+`DISCOVERY_OOS`, conformément à `DOMAIN_MODEL.md` §12 — le choix précis entre les deux, ou leur
+usage combiné, appartient à la conception réelle d'`AF-V-02`, pas à cette réconciliation
+documentaire. **`FINAL_HOLDOUT` garde son statut distinct de preuve terminale contrôlée** : son
+accès reste exclusivement audité via `HoldoutAccessEvent` (même mécanisme que pour `AF-V-01`), et
+il ne doit **jamais** être implicitement réutilisé comme fold ordinaire à travers un futur
+Walk-Forward — toute évaluation qui le consulterait resterait un événement d'accès distinct et
+délibéré, pas un mécanisme interne au protocole.
 
 **Préconditions scientifiques à examiner avant exécution (réconciliation documentaire post-AF-V-01,
-2026-09-12 — documentées séparément, non corrigées par ce ticket, aucune des deux prouvée comme
-ayant affecté `AF-V-01`)** :
+2026-09-12, corrigée le 2026-09-12 — documentées séparément, non corrigées par ce ticket, aucune
+des deux prouvée comme ayant affecté `AF-V-01`)** :
 - **Dette A — warmup/cold-start des indicateurs** : `engine.run_backtest()` filtre la fenêtre
   avant `strategy.prepare()` (`engine.py:87-98`) — les indicateurs (EMA/ATR) ne voient jamais les
   bougies qui précèdent la fenêtre exécutée. Documenté dans `AI_HANDOFF.md` §14 et
   `docs/adr/0017-*.md` ("Note de clôture").
-- **Dette B — sémantique des frontières `SplitBoundary`** : `SplitBoundary` déclare `[start, end)`
-  (fin exclue), mais `engine.run_backtest(start_date=, end_date=)` filtre en réalité sur un
-  intervalle **fermé** des deux côtés (`time_paris >= start_date` **et** `time_paris <= end_date`,
-  jamais `< end_date`) — une bougie exactement sur une frontière partagée entre deux zones
-  adjacentes (`a.end == b.start`) serait incluse dans les deux. Documenté dans le docstring de
-  `SplitBoundary` (`dataset_split.py`). **Dette distincte de la Dette A** — ce ticket est le
-  premier à exécuter deux zones adjacentes du même plan (`TRAIN`/`FINAL_HOLDOUT`), donc le premier
-  où cette dette devient pertinente en pratique (elle ne l'était pas pour `AF-V-01`, qui n'a
-  exécuté que `FINAL_HOLDOUT` seul — vérifié : aucune bougie réelle sur la frontière partagée).
+- **Dette B — sémantique des frontières `SplitBoundary`, générique** : `SplitBoundary` déclare
+  `[start, end)` (fin exclue), mais `engine.run_backtest(start_date=, end_date=)` filtre en
+  réalité sur un intervalle **fermé** des deux côtés (`time_paris >= start_date` **et**
+  `time_paris <= end_date`, jamais `< end_date`) — toute exécution de deux fenêtres temporelles
+  adjacentes peut donc provoquer une double inclusion d'une barre située exactement à la frontière
+  partagée (`a.end == b.start`). Documenté dans le docstring de `SplitBoundary`
+  (`dataset_split.py`). **Ne concerne pas spécifiquement `TRAIN`/`FINAL_HOLDOUT`** — c'est une
+  propriété générique de toute paire de fenêtres adjacentes qu'un futur protocole choisirait
+  d'exécuter (zones réelles non tranchées ici, voir ci-dessus). Sans impact vérifié sur `AF-V-01`
+  (une seule zone exécutée, aucune bougie réelle sur la frontière `2025-05-19T00:00:00+00:00`).
+  **Dette distincte de la Dette A.**
 
 ### AF-V-03 — Monte-Carlo
 

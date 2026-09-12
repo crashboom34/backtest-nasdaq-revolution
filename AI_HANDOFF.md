@@ -878,16 +878,21 @@ Détail complet : `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-01`), `DOMAI
     l'optimiseur), documenté dans l'ADR-0017 pour toute lecture future de cette `ValidationRun`.
     Non prouvé comme ayant réellement affecté le résultat `n_trades=0` (aucune instrumentation du
     run n'a été autorisée pour trancher).
-  - **Dette B — sémantique des frontières `SplitBoundary`** : `SplitBoundary` déclare `[start,
-    end)` (fin exclue), mais `engine.run_backtest(start_date=, end_date=)` filtre en réalité sur un
-    intervalle **fermé** des deux côtés (`time_paris >= start_date` **et** `time_paris <=
-    end_date`, jamais `< end_date`) — documenté dans le docstring de `SplitBoundary`
-    (`dataset_split.py`). **Sans impact vérifié sur `AF-V-01`** : `TRAIN` n'a jamais été exécuté
-    dans ce ticket (seul `FINAL_HOLDOUT` l'a été) et aucune bougie de `nasdaq_3m.csv` ne tombe
-    exactement sur la frontière partagée `2025-05-19T00:00:00+00:00` (vérifié directement dans le
-    module). **Dette distincte de la Dette A** — elle ne devient pertinente que pour un ticket
-    exécutant deux zones adjacentes du même plan (ex. `AF-V-02` Walk-Forward comparant
-    `TRAIN`/`FINAL_HOLDOUT`), voir `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-02`).
+  - **Dette B — sémantique des frontières `SplitBoundary`, générique** : `SplitBoundary` déclare
+    `[start, end)` (fin exclue), mais `engine.run_backtest(start_date=, end_date=)` filtre en
+    réalité sur un intervalle **fermé** des deux côtés (`time_paris >= start_date` **et**
+    `time_paris <= end_date`, jamais `< end_date`) — toute exécution de deux fenêtres temporelles
+    adjacentes peut provoquer une double inclusion d'une barre située exactement à la frontière
+    partagée. Documenté dans le docstring de `SplitBoundary` (`dataset_split.py`). **Sans impact
+    vérifié sur `AF-V-01`** : une seule zone (`FINAL_HOLDOUT`) a été exécutée dans ce ticket, et
+    aucune bougie de `nasdaq_3m.csv` ne tombe exactement sur la frontière `2025-05-19T00:00:00+00:00`
+    (vérifié directement dans le module). **Dette distincte de la Dette A** — elle concerne toute
+    paire de fenêtres adjacentes qu'un futur protocole choisirait d'exécuter, pas une paire de
+    zones précise : le choix exact des zones consommées par un futur Walk-Forward (`AF-V-02`)
+    reste une décision de conception non tranchée ici (voir `docs/roadmap/EPICS_AND_TICKETS.md`,
+    ticket `AF-V-02`) — `FINAL_HOLDOUT` en particulier garde son statut de preuve terminale
+    contrôlée, auditée via `HoldoutAccessEvent`, jamais implicitement réutilisée comme fold
+    ordinaire d'un Walk-Forward.
 - **Preuve FRESH, distincte de la retrospective OOS evidence (§13/`GATE DATA`)** : cette
   `ValidationRun` IG n'a aucune exposition antérieure connue, contrairement à l'evidence MT5
   (`GATE DATA`, backtest complet antérieur sur `nasdaq_3m.csv`, voir `DOMAIN_MODEL.md` §12). Ne
