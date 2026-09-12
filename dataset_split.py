@@ -132,12 +132,20 @@ class SplitBoundary:
     `time_paris <= end_date`, jamais `< end_date`). Une bougie tombant exactement sur la frontière
     partagée entre deux zones adjacentes (`a.end == b.start`) serait donc incluse dans les DEUX
     zones si les deux étaient un jour exécutées. **Vérifié sans impact sur l'évidence réelle
-    d'AF-V-01** : `TRAIN` n'a jamais été exécutée dans ce ticket (seul `FINAL_HOLDOUT` l'a été), et
-    aucune bougie n'existe exactement à la frontière `2025-05-19T00:00:00+00:00` dans
-    `nasdaq_3m.csv` (vérifié directement). **Dette explicite pour tout ticket futur qui exécuterait
-    deux zones adjacentes du même plan** (ex. `AF-V-02` Walk-Forward comparant `TRAIN`/
-    `FINAL_HOLDOUT`) : ne pas supposer l'exclusivité de `end` appliquée par le moteur sans la
-    revérifier, ou corriger `engine.py` avec autorisation explicite avant d'en dépendre."""
+    d'AF-V-01** : une seule zone (`FINAL_HOLDOUT`) a été exécutée dans ce ticket — jamais deux
+    zones adjacentes ensemble —, et aucune bougie n'existe exactement à la frontière
+    `2025-05-19T00:00:00+00:00` dans `nasdaq_3m.csv` (vérifié directement) ; aucune double
+    inclusion n'a donc affecté cette `ValidationRun` (fait historique, non réécrit ici).
+    **Dette générique, non corrigée (synchronisation documentaire, 2026-09-12)** : cette
+    exclusivité non respectée concerne toute paire de fenêtres temporelles adjacentes qu'un futur
+    protocole choisirait d'exécuter — aucune paire de zones précise n'est présumée ici. En
+    particulier, ne présumer ni que `AF-V-02` (Walk-Forward, protocole encore non conçu) exécutera
+    `TRAIN` et `FINAL_HOLDOUT` comme deux zones adjacentes, ni plus généralement que
+    `FINAL_HOLDOUT` deviendra un jour un fold ordinaire d'un Walk-Forward : `FINAL_HOLDOUT`
+    conserve son rôle distinct de preuve terminale contrôlée, dont l'accès reste exclusivement
+    audité via `HoldoutAccessEvent`. Ne pas supposer l'exclusivité de `end` appliquée par le
+    moteur sans la revérifier pour la paire de zones réellement retenue, ou corriger `engine.py`
+    avec autorisation explicite avant d'en dépendre."""
 
     start: str
     end: str
