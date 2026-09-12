@@ -980,12 +980,13 @@ structuration). Détail complet : `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `A
   (`AF-V-06`) est désormais satisfaite, mais aucune décision de les lancer n'a été prise par cette
   seule clôture documentaire.
 
-## 16. Dette A — Engine Layer = DONE (2026-09-12), Optimizer Integration reste OPEN
+## 16. Dette A GLOBALE = DONE (2026-09-12) — Engine Layer + Optimizer Integration
 
-**Statut : Dette A — ENGINE LAYER DONE. Dette A — OPTIMIZER INTEGRATION reste OPEN. Dette B reste
-OPEN.** Précède toute exécution scientifique sérieuse d'`AF-V-02` (Walk-Forward) — voir
-`docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-02`, section préconditions) pour le détail
-complet et la distinction Engine/Optimizer.
+**Statut : Dette A GLOBALE DONE — ENGINE LAYER DONE et OPTIMIZER INTEGRATION DONE. Dette B reste
+OPEN. Écart `compute_split_dates()` reste DISCOVERED/OPEN. WARMUP dynamique reste OPEN.**
+`AF-V-02` (Walk-Forward) reste **non commencé** — cette clôture ne l'autorise pas et ne prétend
+pas `GATE V` passée. Voir `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-02`, section
+préconditions) pour le détail complet.
 
 - **Contrat moteur corrigé (`engine.py::run_backtest()`)** : `start_date` ne filtre plus le
   DataFrame avant `strategy.prepare()` — l'historique disponible avant `start_date` reste visible
@@ -1020,13 +1021,60 @@ complet et la distinction Engine/Optimizer.
   limites), `tests/test_validation_oos.py` 13/13 (inchangé), suite complète 791/791 (776 baseline
   + 15 nouveaux), 0 régression. `py_compile` propre. Revue `/code-review` (axes Standards/Spec)
   effectuée avant clôture : aucun défaut bloquant, aucune correction de code nécessaire.
-- **Dette A — OPTIMIZER INTEGRATION reste explicitement OPEN** : `optimizer_process.py`/
-  `_worker_run_single` (fallback) continuent de tronquer le DataFrame sur `opt_start_date` **avant**
-  d'appeler `run_backtest()` — l'optimiseur ne bénéficie donc pas encore du correctif moteur pour
-  son propre split train/test. Non traité par cette mission (`optimizer.py`/`optimizer_process.py`
-  non modifiés).
+- **Dette A — OPTIMIZER INTEGRATION = DONE (2026-09-12)** : `optimizer.py`/`optimizer_process.py`
+  bénéficient désormais du correctif moteur. Architecture retenue — fonction pure
+  `resolve_execution_window(df, opt_start_date, opt_end_date, max_rows) -> ExecutionWindow`
+  (`optimizer.py`), point de résolution **unique**, réutilisée par `Optimizer.__init__`,
+  `benchmark_speed()` et le fallback `_worker_run_single()` (jamais une seconde implémentation) :
+  - `ExecutionWindow` sépare `context_df` (historique amont conservé, jamais de futur au-delà de
+    la fin effective) de `execution_df` (la sélection physiquement filtrée, **identique bit à bit**
+    à l'ancien comportement `opt_start_date → opt_end_date → max_rows`) — `exec_start`/`exec_end`
+    (bornes de `execution_df`) et `exec_row_count = len(execution_df)`, jamais le contexte élargi.
+  - `opt_start_date`/`opt_end_date`/`max_rows` : sémantique strictement inchangée — `max_rows`
+    compte uniquement les lignes d'**exécution** ; si `max_rows` termine la période en cours de
+    journée, `exec_end` conserve l'heure exacte de cette dernière barre (jamais réduit à
+    `"YYYY-MM-DD"`, vérifié par test intra-journée).
+  - **TRAIN/TEST** : `compute_split_dates()` reçoit désormais `execution_df` (jamais le contexte
+    élargi) — ses sorties restent **identiques** à l'ancien comportement (vérifié par comparaison
+    directe ancien/nouveau, `test_o6_compute_split_dates_matches_the_legacy_...`), son trou de
+    journée connu n'est ni corrigé ni aggravé. TRAIN et TEST reçoivent tous deux `context_df`
+    (historique causal, TEST bénéficiant aussi de TRAIN comme warmup légitime), bornés
+    explicitement — aucune barre après `test_end` n'est jamais visible par `prepare()`.
+  - **Sans train/test** : chaque backtest est désormais borné explicitement à
+    `(exec_start, exec_end)`, jamais `(None, None)` implicite — élimine le risque d'exécuter sur
+    tout le contexte élargi.
+  - **Sélection vide (invariant critique validé)** : `execution_df` et `context_df` sont TOUS
+    DEUX vides dans ce cas (`exec_start=None`, `exec_end=None`) — structurellement, aucun fallback
+    implicite vers le dataset complet n'est possible, quelles que soient les bornes transmises.
+    Vérifié avec le **vrai** moteur (pas seulement monkeypatché) : `n_trades=0`, `filtered=True`.
+    `benchmark_speed()` suit la même garantie (jamais un benchmark sur tout le contexte).
+  - **Séquentiel/parallèle/fallback** : `_worker_init()` broadcast le contexte élargi résolu ;
+    `_worker_run_single()` (fallback, sans `_worker_df_global`) appelle le **même** resolver —
+    vérifié : contexte et bornes identiques entre chemin nominal et fallback.
+  - **`df_rows_used`** : représente désormais `exec_row_count` (sélection d'exécution), jamais
+    `len(context_df)` — signification de métadonnée/manifest préservée.
+  - **Intégration réelle confirmée (revue adversariale)** : `exec_start`/`exec_end` sont des
+    chaînes ISO **naïves** (`"%Y-%m-%dT%H:%M:%S"` via `.strftime()`), jamais un `pd.Timestamp`.
+    Vérifié empiriquement (pandas 3.0.3 de ce dépôt) : `pd.Timestamp(pd.Timestamp(..., tz=...),
+    tz=...)` lève `ValueError` (Timestamp déjà tz-aware + `tz=`) — ce n'est **pas** le type produit
+    ici. 5 tests traversent réellement `Optimizer`/resolver → `_run_single` → `engine.run_backtest`
+    **réel**, sans monkeypatch moteur (`TestRealEngineAcceptsResolvedBounds`), comblant un gap de
+    couverture qui existait avant cette clôture.
+  - **Reprise de jobs** : non affectée (`resume_run_id`/`tested.json`/hashes opèrent uniquement sur
+    `params`) — `tests/test_job_resume.py`/`tests/test_job_launcher.py` 22/22.
+  - **`tests/test_job_launcher.py`** : 2 appels `Optimizer(..., df=object())` adaptés en
+    `df=pd.DataFrame())` — `Optimizer.__init__` a désormais besoin d'un objet réel supportant
+    `len()` (pour `df_rows_used`) même sans filtre ; ces deux tests monkeypatchent `_run_single`
+    et n'ont jamais inspecté le contenu de `df` — adaptation honnête, aucune logique de
+    production contournée.
+  - **Tests** : `tests/test_optimizer.py` 20/20 (nouveau fichier, gap de couverture comblé),
+    `tests/test_engine.py` 27/27 (inchangé), `tests/test_job_resume.py`/`tests/test_job_launcher.py`
+    22/22, `tests/test_data_manifest_e2e.py` vert, suite complète **811/811** (806 baseline + 5
+    tests d'intégration réelle ajoutés en revue adversariale finale), 0 régression. `py_compile`
+    propre.
 - **Écart `compute_split_dates()` (découvert, non corrigé, distinct de Dette A et B)** :
   `optimizer.py::compute_split_dates()` convertit le point de split en chaîne `"YYYY-MM-DD"`
   (perdant l'heure précise) puis positionne `test_start` au lendemain — peut créer un trou
   temporel silencieux d'au moins une journée de marché autour du split. Statut : DISCOVERED /
-  OPEN, séparé de Dette B, non tranché par la roadmap, non corrigé ici.
+  OPEN, séparé de Dette B, non tranché par la roadmap, non corrigé ici. La séparation
+  contexte/exécution de cette clôture ne modifie ni n'aggrave ce comportement (vérifié par test).

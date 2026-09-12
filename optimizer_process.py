@@ -54,7 +54,7 @@ if __name__ == "__main__":
         ScoreWeights, FilterConfig,
         Optimizer, benchmark_speed, count_combinations,
         effective_combinations_total, estimate_duration, format_duration,
-        normalize_max_combinations,
+        normalize_max_combinations, resolve_execution_window,
     )
     from report_generator import generate_report
     from engine import load_data_from_source
@@ -255,32 +255,29 @@ if __name__ == "__main__":
     _source_period_start, _source_period_end = compute_source_period_bounds(df["time"])
 
     # ════════════════════════════════════════════════════════════
-    # FILTRAGE PÉRIODE RÉDUITE (opt_start_date / opt_end_date / max_rows)
+    # SÉPARATION CONTEXTE / EXÉCUTION (Dette A — Optimizer Integration, 2026-09-12)
     # ════════════════════════════════════════════════════════════
+    # `df` (chargé ci-dessus) reste désormais le DataFrame SOURCE complet, jamais réduit
+    # physiquement à opt_start_date/opt_end_date/max_rows ici — resolve_execution_window()
+    # (optimizer.py) sépare le CONTEXTE (historique amont conservé pour le warmup des
+    # indicateurs par engine.py, jamais de barre postérieure à la fin effective) de la sélection
+    # d'EXÉCUTION elle-même (bornes identiques, ligne à ligne, au comportement historique de ce
+    # bloc). Résolu UNE seule fois ici, réutilisé par benchmark_speed()/Optimizer() ci-dessous
+    # (même contrat que le fallback _worker_run_single(), jamais une seconde implémentation).
 
-    import pandas as pd
+    execution_window = resolve_execution_window(
+        df, config.opt_start_date, config.opt_end_date, config.max_rows,
+    )
+    _log(
+        f"[fenêtre] contexte={len(execution_window.context_df)} lignes, "
+        f"exécution={execution_window.exec_row_count} lignes "
+        f"(opt_start_date={config.opt_start_date}, opt_end_date={config.opt_end_date}, "
+        f"max_rows={config.max_rows})"
+    )
 
-    rows_before = len(df)
-    if config.opt_start_date:
-        ts_start = pd.Timestamp(config.opt_start_date, tz="Europe/Paris")
-        df = df[df["time_paris"] >= ts_start].reset_index(drop=True)
-        _log(f"[filtrage] opt_start_date={config.opt_start_date} "
-             f"-> {len(df)}/{rows_before} lignes conservees")
-
-    if config.opt_end_date:
-        ts_end = pd.Timestamp(config.opt_end_date + " 23:59:59", tz="Europe/Paris")
-        df = df[df["time_paris"] <= ts_end].reset_index(drop=True)
-        _log(f"[filtrage] opt_end_date={config.opt_end_date} "
-             f"-> {len(df)}/{rows_before} lignes conservees")
-
-    if config.max_rows and len(df) > config.max_rows:
-        df = df.iloc[:config.max_rows].reset_index(drop=True)
-        _log(f"[filtrage] max_rows={config.max_rows} -> {len(df)} lignes conservees")
-
-    _log(f"[filtrage] DataFrame final : {len(df)} lignes")
-
-    # Nombre de lignes utilisées pour les métriques finales
-    df_rows_used = len(df)
+    # Nombre de lignes utilisées pour les métriques finales — la sélection d'EXÉCUTION effective,
+    # jamais le contexte élargi (voir optimizer.py::ExecutionWindow, Optimizer.df_rows_used).
+    df_rows_used = execution_window.exec_row_count
 
     # ════════════════════════════════════════════════════════════
     # BENCHMARK DE VITESSE (sauf si reprise)
@@ -309,7 +306,9 @@ if __name__ == "__main__":
             "mode": cfg_dict.get("mode", ""),
         }, job_dir=job_dir)
         _log(f"Benchmark de vitesse (n={config.benchmark_n_sample})...")
-        benchmark_ms = benchmark_speed(config, df, n_sample=config.benchmark_n_sample)
+        benchmark_ms = benchmark_speed(
+            config, df, n_sample=config.benchmark_n_sample, execution_window=execution_window,
+        )
         _log(f"Benchmark : {benchmark_ms:.1f} ms/backtest")
 
     # ════════════════════════════════════════════════════════════
@@ -451,7 +450,7 @@ if __name__ == "__main__":
 
     try:
         _log("Lancement de l'optimisation...")
-        opt = Optimizer(config, df)
+        opt = Optimizer(config, df, execution_window=execution_window)
 
         run_results, sensitivity = opt.run(
             progress_cb=progress_cb,

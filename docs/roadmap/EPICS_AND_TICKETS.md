@@ -630,19 +630,22 @@ Walk-Forward — toute évaluation qui le consulterait resterait un événement 
 délibéré, pas un mécanisme interne au protocole.
 
 **Préconditions scientifiques à examiner avant exécution (réconciliation documentaire post-AF-V-01,
-2026-09-12, corrigée le 2026-09-12, mise à jour le 2026-09-12 après correction partielle de la
+2026-09-12, corrigée le 2026-09-12, mise à jour le 2026-09-12 après clôture complète de la
 Dette A — documentées séparément, aucune des deux prouvée comme ayant affecté `AF-V-01`)** :
-- **Dette A — warmup/cold-start des indicateurs — ENGINE LAYER CORRIGÉ, OPTIMIZER INTEGRATION
-  OPEN** : `engine.run_backtest()` ne filtre plus `start_date` avant `strategy.prepare()` —
-  l'historique disponible avant `start_date` reste visible pour le calcul des indicateurs
-  (`loop_start = max(exec_start_idx, warmup)`), et `end_date` continue d'exclure tout futur du
-  contexte de préparation. Non-régression prouvée (114 trades/`net_ret_pct` de référence
-  inchangés sans fenêtre), 791/791 tests. **Mais** `optimizer.py`/`optimizer_process.py` (dont
-  `_worker_run_single`) continuent de pré-tronquer le DataFrame sur `opt_start_date` **avant**
-  d'appeler `run_backtest()` — le split train/test de l'optimiseur ne bénéficie donc **pas encore**
-  de ce correctif. **`AF-V-02` ne doit pas être exécuté scientifiquement tant que cette
-  intégration Optimizer reste ouverte** si son protocole venait à réutiliser ce chemin. Détail
-  complet : `AI_HANDOFF.md` §16.
+- **Dette A — warmup/cold-start des indicateurs — DONE (Engine Layer + Optimizer Integration)** :
+  `engine.run_backtest()` ne filtre plus `start_date` avant `strategy.prepare()` — l'historique
+  disponible avant `start_date` reste visible pour le calcul des indicateurs (`loop_start =
+  max(exec_start_idx, warmup)`), et `end_date` continue d'exclure tout futur du contexte de
+  préparation. `optimizer.py`/`optimizer_process.py` (`resolve_execution_window()`,
+  `ExecutionWindow`) bénéficient désormais du même correctif — le split train/test et les
+  exécutions sans train/test de l'optimiseur reçoivent le contexte élargi, bornés explicitement à
+  la période d'exécution effective, jamais un fallback implicite vers le dataset complet (vérifié
+  y compris sur sélection vide, avec le vrai moteur). Non-régression prouvée à chaque étape (114
+  trades/`net_ret_pct` de référence inchangés sans fenêtre ; `compute_split_dates()` produit des
+  bornes identiques à l'ancien comportement physiquement filtré). Suite complète : 811/811 tests.
+  **`AF-V-02` reste néanmoins non prêt pour une exécution scientifique complète** : Dette B et
+  l'écart `compute_split_dates()` (ci-dessous) restent `OPEN`, non tranchés. Détail complet :
+  `AI_HANDOFF.md` §16.
 - **Dette B — sémantique des frontières `SplitBoundary`, générique — toujours OPEN, non touchée
   par la correction Engine Layer** : `SplitBoundary` déclare `[start, end)` (fin exclue), mais
   `engine.run_backtest(start_date=, end_date=)` filtre en réalité sur un intervalle **fermé** des

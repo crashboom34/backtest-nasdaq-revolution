@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pandas as pd
+
 import job_launcher
 import optimizer as optimizer_module
 from optimizer import (
@@ -157,7 +159,12 @@ def test_optimizer_limits_actual_scheduled_combinations(monkeypatch):
 
     monkeypatch.setattr(optimizer_module, "_run_single", fake_run_single)
 
-    opt = Optimizer(_optimizer_config(max_combinations=12), df=object())
+    # Dette A (Optimizer Integration, 2026-09-12) : Optimizer.__init__ résout désormais
+    # explicitement la fenêtre d'exécution (resolve_execution_window()), ce qui nécessite un
+    # vrai objet supportant len() même sans opt_start_date/opt_end_date/max_rows (pour
+    # df_rows_used) — un DataFrame vide suffit, _run_single() étant monkeypatché ci-dessus,
+    # son contenu n'est jamais inspecté.
+    opt = Optimizer(_optimizer_config(max_combinations=12), df=pd.DataFrame())
     results = opt.run_mode3()
 
     assert len(results) == 12
@@ -177,7 +184,8 @@ def test_optimizer_keeps_full_mode_unlimited(monkeypatch):
 
     monkeypatch.setattr(optimizer_module, "_run_single", fake_run_single)
 
-    opt = Optimizer(_optimizer_config(max_combinations=None), df=object())
+    # Voir note ci-dessus (Dette A — Optimizer Integration) : DataFrame vide, jamais inspecté.
+    opt = Optimizer(_optimizer_config(max_combinations=None), df=pd.DataFrame())
     results = opt.run_mode3()
 
     assert len(results) == 20

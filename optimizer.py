@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Callable
 
 import numpy as np
+import pandas as pd
 
 from scoring import (
     ScoreWeights, FilterConfig,
@@ -141,6 +142,92 @@ def effective_combinations_total(total_combinations: int, max_combinations=None)
     return min(total, limit) if limit is not None else total
 
 
+@dataclass(frozen=True)
+class ExecutionWindow:
+    """Résultat de `resolve_execution_window()` (Dette A — Optimizer Integration, 2026-09-12).
+
+    Sépare deux notions distinctes, jamais confondues :
+
+    - `context_df` : DataFrame transmis à `engine.run_backtest()` — conserve tout l'historique
+      disponible AVANT le début de la sélection d'exécution (warmup causal des indicateurs), mais
+      ne contient JAMAIS de barre postérieure à la fin effective de cette sélection (pas de
+      look-ahead, même contrat que le moteur — voir `engine.py`, correction Dette A Engine Layer).
+    - `execution_df` : la sélection d'exécution EFFECTIVE elle-même, physiquement filtrée
+      exactement comme le faisait l'ancien code (`opt_start_date` -> `opt_end_date` -> `max_rows`,
+      dans cet ordre). N'est **jamais** transmise à `run_backtest()` ni utilisée pour un vrai
+      backtest — sert uniquement de vue de compatibilité pour `compute_split_dates()` (Track
+      Optimizer, non modifié par cette mission), afin que ses bornes TRAIN/TEST restent
+      identiques à celles qu'il aurait produites sur l'ancien DataFrame physiquement réduit.
+
+    `exec_start`/`exec_end` : bornes ISO-8601 (Europe/Paris) de `execution_df` — à transmettre
+    telles quelles à `run_backtest(start_date=, end_date=)` pour tout backtest "période complète,
+    sans TRAIN/TEST" (voir `Optimizer.run()`). `None` si `execution_df` est vide (sélection
+    entièrement hors du dataset — dégradation gracieuse, jamais une exception).
+
+    `exec_row_count` : `len(execution_df)` — jamais `len(context_df)`. C'est cette valeur, et
+    elle seule, qui doit être exposée dans les métriques/manifests décrivant "les données
+    utilisées pour la période optimisée" (voir `Optimizer.df_rows_used`)."""
+
+    context_df: "pd.DataFrame"
+    execution_df: "pd.DataFrame"
+    exec_start: Optional[str]
+    exec_end: Optional[str]
+    exec_row_count: int
+
+
+def resolve_execution_window(
+    df, opt_start_date: Optional[str] = None, opt_end_date: Optional[str] = None,
+    max_rows: Optional[int] = None,
+) -> ExecutionWindow:
+    """Fonction PURE (Dette A — Optimizer Integration) : résout, à partir du DataFrame source
+    complet et de la période demandée, la séparation contexte/exécution nécessaire au moteur
+    corrigé (`engine.run_backtest()`, Dette A Engine Layer). Point d'extension UNIQUE — réutilisée
+    par le chemin nominal (`Optimizer.__init__`), `benchmark_speed()` et le fallback
+    (`_worker_run_single()`) : jamais une seconde implémentation de ce filtrage.
+
+    Reproduit EXACTEMENT l'ancien filtrage physique (`opt_start_date` -> `opt_end_date` ->
+    `max_rows`, dans cet ordre — voir docstring de `ExecutionWindow`) pour calculer
+    `execution_df`/`exec_row_count` : la période réellement optimisée ne change pas d'un seul
+    timestamp par rapport au comportement historique. `context_df` ajoute ensuite l'historique
+    amont disponible (jamais retiré), tout en supprimant strictement tout ce qui suit la dernière
+    barre de `execution_df` (pas de futur visible par `strategy.prepare()`, même invariant que
+    l'Engine Layer)."""
+    execution_df = df
+    if opt_start_date:
+        ts_start = pd.Timestamp(opt_start_date, tz="Europe/Paris")
+        execution_df = execution_df[execution_df["time_paris"] >= ts_start].reset_index(drop=True)
+    if opt_end_date:
+        ts_end = pd.Timestamp(opt_end_date + " 23:59:59", tz="Europe/Paris")
+        execution_df = execution_df[execution_df["time_paris"] <= ts_end].reset_index(drop=True)
+    if max_rows and len(execution_df) > max_rows:
+        execution_df = execution_df.iloc[:max_rows].reset_index(drop=True)
+
+    exec_row_count = len(execution_df)
+    if exec_row_count > 0:
+        exec_start = execution_df["time_paris"].iloc[0].strftime("%Y-%m-%dT%H:%M:%S")
+        exec_end   = execution_df["time_paris"].iloc[-1].strftime("%Y-%m-%dT%H:%M:%S")
+        # Contexte : tout l'historique du df source jusqu'à la dernière barre EFFECTIVEMENT
+        # sélectionnée (pas jusqu'à opt_end_date brut — si max_rows termine la sélection plus tôt,
+        # c'est cette borne réelle, plus précoce, qui fixe la fin du contexte, voir docstring).
+        last_ts    = execution_df["time_paris"].iloc[-1]
+        context_df = df[df["time_paris"] <= last_ts].reset_index(drop=True)
+    else:
+        # Sélection vide (start après toutes les données, end avant, etc.) : dégradation
+        # gracieuse identique au comportement historique (0 ligne -> 0 trade, jamais de crash) —
+        # aucun contexte n'est nécessaire puisqu'il n'y a rien à exécuter.
+        exec_start = None
+        exec_end   = None
+        context_df = execution_df
+
+    return ExecutionWindow(
+        context_df=context_df,
+        execution_df=execution_df,
+        exec_start=exec_start,
+        exec_end=exec_end,
+        exec_row_count=exec_row_count,
+    )
+
+
 def _load_strategy(module_path: str):
     """Charge dynamiquement un module stratégie et retourne (module, Strategy())."""
     if os.path.sep in module_path or module_path.endswith(".py"):
@@ -214,12 +301,24 @@ def _run_single(params: dict, config: OptimizationConfig,
 # BENCHMARK DE VITESSE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def benchmark_speed(config: OptimizationConfig, df, n_sample: int = 20) -> float:
+def benchmark_speed(
+    config: OptimizationConfig, df, n_sample: int = 20,
+    execution_window: Optional[ExecutionWindow] = None,
+) -> float:
     """
     Lance n_sample backtests avec les paramètres de base.
     Retourne le temps médian en millisecondes par backtest.
-    """
+
+    Dette A (Optimizer Integration) : benchmarke désormais le CONTEXTE réellement transmis à
+    `run_backtest()` (historique amont compris) borné aux dates d'exécution effectives, pas tout
+    le contexte sans bornes — l'estimation reste représentative du vrai coût d'un backtest réel
+    (qui inclut, lui aussi, le balayage de cet historique par `strategy.prepare()`). `df` est le
+    DataFrame SOURCE (non filtré) ; `execution_window` évite de recalculer la résolution si
+    l'appelant l'a déjà fait (voir `optimizer_process.py`)."""
     from engine import run_backtest
+
+    window = execution_window or resolve_execution_window(
+        df, config.opt_start_date, config.opt_end_date, config.max_rows)
 
     mod, strat = _load_strategy(config.strategy_module)
     gp = config.global_params
@@ -230,11 +329,13 @@ def benchmark_speed(config: OptimizationConfig, df, n_sample: int = 20) -> float
         try:
             strat.reset()
             run_backtest(
-                df, strat, config.base_params,
+                window.context_df, strat, config.base_params,
                 initial_capital=gp.get("initial_capital", 10_000.0),
                 spread=gp.get("spread", 1.0),
                 slip_in=gp.get("slip_in", 0.5),
                 slip_out=gp.get("slip_out", 0.5),
+                start_date=window.exec_start,
+                end_date=window.exec_end,
             )
         except Exception:
             pass
@@ -285,9 +386,24 @@ class Optimizer:
         results, sensitivity = opt.run(progress_callback, stop_flag_fn)
     """
 
-    def __init__(self, config: OptimizationConfig, df):
+    def __init__(self, config: OptimizationConfig, df, execution_window: Optional[ExecutionWindow] = None):
+        """`df` : DataFrame SOURCE (non filtré) — la séparation contexte/exécution (Dette A,
+        Optimizer Integration) est résolue ici via `resolve_execution_window()` si
+        `execution_window` n'est pas déjà fourni (évite une résolution redondante quand
+        `optimizer_process.py` l'a déjà calculée pour `df_rows_used`/le logging).
+
+        `self.df` devient le CONTEXTE élargi (historique amont conservé, jamais de futur au-delà
+        de la fin effective) — c'est ce DataFrame, et lui seul, qui est transmis aux workers/
+        `_run_single()`. `self.df_rows_used` reste la sélection d'EXÉCUTION effective (jamais la
+        taille du contexte élargi) — voir docstring de `ExecutionWindow`."""
+        window = execution_window or resolve_execution_window(
+            df, config.opt_start_date, config.opt_end_date, config.max_rows)
         self.config = config
-        self.df     = df
+        self.df     = window.context_df
+        self._execution_df = window.execution_df
+        self._exec_start   = window.exec_start
+        self._exec_end     = window.exec_end
+        self.df_rows_used  = window.exec_row_count
         self._active_ranges = [pr for pr in config.param_ranges if pr.enabled]
         self._max_combinations = normalize_max_combinations(config.max_combinations)
         self._scheduled_combinations = 0
@@ -634,7 +750,19 @@ class Optimizer:
         # ── Calcul des dates de split ──────────────────────────
         train_start = train_end = test_start = test_end = None
         if tt.enabled:
-            train_start, train_end, test_start, test_end = compute_split_dates(self.df, tt)
+            # Dette A (Optimizer Integration) : compute_split_dates() doit voir la même vue de
+            # données qu'avant cette correction — la sélection d'EXÉCUTION (self._execution_df),
+            # jamais self.df (désormais le contexte élargi, qui déplacerait global_start vers
+            # l'historique amont et fausserait le ratio train/test). Comportement de
+            # compute_split_dates() lui-même inchangé, y compris son trou de journée connu
+            # (DISCOVERED/OPEN, non corrigé ici).
+            train_start, train_end, test_start, test_end = compute_split_dates(self._execution_df, tt)
+        else:
+            # Dette A (Optimizer Integration) : sans train/test, self.df est désormais le
+            # CONTEXTE élargi (historique amont compris) — un backtest sans bornes explicites
+            # exécuterait alors sur tout ce contexte, y compris avant la période demandée. Borner
+            # explicitement à la sélection d'exécution effective (jamais (None, None) implicite).
+            train_start, train_end = self._exec_start, self._exec_end
 
         # ── Phase optimisation ─────────────────────────────────
         mode_fn = {
@@ -718,11 +846,10 @@ def _worker_run_single(params: dict, config: OptimizationConfig,
     global _worker_df_global
 
     if _worker_df_global is not None:
-        # Cas nominal : DataFrame pré-filtré disponible — zéro I/O disque
+        # Cas nominal : DataFrame de CONTEXTE (Dette A) pré-résolu disponible — zéro I/O disque
         df = _worker_df_global
     else:
         # Fallback (appel direct sans initializer, ou n_workers=1 séquentiel)
-        import pandas as pd
         from engine import load_data_from_source
         from market_data.adapters.single_file_csv import (
             SingleFileCsvMarketDataSource, PLACEHOLDER_ASSET, PLACEHOLDER_TIMEFRAME,
@@ -731,20 +858,18 @@ def _worker_run_single(params: dict, config: OptimizationConfig,
         # Façade de compatibilité (Data Center Phase 11), même swap que optimizer_process.py —
         # résultat strictement identique à l'ancien load_data(config.data_file), voir
         # tests/test_engine_load_data_from_source.py.
-        df = load_data_from_source(
+        raw_df = load_data_from_source(
             SingleFileCsvMarketDataSource(config.data_file), PLACEHOLDER_ASSET, PLACEHOLDER_TIMEFRAME
         )
 
-        if config.opt_start_date:
-            ts_start = pd.Timestamp(config.opt_start_date, tz="Europe/Paris")
-            df = df[df["time_paris"] >= ts_start].reset_index(drop=True)
-
-        if config.opt_end_date:
-            ts_end = pd.Timestamp(config.opt_end_date + " 23:59:59", tz="Europe/Paris")
-            df = df[df["time_paris"] <= ts_end].reset_index(drop=True)
-
-        if config.max_rows and len(df) > config.max_rows:
-            df = df.iloc[:config.max_rows].reset_index(drop=True)
+        # Dette A (Optimizer Integration) : MÊME resolver que le chemin nominal
+        # (Optimizer.__init__/optimizer_process.py) — jamais une seconde implémentation de ce
+        # filtrage qui pourrait diverger plus tard. Produit le CONTEXTE élargi (historique amont
+        # conservé, aucun futur au-delà de la fin effective), pas le DataFrame physiquement
+        # réduit à la période demandée.
+        df = resolve_execution_window(
+            raw_df, config.opt_start_date, config.opt_end_date, config.max_rows
+        ).context_df
 
     return _run_single(params, config, df, start_date, end_date)
 
