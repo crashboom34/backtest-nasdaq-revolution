@@ -838,7 +838,7 @@ producteur d'un gate propre.
 - **Baseline tests** : 588 passed (546 avant `AF-DATA-*`, +42 nouveaux tests sur ce jalon) → 705
   passed avant la création du checkpoint Track R Foundation (`90e3e29c`, committé et poussé).
 
-## 14. TRACK V — première `ValidationRun` réelle, `AF-V-01 = DONE` (2026-08-23, non commité)
+## 14. TRACK V — première `ValidationRun` réelle, `AF-V-01 = DONE` (2026-08-23, committé et poussé)
 
 **Statut : `AF-V-01` DONE. `GATE V` reste NON passée** (exige `OOS`+`WalkForward`+`MonteCarlo`+
 `ParameterStability`, voir `MASTER_ROADMAP.md` §4 — seul `OOS` existe, résultat inconclusif).
@@ -870,11 +870,24 @@ Détail complet : `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-01`), `DOMAI
   "af-v01-ig-demo-final-holdout-oos"`, exactement 1 `HoldoutAccessEvent`, exactement 1
   `ValidationRun`. `strategy_params` persisté identique champ à champ à `DEFAULT_PARAMS` actuel
   (aucun retuning).
-- **Limite méthodologique trouvée en clôture, non corrigée (hors périmètre)** : `engine.run_backtest()`
-  calcule les indicateurs (EMA/ATR) uniquement sur les bougies de la fenêtre filtrée, jamais sur
-  `TRAIN` qui la précède — biais de "cold start" plausible, préexistant (partagé par le split
-  train/test de l'optimiseur), documenté dans l'ADR-0017 pour toute lecture future de cette
-  `ValidationRun`.
+- **Deux dettes scientifiques distinctes trouvées en clôture, non corrigées, à ne jamais fusionner
+  (synchronisation documentaire post-AF-V-01, 2026-09-12)** :
+  - **Dette A — warmup/cold-start des indicateurs** : `engine.run_backtest()` calcule les
+    indicateurs (EMA/ATR) uniquement sur les bougies de la fenêtre filtrée, jamais sur `TRAIN` qui
+    la précède — biais de "cold start" plausible, préexistant (partagé par le split train/test de
+    l'optimiseur), documenté dans l'ADR-0017 pour toute lecture future de cette `ValidationRun`.
+    Non prouvé comme ayant réellement affecté le résultat `n_trades=0` (aucune instrumentation du
+    run n'a été autorisée pour trancher).
+  - **Dette B — sémantique des frontières `SplitBoundary`** : `SplitBoundary` déclare `[start,
+    end)` (fin exclue), mais `engine.run_backtest(start_date=, end_date=)` filtre en réalité sur un
+    intervalle **fermé** des deux côtés (`time_paris >= start_date` **et** `time_paris <=
+    end_date`, jamais `< end_date`) — documenté dans le docstring de `SplitBoundary`
+    (`dataset_split.py`). **Sans impact vérifié sur `AF-V-01`** : `TRAIN` n'a jamais été exécuté
+    dans ce ticket (seul `FINAL_HOLDOUT` l'a été) et aucune bougie de `nasdaq_3m.csv` ne tombe
+    exactement sur la frontière partagée `2025-05-19T00:00:00+00:00` (vérifié directement dans le
+    module). **Dette distincte de la Dette A** — elle ne devient pertinente que pour un ticket
+    exécutant deux zones adjacentes du même plan (ex. `AF-V-02` Walk-Forward comparant
+    `TRAIN`/`FINAL_HOLDOUT`), voir `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-02`).
 - **Preuve FRESH, distincte de la retrospective OOS evidence (§13/`GATE DATA`)** : cette
   `ValidationRun` IG n'a aucune exposition antérieure connue, contrairement à l'evidence MT5
   (`GATE DATA`, backtest complet antérieur sur `nasdaq_3m.csv`, voir `DOMAIN_MODEL.md` §12). Ne
@@ -888,5 +901,5 @@ Détail complet : `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-01`), `DOMAI
 - **`AF-V-02` (Walk-Forward)** : mécaniquement débloqué par `AF-V-01 = DONE`, mais **non démarré**
   — aucune décision de le lancer n'a été prise.
 - **Tests** : 756 passed (752 baseline + 4 nouveaux tests IG), 0 régression.
-- **Non commité au moment de la rédaction** — voir la revue de clôture pour la liste exacte des
-  fichiers proposés/exclus.
+- **Committé et poussé** — checkpoint `a1cde845f1e73c6443abbf3babfe7525112bbf8b` (`origin/master`),
+  voir la revue de clôture pour la liste exacte des fichiers inclus dans ce commit.
