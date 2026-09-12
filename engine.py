@@ -4,6 +4,8 @@ Gère l'exécution des trades, les coûts, le P&L et les statistiques.
 La logique de signal est déléguée à l'objet strategy.
 """
 
+from typing import Literal
+
 import pandas as pd
 import numpy as np
 from zoneinfo import ZoneInfo
@@ -67,6 +69,7 @@ def run_backtest(
     progress_cb=None,
     start_date=None,
     end_date=None,
+    end_boundary: Literal["inclusive", "exclusive"] = "inclusive",
 ) -> tuple:
     """
     Paramètres
@@ -78,24 +81,59 @@ def run_backtest(
     spread         : spread fixe en unités de prix
     slip_in/out    : slippage entrée/sortie
     progress_cb    : callable(pct) pour barre de progression (optionnel)
+    start_date     : borne de début, toujours INCLUSIVE (`time_paris >= start_date`) — Dette B
+                     ne généralise que la borne de FIN, voir `end_boundary` ci-dessous.
+    end_boundary   : sémantique de `end_date` (Dette B, 2026-09-12) — un des deux littéraux
+                     explicites suivants, jamais un booléen ambigu :
+                       - `"inclusive"` (DÉFAUT, comportement historique inchangé) :
+                         `time_paris <= end_date` -> intervalle **fermé** `[start_date, end_date]`.
+                       - `"exclusive"` (nouveau, opt-in explicite) :
+                         `time_paris <  end_date` -> intervalle **demi-ouvert**
+                         `[start_date, end_date)`, la sémantique déclarée par
+                         `dataset_split.SplitBoundary`. Une bougie exactement à `end_date`
+                         n'est alors JAMAIS visible par `strategy.prepare()`, ni exécutable,
+                         ni utilisée pour la fermeture forcée — elle appartient à la fenêtre
+                         SUIVANTE si celle-ci existe.
+                     Toute autre valeur lève `ValueError`, y compris quand `end_date is None`
+                     (une configuration incohérente doit être rejetée explicitement, jamais
+                     silencieusement retombée sur `"inclusive"`). Sans effet observable si
+                     `end_date is None` (rien à borner). `start_date` n'a pas d'équivalent
+                     (`start_boundary`) dans cette mission — seule la borne de fin est
+                     généralisée, conformément à `SplitBoundary` qui ne déclare que sa fin comme
+                     exclusive.
 
     Retourne
     --------
     (trades_df, equity_df, stats_dict)
     """
+    if end_boundary not in ("inclusive", "exclusive"):
+        raise ValueError(
+            f"end_boundary={end_boundary!r} invalide — valeurs acceptées : 'inclusive' (défaut, "
+            "intervalle fermé [start,end], comportement historique) ou 'exclusive' (intervalle "
+            "demi-ouvert [start,end), sémantique SplitBoundary). Jamais de repli silencieux vers "
+            "'inclusive'."
+        )
+
     # ── Séparation contexte / fenêtre d'exécution (Dette A, engine layer, 2026-09-12) ──
     # CONTEXT DATA : tout l'historique disponible AVANT start_date reste dans le DataFrame ici —
     # start_date ne filtre PLUS le contexte, il ne bornera que la FENÊTRE D'EXÉCUTION plus bas
     # (exec_start_idx). But : strategy.prepare() (EMA/ATR/etc.) dispose de l'historique réel au
     # lieu d'un "cold start" artificiel à chaque fenêtre. Seule la borne de FIN est appliquée ici,
-    # AVANT prepare() : aucune donnée postérieure à end_date ne doit jamais être visible par
-    # prepare(), pour ne jamais introduire de look-ahead implicite (Perfect Revolution est causale
-    # aujourd'hui, mais ce garde-fou vaut pour toute future stratégie non causale, ex. centered
-    # rolling / normalisation globale). Dette B (sémantique [start,end) vs [start,end]) reste
-    # strictement hors scope : `<=` inchangé, comportement identique pour tous les appelants
-    # existants (optimizer.py, app.py) qui ne fournissent pas d'historique amont supplémentaire.
+    # AVANT prepare() : aucune donnée à/après la fin EFFECTIVE (selon `end_boundary`) ne doit
+    # jamais être visible par prepare(), pour ne jamais introduire de look-ahead implicite
+    # (Perfect Revolution est causale aujourd'hui, mais ce garde-fou vaut pour toute future
+    # stratégie non causale, ex. centered rolling / normalisation globale).
+    # Dette B (2026-09-12) : `end_boundary` généralise ce seul point — `"inclusive"` (défaut)
+    # reproduit exactement `<=` (comportement historique, tous les appelants existants
+    # inchangés) ; `"exclusive"` applique `<` (sémantique SplitBoundary [start,end)). Tout le
+    # reste de la fonction (exec_start_idx, loop_start, `i+1`, fermeture forcée) opère
+    # génériquement sur "le contexte tel que déjà tronqué ici" — aucun autre changement requis.
     if end_date is not None:
-        df = df[df["time_paris"] <= pd.Timestamp(end_date, tz="Europe/Paris")]
+        end_ts = pd.Timestamp(end_date, tz="Europe/Paris")
+        if end_boundary == "exclusive":
+            df = df[df["time_paris"] < end_ts]
+        else:
+            df = df[df["time_paris"] <= end_ts]
     df = df.reset_index(drop=True)
 
     # reset() avant prepare() : l'état journalier est purgé, puis prepare()

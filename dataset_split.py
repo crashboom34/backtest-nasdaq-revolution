@@ -124,28 +124,46 @@ class SplitBoundary:
     """Frontière `[start, end)` d'une zone — borne de fin exclue (deux zones adjacentes peuvent
     partager exactement `a.end == b.start` sans se chevaucher).
 
-    **Écart confirmé, non corrigé ici (revue MCP Codex, AF-V-01, 2026-08-15)** : cette exclusivité
-    de `end` est l'invariant **déclaré** par ce module — l'exécution réelle via
+    **Écart historique, partiellement résolu côté moteur (« Dette B », 2026-09-12)** : cette
+    exclusivité de `end` est l'invariant **déclaré** par ce module. Jusqu'à cette date,
     `engine.run_backtest(start_date=, end_date=)` (mécanisme préexistant, partagé avec
-    `optimizer.py::TrainTestConfig`, non modifié par ce ticket) filtre en réalité sur un intervalle
-    **fermé** des deux côtés (`engine.py:89-90` : `time_paris >= start_date` **et**
-    `time_paris <= end_date`, jamais `< end_date`). Une bougie tombant exactement sur la frontière
-    partagée entre deux zones adjacentes (`a.end == b.start`) serait donc incluse dans les DEUX
-    zones si les deux étaient un jour exécutées. **Vérifié sans impact sur l'évidence réelle
-    d'AF-V-01** : une seule zone (`FINAL_HOLDOUT`) a été exécutée dans ce ticket — jamais deux
-    zones adjacentes ensemble —, et aucune bougie n'existe exactement à la frontière
-    `2025-05-19T00:00:00+00:00` dans `nasdaq_3m.csv` (vérifié directement) ; aucune double
-    inclusion n'a donc affecté cette `ValidationRun` (fait historique, non réécrit ici).
-    **Dette générique, non corrigée (synchronisation documentaire, 2026-09-12)** : cette
-    exclusivité non respectée concerne toute paire de fenêtres temporelles adjacentes qu'un futur
-    protocole choisirait d'exécuter — aucune paire de zones précise n'est présumée ici. En
-    particulier, ne présumer ni que `AF-V-02` (Walk-Forward, protocole encore non conçu) exécutera
-    `TRAIN` et `FINAL_HOLDOUT` comme deux zones adjacentes, ni plus généralement que
-    `FINAL_HOLDOUT` deviendra un jour un fold ordinaire d'un Walk-Forward : `FINAL_HOLDOUT`
-    conserve son rôle distinct de preuve terminale contrôlée, dont l'accès reste exclusivement
-    audité via `HoldoutAccessEvent`. Ne pas supposer l'exclusivité de `end` appliquée par le
-    moteur sans la revérifier pour la paire de zones réellement retenue, ou corriger `engine.py`
-    avec autorisation explicite avant d'en dépendre."""
+    `optimizer.py::TrainTestConfig`) ne savait filtrer que sur un intervalle **fermé** des deux
+    côtés (`time_paris >= start_date` et `time_paris <= end_date`), incapable de représenter cette
+    frontière `[start, end)`. **Le moteur sait désormais représenter les deux intervalles** via le
+    paramètre explicite `end_boundary` de `run_backtest()` : `end_boundary="inclusive"` (**valeur
+    par défaut, comportement legacy inchangé**, intervalle fermé `[start,end]`, celui utilisé par
+    tous les appelants historiques dont l'Optimizer) ou `end_boundary="exclusive"` (intervalle
+    demi-ouvert `[start,end)`, sémantique exacte de `SplitBoundary`, borne `end` réellement exclue
+    y compris de `strategy.prepare()`). **Aucun câblage automatique n'existe entre
+    `DatasetSplitPlan`/`SplitBoundary` et l'engine** : un futur consommateur de ce module (par
+    exemple un protocole Walk-Forward AF-V-02, non conçu à ce jour) doit lui-même appeler
+    `run_backtest(..., end_boundary="exclusive")` pour obtenir la sémantique déclarée ici — rien
+    dans `DatasetSplitPlan` ne le fait ni ne le force. **Historique conservé tel quel** : l'analyse
+    ci-dessous porte sur l'ancien comportement par défaut, qui reste celui de tout appelant
+    n'utilisant pas explicitement `end_boundary="exclusive"`.
+
+    **Écart confirmé (revue MCP Codex, AF-V-01, 2026-08-15)**, sous l'ancien comportement par
+    défaut (`end_boundary="inclusive"`, toujours le défaut aujourd'hui) : une bougie tombant
+    exactement sur la frontière partagée entre deux zones adjacentes (`a.end == b.start`) serait
+    incluse dans les DEUX zones si les deux étaient un jour exécutées sans demander explicitement
+    le mode exclusif. **Vérifié sans impact sur l'évidence réelle d'AF-V-01** : une seule zone
+    (`FINAL_HOLDOUT`) a été exécutée dans ce ticket — jamais deux zones adjacentes ensemble —, et
+    aucune bougie n'existe exactement à la frontière `2025-05-19T00:00:00+00:00` dans
+    `nasdaq_3m.csv` (vérifié directement) ; aucune double inclusion n'a donc affecté cette
+    `ValidationRun` (fait historique, non réécrit ici).
+    **Dette générique restant ouverte (synchronisation documentaire, 2026-09-12)** : cette
+    exclusivité concerne toute paire de fenêtres temporelles adjacentes qu'un futur protocole
+    choisirait d'exécuter — aucune paire de zones précise n'est présumée ici. En particulier, ne
+    présumer ni que `AF-V-02` (Walk-Forward, protocole encore non conçu) exécutera `TRAIN` et
+    `FINAL_HOLDOUT` comme deux zones adjacentes, ni plus généralement que `FINAL_HOLDOUT`
+    deviendra un jour un fold ordinaire d'un Walk-Forward : `FINAL_HOLDOUT` conserve son rôle
+    distinct de preuve terminale contrôlée, dont l'accès reste exclusivement audité via
+    `HoldoutAccessEvent`. Ne pas supposer l'exclusivité de `end` appliquée par le moteur par
+    défaut : elle ne l'est que si l'appelant demande explicitement `end_boundary="exclusive"` —
+    vérifier ce choix pour la paire de zones réellement retenue avant d'en dépendre. **Distinct de
+    `compute_split_dates()`** (répartition train/test interne à une optimisation, toujours ouverte,
+    non traitée par cette correction) : cette dette-ci ne concerne que la capacité du moteur à
+    représenter `[start,end)`, pas la logique de `compute_split_dates()`."""
 
     start: str
     end: str

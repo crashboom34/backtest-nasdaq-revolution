@@ -643,20 +643,29 @@ Dette A — documentées séparément, aucune des deux prouvée comme ayant affe
   y compris sur sélection vide, avec le vrai moteur). Non-régression prouvée à chaque étape (114
   trades/`net_ret_pct` de référence inchangés sans fenêtre ; `compute_split_dates()` produit des
   bornes identiques à l'ancien comportement physiquement filtré). Suite complète : 811/811 tests.
-  **`AF-V-02` reste néanmoins non prêt pour une exécution scientifique complète** : Dette B et
-  l'écart `compute_split_dates()` (ci-dessous) restent `OPEN`, non tranchés. Détail complet :
-  `AI_HANDOFF.md` §16.
-- **Dette B — sémantique des frontières `SplitBoundary`, générique — toujours OPEN, non touchée
-  par la correction Engine Layer** : `SplitBoundary` déclare `[start, end)` (fin exclue), mais
-  `engine.run_backtest(start_date=, end_date=)` filtre en réalité sur un intervalle **fermé** des
-  deux côtés (`time_paris >= start_date` **et** `time_paris <= end_date`, jamais `< end_date`) —
-  toute exécution de deux fenêtres temporelles adjacentes peut donc provoquer une double inclusion
-  d'une barre située exactement à la frontière partagée (`a.end == b.start`). Documenté dans le
-  docstring de `SplitBoundary` (`dataset_split.py`, non modifié). **Ne concerne pas
-  spécifiquement `TRAIN`/`FINAL_HOLDOUT`** — propriété générique de toute paire de fenêtres
-  adjacentes qu'un futur protocole choisirait d'exécuter (zones réelles non tranchées ici, voir
-  ci-dessus). Sans impact vérifié sur `AF-V-01` (une seule zone exécutée, aucune bougie réelle sur
-  la frontière `2025-05-19T00:00:00+00:00`). **Dette distincte de la Dette A.**
+  **`AF-V-02` reste néanmoins non prêt pour une exécution scientifique complète** : l'écart
+  `compute_split_dates()` et la dette WARMUP dynamique (ci-dessous) restent `OPEN`, non tranchés.
+  Détail complet : `AI_HANDOFF.md` §16.
+- **Dette B — sémantique des frontières `SplitBoundary`, générique — DONE (2026-09-12)** :
+  `SplitBoundary` déclare `[start, end)` (fin exclue) ; `engine.run_backtest()` ne savait
+  auparavant filtrer que sur un intervalle **fermé** des deux côtés (`time_paris >= start_date`
+  **et** `time_paris <= end_date`, jamais `< end_date`), incapable de représenter cette frontière.
+  **Le moteur sait désormais représenter explicitement les deux intervalles** via le nouveau
+  paramètre `end_boundary` de `run_backtest()` : le **comportement legacy reste `[start,end]`**
+  (`end_boundary="inclusive"`, valeur par défaut, inchangé pour tous les appelants existants —
+  Optimizer, `app.py`) ; le mode `end_boundary="exclusive"` produit désormais fidèlement
+  `[start,end)`, empêchant toute double inclusion d'une barre à une frontière partagée
+  (`a.end == b.start`) entre deux fenêtres adjacentes. **Aucun câblage automatique n'existe entre
+  `DatasetSplitPlan`/`SplitBoundary` et l'engine** : un futur consommateur de `SplitBoundary` (par
+  exemple `AF-V-02`) doit demander lui-même explicitement `end_boundary="exclusive"` pour obtenir
+  la sémantique déclarée — documenté dans le docstring de `SplitBoundary` (`dataset_split.py`,
+  seul le docstring modifié, `DatasetSplitPlan` intact). Non-régression stricte : 823/823 tests,
+  `/code-review` sans finding bloquant. **Dette distincte de la Dette A** — elle concernait la
+  capacité du moteur à représenter `[start,end)`, pas le warmup/cold-start. Détail complet :
+  `AI_HANDOFF.md` §17. **`AF-V-02` reste néanmoins non prêt scientifiquement** malgré cette
+  clôture : l'écart `compute_split_dates()` et la dette WARMUP dynamique restent `OPEN`, et aucun
+  câblage réel `SplitBoundary` → `AF-V-02` n'existe encore (à concevoir lors de la conception du
+  protocole Walk-Forward lui-même).
 - **Écart `compute_split_dates()` — DISCOVERED / OPEN, distinct de Dette A et B, non numéroté
   sans décision de roadmap** : `optimizer.py::compute_split_dates()` convertit le point de split
   en chaîne `"YYYY-MM-DD"` (perte de l'heure précise) puis positionne `test_start` au lendemain —

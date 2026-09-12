@@ -983,7 +983,8 @@ structuration). Détail complet : `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `A
 ## 16. Dette A GLOBALE = DONE (2026-09-12) — Engine Layer + Optimizer Integration
 
 **Statut : Dette A GLOBALE DONE — ENGINE LAYER DONE et OPTIMIZER INTEGRATION DONE. Dette B reste
-OPEN. Écart `compute_split_dates()` reste DISCOVERED/OPEN. WARMUP dynamique reste OPEN.**
+OPEN à ce stade de la clôture (mise à jour ultérieure, même jour : voir §17 "Dette B — DONE"
+ci-dessous). Écart `compute_split_dates()` reste DISCOVERED/OPEN. WARMUP dynamique reste OPEN.**
 `AF-V-02` (Walk-Forward) reste **non commencé** — cette clôture ne l'autorise pas et ne prétend
 pas `GATE V` passée. Voir `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-02`, section
 préconditions) pour le détail complet.
@@ -1078,3 +1079,63 @@ préconditions) pour le détail complet.
   temporel silencieux d'au moins une journée de marché autour du split. Statut : DISCOVERED /
   OPEN, séparé de Dette B, non tranché par la roadmap, non corrigé ici. La séparation
   contexte/exécution de cette clôture ne modifie ni n'aggrave ce comportement (vérifié par test).
+
+## 17. Dette B — DONE (2026-09-12) — sémantique explicite des frontières temporelles
+
+**Statut : Dette B DONE.** Fait suite au commit Dette A GLOBALE `778d9c33993f830f372d1532d82dac214308d739`
+(§16 ci-dessus). **`compute_split_dates()` reste DISCOVERED/OPEN, WARMUP dynamique reste OPEN,
+`AF-V-02` reste NON COMMENCÉ, GATE V reste NON PASSÉE** — cette clôture ne les affecte pas et ne
+prétend résoudre aucun des trois.
+
+- **Écart corrigé** : `SplitBoundary` (`dataset_split.py`) déclare un intervalle demi-ouvert
+  `[start, end)` (borne de fin exclue) ; jusqu'ici, `engine.run_backtest()` ne savait filtrer que
+  sur un intervalle **fermé** `[start, end]` des deux côtés — incapable de représenter la
+  sémantique déclarée par `SplitBoundary`.
+- **API retenue** : nouveau paramètre `end_boundary: Literal["inclusive", "exclusive"] = "inclusive"`
+  sur `engine.run_backtest()`, ajouté en dernière position de signature (aucune rupture d'appel
+  positionnel existant). Choix d'un `Literal` à deux valeurs textuelles plutôt qu'un booléen
+  ambigu (`exclusive=True` obligerait à deviner par rapport à quoi) — cohérent avec le style déjà
+  établi du dépôt (`SplitZone = Literal[...]` dans ce même `dataset_split.py`).
+- **Défaut `"inclusive"` (comportement legacy, inchangé)** : `time_paris <= end_date` — intervalle
+  fermé `[start, end]`, reproduit **bit à bit** l'ancien comportement pour tout appelant existant
+  qui ne fournit pas `end_boundary` (`app.py`, `optimizer.py`, tous les tests historiques).
+  Verrouillé par test de non-régression stricte (`pd.testing.assert_frame_equal` sur trades ET
+  equity, égalité stricte des stats, appel legacy vs appel explicite `"inclusive"`).
+- **Mode `"exclusive"` (nouveau, opt-in explicite)** : `time_paris < end_date` — intervalle
+  demi-ouvert `[start, end)`, sémantique exacte de `SplitBoundary`. Une bougie exactement à
+  `end_date` n'est alors **jamais** visible par `strategy.prepare()`, ne peut jamais servir de
+  `next_open`, ni être utilisée pour la fermeture forcée — elle appartient potentiellement à la
+  fenêtre suivante.
+- **`start_date` non généralisé** : reste toujours inclusif (`>=`) dans les deux modes — cette
+  dette ne généralise que la borne de FIN, conformément à `SplitBoundary` qui ne déclare que sa
+  fin comme exclusive. Aucun `start_boundary` créé (scope creep explicitement évité).
+- **Invariants scientifiques vérifiés par test** : aucune double inclusion possible entre deux
+  fenêtres adjacentes `[A,B)` et `[B,C)` (vérifié sur l'equity curve réellement produite par
+  chacune, pas seulement sur un compteur) ; aucun look-ahead (troncature avant `prepare()`) ;
+  l'invariant `i + 1 <= exec_end_idx` (Dette A) reste préservé **génériquement**, sans aucun
+  changement du corps de boucle — seule `exec_end_idx` change via la troncature amont, que le mode
+  soit inclusif ou exclusif ; fermeture forcée sur la dernière bougie strictement avant `end` en
+  mode exclusif (jamais une bougie `== end_date`).
+- **Valeur invalide rejetée explicitement** : toute valeur de `end_boundary` hors
+  `{"inclusive", "exclusive"}` lève un `ValueError` clair — y compris quand `end_date is None`
+  (une configuration incohérente ne retombe jamais silencieusement sur `"inclusive"`).
+- **`end_date=None`** : `end_boundary` sans effet observable (rien à borner).
+- **Compatibilité historique confirmée** : `app.py` et l'Optimizer (`optimizer.py`/
+  `optimizer_process.py`) continuent d'appeler `run_backtest()` sans `end_boundary` — défaut
+  `"inclusive"` garanti par construction, aucun de ces fichiers modifié. `strategies/
+  perfect_revolution_v1.py`, `validation_oos.py`, `compute_split_dates()` strictement intacts.
+- **`dataset_split.py`** : seul le docstring de `SplitBoundary` modifié (aucune dataclass/
+  validation touchée) — indique désormais honnêtement que le moteur sait représenter `[start,end)`
+  via l'opt-in explicite `end_boundary="exclusive"`, que le défaut reste inclusif pour
+  compatibilité legacy, qu'un futur consommateur de `SplitBoundary` doit demander explicitement le
+  mode exclusif, et qu'**aucun câblage automatique** `DatasetSplitPlan` → `run_backtest()` n'existe
+  encore. `DatasetSplitPlan` lui-même non modifié.
+- **TDD** : RED capturé avant implémentation (`pytest tests/test_engine.py::TestEndBoundarySemantics`
+  → 11 failed / 1 passed, `TypeError: unexpected keyword argument 'end_boundary'`), puis GREEN
+  (12/12 nouveaux tests B1–B10). `/code-review` (2 sous-agents parallèles, axes Correctness+
+  Backward-compatibility et Scientific-semantics+Scope) : **0 finding bloquant** ; deux lacunes de
+  test mineures relevées et sciemment non comblées (fenêtre vide `start==end` en exclusif,
+  `end_date` antérieur à toutes les données — chemin déjà sain, non introduit par cette
+  correction).
+- **Tests** : suite complète **823/823** (811 baseline + 12 nouveaux), 0 régression. `py_compile`
+  propre sur `engine.py`/`dataset_split.py`.

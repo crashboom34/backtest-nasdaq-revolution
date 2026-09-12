@@ -353,3 +353,165 @@ class TestExecutionWindowEdgeCases:
         assert calls, "progress_cb doit être appelé au moins une fois (1.0 final)"
         assert calls[-1] == 1.0
         assert all(0.0 <= c <= 1.0 for c in calls)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Dette B (2026-09-12) — sémantique explicite des frontières temporelles
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# engine.run_backtest() doit représenter EXPLICITEMENT deux contrats, jamais un troisième :
+#   - end_boundary="inclusive" (DÉFAUT, comportement historique)      -> [start, end]
+#   - end_boundary="exclusive" (nouveau, opt-in pour SplitBoundary)   -> [start, end)
+# `start_date` reste toujours inclusif (`>=`) dans les deux cas — hors scope de cette dette.
+# compute_split_dates()/Optimizer/stratégie/validation_oos.py restent strictement hors scope.
+
+
+class TestEndBoundarySemantics:
+
+    # ── B1/B2 — défaut legacy inclusif, et explicite inclusive identique ────────────
+
+    def test_b1_default_end_boundary_is_inclusive_legacy(self):
+        df = _build_synthetic_df(20)
+        strat = _RecordingStrategy(warmup=2)
+
+        run_backtest(df, strat, {}, end_date=_bar_time_str(df, 14))
+
+        assert strat.prepared_len == 15  # bougie 14 incluse — comportement historique
+
+    def test_b2_explicit_inclusive_matches_the_default(self):
+        df = _build_synthetic_df(20)
+        strat = _RecordingStrategy(warmup=2)
+
+        run_backtest(df, strat, {}, end_date=_bar_time_str(df, 14), end_boundary="inclusive")
+
+        assert strat.prepared_len == 15
+
+    # ── B3 — exclusif exclut la bougie exactement à end_date ─────────────────────────
+
+    def test_b3_exclusive_end_boundary_excludes_the_boundary_bar(self):
+        df = _build_synthetic_df(20)
+        strat = _RecordingStrategy(warmup=2)
+
+        run_backtest(df, strat, {}, end_date=_bar_time_str(df, 14), end_boundary="exclusive")
+
+        assert strat.prepared_len == 14  # indices 0..13 seulement, bougie 14 EXCLUE
+
+    # ── B4 — deux fenêtres adjacentes, jamais de double inclusion ────────────────────
+
+    def test_b4_two_adjacent_windows_never_double_include_the_boundary_bar(self):
+        """A = [.., boundary) et B = [boundary, ..) : la bougie "boundary" n'appartient jamais
+        aux deux fenêtres — vérifié sur l'equity curve réellement produite par chaque fenêtre."""
+        df = _build_synthetic_df(20)
+        boundary = _bar_time_str(df, 10)
+        boundary_ts = df["time_paris"].iloc[10]
+
+        strat_a = _RecordingStrategy(warmup=2)
+        _, equity_a, _ = run_backtest(df, strat_a, {}, end_date=boundary, end_boundary="exclusive")
+        dates_a = {pd.Timestamp(d) for d in equity_a["date"]}
+
+        strat_b = _RecordingStrategy(warmup=2)
+        _, equity_b, _ = run_backtest(
+            df, strat_b, {},
+            start_date=boundary, end_date=_bar_time_str(df, 19), end_boundary="exclusive",
+        )
+        dates_b = {pd.Timestamp(d) for d in equity_b["date"]}
+
+        assert boundary_ts not in dates_a  # jamais dans la fenêtre qui se termine à boundary
+        assert dates_a.isdisjoint(dates_b)  # aucune bougie commune entre les deux fenêtres
+
+    # ── B5 — prepare() ne voit jamais la bougie == end_date en mode exclusif ─────────
+
+    def test_b5_prepare_never_sees_the_bar_exactly_at_end_date_when_exclusive(self):
+        df = _build_synthetic_df(20)
+        strat = _RecordingStrategy(warmup=2)
+
+        run_backtest(df, strat, {}, end_date=_bar_time_str(df, 14), end_boundary="exclusive")
+
+        assert strat.prepared_last_time == df["time_paris"].iloc[13]
+        assert strat.prepared_last_time != df["time_paris"].iloc[14]
+
+    # ── B6 — next_open à la frontière interdit en mode exclusif ──────────────────────
+
+    def test_b6_signal_requiring_next_open_at_the_excluded_boundary_bar_is_never_executed(self):
+        df = _build_synthetic_df(20)
+        # end exclusif à la bougie 14 -> contexte = indices 0..13 (14 lignes), exec_end_idx=13.
+        # Dernier i exécutable = 12 (i+1=13 valide) ; jamais i=13 (nécessiterait next_open=opn[14],
+        # une bougie qui n'existe même plus dans le contexte).
+        strat = _RecordingStrategy(warmup=2, enter_at={13})
+
+        trades_df, _, _ = run_backtest(
+            df, strat, {}, end_date=_bar_time_str(df, 14), end_boundary="exclusive")
+
+        assert 13 not in strat.on_bar_indices
+        assert len(trades_df) == 0
+
+    def test_b6_signal_on_the_last_executable_bar_remains_allowed(self):
+        """Contraste avec le test précédent : un signal sur la DERNIÈRE bougie réellement
+        exécutable (12, jamais la bougie exclue 13) reste autorisé."""
+        df = _build_synthetic_df(20)
+        strat = _RecordingStrategy(warmup=2, enter_at={12})
+
+        trades_df, _, _ = run_backtest(
+            df, strat, {}, end_date=_bar_time_str(df, 14), end_boundary="exclusive")
+
+        assert len(trades_df) == 1
+
+    # ── B7 — fermeture forcée sur la dernière bougie strictement avant end ───────────
+
+    def test_b7_forced_closure_uses_the_last_bar_strictly_before_end_when_exclusive(self):
+        df = _build_synthetic_df(20)
+        strat = _RecordingStrategy(warmup=2, enter_at={3})
+
+        trades_df, _, _ = run_backtest(
+            df, strat, {}, end_date=_bar_time_str(df, 14), end_boundary="exclusive")
+
+        assert len(trades_df) == 1
+        last_trade = trades_df.iloc[-1]
+        assert last_trade["raison_sortie"] == "fin-donnees"
+        assert last_trade["prix_sortie"] == round(float(df["close"].iloc[13]), 2)  # bougie 13
+        assert last_trade["date_sortie"] == str(df["time_paris"].iloc[13])
+
+    # ── B8 — end_date absent : end_boundary sans effet ───────────────────────────────
+
+    def test_b8_end_boundary_has_no_effect_when_end_date_is_none(self):
+        df = _build_synthetic_df(20)
+        strat_incl = _RecordingStrategy(warmup=2)
+        strat_excl = _RecordingStrategy(warmup=2)
+
+        run_backtest(df, strat_incl, {}, end_boundary="inclusive")
+        run_backtest(df, strat_excl, {}, end_boundary="exclusive")
+
+        assert strat_incl.prepared_len == strat_excl.prepared_len == 20
+
+    # ── B9 — valeur invalide rejetée explicitement, jamais un fallback silencieux ────
+
+    def test_b9_invalid_end_boundary_value_raises_a_clear_error(self):
+        df = _build_synthetic_df(20)
+        strat = _RecordingStrategy(warmup=2)
+
+        with pytest.raises(ValueError):
+            run_backtest(df, strat, {}, end_date=_bar_time_str(df, 14), end_boundary="foo")
+
+    def test_b9_invalid_end_boundary_rejected_even_without_end_date(self):
+        """§15 — end_date=None n'exempte pas end_boundary d'être une valeur valide : la
+        configuration doit rester cohérente."""
+        df = _build_synthetic_df(20)
+        strat = _RecordingStrategy(warmup=2)
+
+        with pytest.raises(ValueError):
+            run_backtest(df, strat, {}, end_date=None, end_boundary="foo")
+
+    # ── B10 — non-régression stricte : appel legacy == appel explicite inclusive ─────
+
+    def test_b10_legacy_call_without_end_boundary_matches_explicit_inclusive_byte_for_byte(self):
+        df = _build_synthetic_df(20)
+        strat1 = _RecordingStrategy(warmup=2, enter_at={5})
+        strat2 = _RecordingStrategy(warmup=2, enter_at={5})
+
+        trades1, equity1, stats1 = run_backtest(df, strat1, {}, end_date=_bar_time_str(df, 14))
+        trades2, equity2, stats2 = run_backtest(
+            df, strat2, {}, end_date=_bar_time_str(df, 14), end_boundary="inclusive")
+
+        pd.testing.assert_frame_equal(trades1, trades2)
+        pd.testing.assert_frame_equal(equity1, equity2)
+        assert stats1 == stats2
