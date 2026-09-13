@@ -678,10 +678,18 @@ def build_meta(
     combinations_tested: int,
     benchmark_ms: float,
     report: dict = None,
+    resolved_train_test_windows: Optional[dict] = None,
 ) -> dict:
     """
     Construit le dictionnaire méta complet pour {run_id}.meta.json.
-    """
+
+    `resolved_train_test_windows` (correction scientifique du split TRAIN/TEST, 2026-09-12) :
+    dict `{train_start, boundary, test_end}` (voir `optimizer.TrainTestWindows`) — la fenêtre
+    RÉELLEMENT résolue pour ce run, absente jusqu'ici de tout artefact (`config_used.json` ne
+    conserve que la recette brute `split_method`/`train_ratio`/`split_date`, jamais la borne
+    calculée). `None` par défaut (train/test désactivé, ou appelant antérieur à cette mission —
+    100% backward-compatible, `meta["train_test_windows"]` reste alors `None`, jamais ajouté
+    rétroactivement à un ancien meta.json chargé tel quel par `load_meta()`)."""
     # Top 100
     valid = [r for r in all_results if r["score"] > 0]
     valid.sort(key=lambda r: r["score"], reverse=True)
@@ -735,6 +743,16 @@ def build_meta(
         "score_weights":             config_dict.get("score_weights", {}),
         "filters":                   config_dict.get("filters", {}),
         "train_test":                config_dict.get("train_test", {}),
+        "train_test_windows": (
+            {
+                "train_start":       resolved_train_test_windows["train_start"],
+                "boundary":          resolved_train_test_windows["boundary"],
+                "test_end":          resolved_train_test_windows["test_end"],
+                "train_end_boundary": "exclusive",
+                "test_end_boundary":  "inclusive",
+            }
+            if resolved_train_test_windows else None
+        ),
         "top_100":                   top_100,
         "sensitivity":               {k: round(v, 3) for k, v in sensitivity.items()},
         "report":                    report or {},

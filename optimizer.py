@@ -19,7 +19,7 @@ import importlib
 import itertools
 import os
 from dataclasses import dataclass, field
-from typing import Optional, Callable
+from typing import Optional, Callable, Literal
 
 import numpy as np
 import pandas as pd
@@ -242,10 +242,16 @@ def _load_strategy(module_path: str):
 
 
 def _run_single(params: dict, config: OptimizationConfig,
-                df, start_date=None, end_date=None) -> dict:
+                df, start_date=None, end_date=None,
+                end_boundary: Literal["inclusive", "exclusive"] = "inclusive") -> dict:
     """
     Lance un backtest unique et retourne le résultat scoré.
     Fonction top-level pour être picklable dans ProcessPoolExecutor.
+
+    `end_boundary` (correction scientifique du split TRAIN/TEST, 2026-09-12) : transmis tel quel
+    à `engine.run_backtest()` — `"inclusive"` (défaut, comportement historique) pour tout appel
+    sans train/test ou pour la phase TEST ; `"exclusive"` pour la phase TRAIN uniquement (voir
+    `Optimizer.run()`, `_TRAIN_END_BOUNDARY`/`_TEST_END_BOUNDARY`).
 
     Retourne un dict avec : score, params, stats, filtered, filter_reason, warnings
     """
@@ -266,6 +272,7 @@ def _run_single(params: dict, config: OptimizationConfig,
             slip_out=gp.get("slip_out", 0.5),
             start_date=start_date,
             end_date=end_date,
+            end_boundary=end_boundary,
         )
     except Exception as e:
         return {
@@ -345,32 +352,161 @@ def benchmark_speed(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CALCUL DES DATES DE SPLIT TRAIN / TEST
+# CALCUL DES FENÊTRES DE SPLIT TRAIN / TEST (correction scientifique, 2026-09-12)
 # ══════════════════════════════════════════════════════════════════════════════
+#
+# Écart historique corrigé ici (audit read-only préalable) : l'ancienne version tronquait
+# train_end/test_start/test_end en chaîne "YYYY-MM-DD" (perte totale de l'heure), puis
+# `engine.run_backtest()` interprétait ces dates en filtrage FERMÉ sur des timestamps minuit —
+# créant un trou temporel silencieux d'au moins une journée de marché autour du split (quantifié
+# empiriquement : jusqu'à 28.6% de barres perdues sur un exemple synthétique 7 jours), sans
+# jamais lever d'erreur. Cette correction élimine à la fois la perte de précision ET le trou.
 
-def compute_split_dates(df, train_test: TrainTestConfig):
-    """
-    Retourne (train_start, train_end, test_start, test_end) en str "YYYY-MM-DD".
-    """
-    import pandas as pd
+# Sémantique de frontière transmise à engine.run_backtest() — TRAIN s'arrête juste AVANT
+# `boundary` (jamais la barre pile dessus), TEST commence PILE sur `boundary` (inclus) : la
+# barre exactement à `boundary` appartient donc TOUJOURS à TEST, jamais aux deux, jamais à
+# aucune. Constantes nommées pour éviter de disperser les littéraux "exclusive"/"inclusive" à
+# travers la dizaine de signatures qui les relaient, sans introduire de nouvelle abstraction.
+_TRAIN_END_BOUNDARY: Literal["exclusive"] = "exclusive"
+_TEST_END_BOUNDARY:  Literal["inclusive"] = "inclusive"
 
+# Identifie la sémantique exacte du contrat TRAIN/TEST produit par compute_split_dates() —
+# distincte du `git_commit` déjà capturé automatiquement par ailleurs (data_manifest.json,
+# market_data/backtest_manifest.py) : `git_commit` identifie le LOGICIEL exact, cette constante
+# identifie le CONTRAT SCIENTIFIQUE train/test (indépendant, en principe, du reste du logiciel).
+# Incrémenter uniquement si la sémantique TRAIN/TEST elle-même change à nouveau (jamais pour un
+# changement de code sans impact sur les bornes produites) — voir validate_resume_train_test_
+# semantics() et docs/adr/0018-*.md pour la garde de reprise cross-version associée.
+TRAIN_TEST_SEMANTICS_VERSION = "exact-boundary-v2"
+
+
+@dataclass(frozen=True)
+class TrainTestWindows:
+    """Fenêtres TRAIN/TEST résolues par `compute_split_dates()` — remplace l'ancien tuple
+    `(train_start, train_end, test_start, test_end)` (4 chaînes "YYYY-MM-DD", ambiguïté
+    d'inclusivité implicite, précision horaire perdue).
+
+    Invariant UNIQUE, jamais deux valeurs indépendantes pouvant diverger : la même `boundary`
+    est à la fois la fin EXCLUSIVE de TRAIN et le début INCLUSIF de TEST —
+
+        TRAIN = [train_start, boundary)
+        TEST  = [boundary,    test_end]
+
+    Une bougie exactement à `boundary` appartient donc TOUJOURS à TEST, jamais aux deux, jamais
+    à aucune (aucune barre perdue, aucune barre dupliquée entre TRAIN et TEST — la mécanique
+    d'exclusion/inclusion elle-même est déjà garantie par le moteur, voir
+    `engine.run_backtest(end_boundary=)`, Dette B, et son test `TestEndBoundarySemantics::
+    test_b4_two_adjacent_windows_never_double_include_the_boundary_bar`).
+
+    Les trois champs sont des chaînes ISO-8601 complètes (`.isoformat()` — offset ET fraction de
+    seconde préservés, jamais tronqués à une date), acceptées telles quelles par
+    `engine.run_backtest(start_date=, end_date=)` (voir `engine._parse_boundary_timestamp()`).
+    `train_start`/`test_end` proviennent des bornes RÉELLES de `execution_df` (jamais une valeur
+    fictive au-delà de la dernière barre effective)."""
+
+    train_start: str
+    boundary: str
+    test_end: str
+
+
+class TrainTestSemanticsMismatch(ValueError):
+    """Levée quand un job repris (`resume_run_id`) a été créé sous une sémantique train/test
+    différente de `TRAIN_TEST_SEMANTICS_VERSION` courante (absente = "legacy", antérieure à cette
+    correction). Jamais un mélange silencieux de scores TRAIN/TEST calculés sous deux contrats
+    différents — voir `validate_resume_train_test_semantics()`."""
+
+
+def validate_resume_train_test_semantics(
+    current_train_test: TrainTestConfig,
+    source_config: Optional[dict],
+    source_run_id: str,
+) -> None:
+    """Garde de reprise cross-version (mission §19-20, correction scientifique du split
+    TRAIN/TEST). Ne s'applique QUE si le run COURANT active train/test — une reprise sans
+    train/test n'est jamais bloquée par cette dette, quelle que soit la source.
+
+    `source_config` : dict brut tel que chargé par `optimization_store.load_config()` pour le
+    job source (`None` si introuvable/non chargé — traité comme "legacy", jamais silencieusement
+    ignoré). Lève `TrainTestSemanticsMismatch` si la version de sémantique train/test du job
+    source ne correspond pas EXACTEMENT à `TRAIN_TEST_SEMANTICS_VERSION` — y compris quand le
+    champ est absent (job antérieur à cette correction)."""
+    if not current_train_test.enabled:
+        return
+    source_version = (source_config or {}).get("train_test_semantics_version")
+    if source_version != TRAIN_TEST_SEMANTICS_VERSION:
+        raise TrainTestSemanticsMismatch(
+            f"Reprise refusée : le job source {source_run_id!r} utilise la sémantique "
+            f"train/test {source_version!r} (legacy si absente), incompatible avec la version "
+            f"courante {TRAIN_TEST_SEMANTICS_VERSION!r}. Mélanger, au sein d'un même run repris, "
+            "des scores TRAIN/TEST calculés sous deux contrats de frontière différents "
+            "produirait des métriques scientifiquement incohérentes. Relancer un nouveau run "
+            "sans resume_run_id plutôt que de reprendre ce job source."
+        )
+
+
+def compute_split_dates(df, train_test: TrainTestConfig) -> TrainTestWindows:
+    """Résout les fenêtres TRAIN/TEST à partir de la sélection d'exécution (`df` =
+    `execution_df`, jamais le contexte élargi — comportement de sélection inchangé, voir
+    `Optimizer.run()`).
+
+    TRAIN = [train_start, boundary) exclusive ; TEST = [boundary, test_end] inclusive.
+
+    Méthode "ratio" (par défaut) : `boundary` = ratio de DURÉE TEMPORELLE (jamais un ratio du
+    nombre de barres) — `train_ratio` doit être strictement dans `]0, 1[`, sinon `ValueError`
+    explicite (jamais une fenêtre TRAIN ou TEST vide masquée derrière une valeur limite).
+
+    Méthode "date" : `split_date` est la date du PREMIER jour de TEST (décision D1, 2026-09-12 —
+    généralisation cohérente avec la méthode ratio, PAS une restauration certaine de l'intention
+    historique du code — voir docs/adr/0018-*.md). `boundary` = minuit Europe/Paris de cette
+    date. `split_date` est obligatoire pour cette méthode : `ValueError` explicite s'il est
+    absent, plutôt que l'ancien repli silencieux vers la méthode ratio.
+
+    Validation stricte, dans tous les cas : `global_start < boundary < global_end` — une
+    configuration incapable de produire deux régions temporelles non vides (dataset vide, une
+    seule barre, `boundary` hors période ou confondu avec une extrémité) lève `ValueError`,
+    jamais une fenêtre vide silencieuse. Le chemin SANS train/test (`Optimizer.run()` quand
+    `train_test.enabled` est faux) n'appelle jamais cette fonction et reste inchangé, tolérant
+    aux sélections vides."""
     times = df["time_paris"]
+    if times.empty:
+        raise ValueError(
+            "compute_split_dates() : sélection vide — impossible de calculer un split "
+            "train/test sur un DataFrame sans aucune barre."
+        )
     global_start = times.min()
     global_end   = times.max()
 
-    if train_test.split_method == "date" and train_test.split_date:
-        split = pd.Timestamp(train_test.split_date, tz="Europe/Paris")
+    if train_test.split_method == "date":
+        if not train_test.split_date:
+            raise ValueError(
+                "compute_split_dates() : split_method='date' exige train_test.split_date — "
+                "jamais de repli silencieux vers la méthode 'ratio'."
+            )
+        boundary = pd.Timestamp(train_test.split_date, tz="Europe/Paris")
     else:
-        # Méthode ratio
+        if not (0 < train_test.train_ratio < 1):
+            raise ValueError(
+                f"compute_split_dates() : train_ratio={train_test.train_ratio!r} invalide — "
+                "doit être strictement compris entre 0 et 1 (ratio de durée temporelle, jamais "
+                "de ratio de barres). Une valeur <= 0 ou >= 1 produirait une fenêtre TRAIN ou "
+                "TEST entièrement vide, jamais masquée silencieusement ici."
+            )
         duration = (global_end - global_start).total_seconds()
-        split    = global_start + pd.Timedelta(seconds=duration * train_test.train_ratio)
+        boundary = global_start + pd.Timedelta(seconds=duration * train_test.train_ratio)
 
-    train_start = global_start.strftime("%Y-%m-%d")
-    train_end   = split.strftime("%Y-%m-%d")
-    test_start  = (split + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    test_end    = global_end.strftime("%Y-%m-%d")
+    if not (global_start < boundary < global_end):
+        raise ValueError(
+            f"compute_split_dates() : boundary={boundary!r} doit être strictement compris "
+            f"entre global_start={global_start!r} et global_end={global_end!r} — un dataset "
+            "vide, insuffisant (une seule barre) ou une frontière confondue avec l'une des "
+            "extrémités ne peut pas produire deux régions TRAIN/TEST non vides."
+        )
 
-    return train_start, train_end, test_start, test_end
+    return TrainTestWindows(
+        train_start=global_start.isoformat(),
+        boundary=boundary.isoformat(),
+        test_end=global_end.isoformat(),
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -404,6 +540,12 @@ class Optimizer:
         self._exec_start   = window.exec_start
         self._exec_end     = window.exec_end
         self.df_rows_used  = window.exec_row_count
+        # Fenêtre TRAIN/TEST réellement résolue par compute_split_dates() (correction
+        # scientifique du split, 2026-09-12) — None tant que run() ne l'a pas calculée, ou si
+        # train/test n'est pas activé. Exposée pour permettre à optimizer_process.py de la
+        # persister dans meta.json (voir job_store/build_meta) sans changer le contrat de
+        # retour de run() (tuple (all_results, sensitivity) inchangé).
+        self.resolved_train_test_windows: Optional[TrainTestWindows] = None
         self._active_ranges = [pr for pr in config.param_ranges if pr.enabled]
         self._max_combinations = normalize_max_combinations(config.max_combinations)
         self._scheduled_combinations = 0
@@ -430,7 +572,8 @@ class Optimizer:
                               progress_cb: Callable = None,
                               stop_flag_fn: Callable = None,
                               already_tested: set = None,
-                              start_date=None, end_date=None) -> list:
+                              start_date=None, end_date=None,
+                              end_boundary: Literal["inclusive", "exclusive"] = "inclusive") -> list:
         """
         Lance une liste de combinaisons de paramètres.
         Retourne une liste de résultats.
@@ -448,7 +591,7 @@ class Optimizer:
                 continue
             tested.add(h)
 
-            result = _run_single(params, self.config, self.df, start_date, end_date)
+            result = _run_single(params, self.config, self.df, start_date, end_date, end_boundary)
             results.append(result)
 
             if progress_cb:
@@ -461,7 +604,8 @@ class Optimizer:
                             progress_cb: Callable = None,
                             stop_flag_fn: Callable = None,
                             already_tested: set = None,
-                            start_date=None, end_date=None) -> list:
+                            start_date=None, end_date=None,
+                            end_boundary: Literal["inclusive", "exclusive"] = "inclusive") -> list:
         """
         Lance les combinaisons en parallèle.
         Taille du pool = config.n_workers.
@@ -493,6 +637,7 @@ class Optimizer:
                     self.config,
                     start_date,
                     end_date,
+                    end_boundary,
                 )
                 futures[fut] = params
 
@@ -518,21 +663,25 @@ class Optimizer:
         return results
 
     def _run_batch(self, combos, progress_cb=None, stop_flag_fn=None,
-                   already_tested=None, start_date=None, end_date=None):
+                   already_tested=None, start_date=None, end_date=None,
+                   end_boundary: Literal["inclusive", "exclusive"] = "inclusive"):
         """Dispatche vers séquentiel ou parallèle selon n_workers."""
         combos = self._apply_max_combinations(combos)
         if not combos:
             return []
         if self.config.n_workers <= 1:
             return self._run_batch_sequential(
-                combos, progress_cb, stop_flag_fn, already_tested, start_date, end_date)
+                combos, progress_cb, stop_flag_fn, already_tested, start_date, end_date,
+                end_boundary)
         else:
             return self._run_batch_parallel(
-                combos, progress_cb, stop_flag_fn, already_tested, start_date, end_date)
+                combos, progress_cb, stop_flag_fn, already_tested, start_date, end_date,
+                end_boundary)
 
     # ── Mode 1 : Variable par variable ────────────────────────────────────
     def run_mode1(self, progress_cb=None, stop_flag_fn=None,
-                  already_tested=None, train_start=None, train_end=None) -> list:
+                  already_tested=None, train_start=None, train_end=None,
+                  end_boundary: Literal["inclusive", "exclusive"] = "inclusive") -> list:
         """
         Optimise chaque variable indépendamment, en gardant le meilleur réglage.
         """
@@ -550,7 +699,8 @@ class Optimizer:
                 combos.append(p)
 
             batch = self._run_batch(
-                combos, progress_cb, stop_flag_fn, already_tested, train_start, train_end)
+                combos, progress_cb, stop_flag_fn, already_tested, train_start, train_end,
+                end_boundary)
             all_results.extend(batch)
 
             # Garder le meilleur
@@ -564,7 +714,8 @@ class Optimizer:
     # ── Mode 2 : Croisée autour des meilleures zones ───────────────────────
     def run_mode2(self, prior_results: list,
                   progress_cb=None, stop_flag_fn=None,
-                  already_tested=None, train_start=None, train_end=None) -> list:
+                  already_tested=None, train_start=None, train_end=None,
+                  end_boundary: Literal["inclusive", "exclusive"] = "inclusive") -> list:
         """
         Teste le produit cartésien des valeurs prometteuses (top 30%).
         Nécessite des résultats préalables (mode1 ou run existant).
@@ -611,11 +762,13 @@ class Optimizer:
             combos.append(p)
 
         return self._run_batch(
-            combos, progress_cb, stop_flag_fn, already_tested, train_start, train_end)
+            combos, progress_cb, stop_flag_fn, already_tested, train_start, train_end,
+            end_boundary)
 
     # ── Mode 3 : Grille complète ───────────────────────────────────────────
     def run_mode3(self, progress_cb=None, stop_flag_fn=None,
-                  already_tested=None, train_start=None, train_end=None) -> list:
+                  already_tested=None, train_start=None, train_end=None,
+                  end_boundary: Literal["inclusive", "exclusive"] = "inclusive") -> list:
         """Teste toutes les combinaisons possibles."""
         names  = [pr.name for pr in self._active_ranges]
         values = [pr.generate_values() for pr in self._active_ranges]
@@ -631,11 +784,13 @@ class Optimizer:
                 break
 
         return self._run_batch(
-            combos, progress_cb, stop_flag_fn, already_tested, train_start, train_end)
+            combos, progress_cb, stop_flag_fn, already_tested, train_start, train_end,
+            end_boundary)
 
     # ── Mode 4 : Optimisation générale intelligente ────────────────────────
     def run_mode4(self, progress_cb=None, stop_flag_fn=None,
-                  already_tested=None, train_start=None, train_end=None) -> list:
+                  already_tested=None, train_start=None, train_end=None,
+                  end_boundary: Literal["inclusive", "exclusive"] = "inclusive") -> list:
         """
         Sélectionne automatiquement la méthode selon N_combinations :
         - N ≤ 50 000 : grille complète
@@ -645,23 +800,27 @@ class Optimizer:
         n_total = count_combinations(self._active_ranges)
 
         if self._max_combinations is not None:
-            return self.run_mode3(progress_cb, stop_flag_fn, already_tested, train_start, train_end)
+            return self.run_mode3(
+                progress_cb, stop_flag_fn, already_tested, train_start, train_end, end_boundary)
 
         if n_total <= 50_000:
-            return self.run_mode3(progress_cb, stop_flag_fn, already_tested, train_start, train_end)
+            return self.run_mode3(
+                progress_cb, stop_flag_fn, already_tested, train_start, train_end, end_boundary)
 
         elif n_total <= 500_000:
             return self._run_stratified_sample(
-                50_000, progress_cb, stop_flag_fn, already_tested, train_start, train_end)
+                50_000, progress_cb, stop_flag_fn, already_tested, train_start, train_end,
+                end_boundary)
 
         else:
             return self._run_progressive_grid(
-                progress_cb, stop_flag_fn, already_tested, train_start, train_end)
+                progress_cb, stop_flag_fn, already_tested, train_start, train_end, end_boundary)
 
     # ── Échantillonnage stratifié ─────────────────────────────────────────
     def _run_stratified_sample(self, n_sample: int,
                                progress_cb=None, stop_flag_fn=None,
-                               already_tested=None, train_start=None, train_end=None) -> list:
+                               already_tested=None, train_start=None, train_end=None,
+                               end_boundary: Literal["inclusive", "exclusive"] = "inclusive") -> list:
         """Tire n_sample combinaisons aléatoires, réparties uniformément."""
         names  = [pr.name for pr in self._active_ranges]
         values = [pr.generate_values() for pr in self._active_ranges]
@@ -684,11 +843,13 @@ class Optimizer:
                 combos.append(p)
 
         return self._run_batch(
-            combos, progress_cb, stop_flag_fn, already_tested, train_start, train_end)
+            combos, progress_cb, stop_flag_fn, already_tested, train_start, train_end,
+            end_boundary)
 
     # ── Grille progressive (3 passes) ─────────────────────────────────────
     def _run_progressive_grid(self, progress_cb=None, stop_flag_fn=None,
-                              already_tested=None, train_start=None, train_end=None) -> list:
+                              already_tested=None, train_start=None, train_end=None,
+                              end_boundary: Literal["inclusive", "exclusive"] = "inclusive") -> list:
         """
         Pass 1 : grille grossière (step × 4)
         Pass 2 : grille fine autour du top 20% de la pass 1
@@ -711,7 +872,8 @@ class Optimizer:
 
         orig_ranges = self._active_ranges
         self._active_ranges = [r for r in coarse_ranges if r.enabled]
-        pass1_results = self.run_mode3(progress_cb, stop_flag_fn, already_tested, train_start, train_end)
+        pass1_results = self.run_mode3(
+            progress_cb, stop_flag_fn, already_tested, train_start, train_end, end_boundary)
         all_results.extend(pass1_results)
 
         if stop_flag_fn and stop_flag_fn():
@@ -726,7 +888,9 @@ class Optimizer:
 
             # Raffiner les ranges autour des meilleures zones
             self._active_ranges = orig_ranges
-            fine_results = self.run_mode2(top_p1, progress_cb, stop_flag_fn, already_tested, train_start, train_end)
+            fine_results = self.run_mode2(
+                top_p1, progress_cb, stop_flag_fn, already_tested, train_start, train_end,
+                end_boundary)
             all_results.extend(fine_results)
 
         self._active_ranges = orig_ranges
@@ -747,46 +911,58 @@ class Optimizer:
         cfg = self.config
         tt  = cfg.train_test
 
-        # ── Calcul des dates de split ──────────────────────────
-        train_start = train_end = test_start = test_end = None
+        # ── Calcul des fenêtres de split (correction scientifique, 2026-09-12) ──
+        train_start = train_end = None
+        end_boundary_for_optimization: Literal["inclusive", "exclusive"] = _TEST_END_BOUNDARY
         if tt.enabled:
-            # Dette A (Optimizer Integration) : compute_split_dates() doit voir la même vue de
-            # données qu'avant cette correction — la sélection d'EXÉCUTION (self._execution_df),
-            # jamais self.df (désormais le contexte élargi, qui déplacerait global_start vers
-            # l'historique amont et fausserait le ratio train/test). Comportement de
-            # compute_split_dates() lui-même inchangé, y compris son trou de journée connu
-            # (DISCOVERED/OPEN, non corrigé ici).
-            train_start, train_end, test_start, test_end = compute_split_dates(self._execution_df, tt)
+            # compute_split_dates() voit la sélection d'EXÉCUTION (self._execution_df), jamais
+            # self.df (le contexte élargi, qui déplacerait global_start vers l'historique amont
+            # et fausserait le ratio train/test) — comportement de sélection hérité de Dette A,
+            # inchangé par cette correction.
+            windows = compute_split_dates(self._execution_df, tt)
+            self.resolved_train_test_windows = windows
+            train_start = windows.train_start
+            train_end   = windows.boundary
+            # TRAIN=[train_start, boundary) — la barre à `boundary` n'influence jamais TRAIN,
+            # elle appartient exclusivement à TEST (voir TrainTestWindows, docs/adr/0018-*.md).
+            end_boundary_for_optimization = _TRAIN_END_BOUNDARY
         else:
-            # Dette A (Optimizer Integration) : sans train/test, self.df est désormais le
-            # CONTEXTE élargi (historique amont compris) — un backtest sans bornes explicites
-            # exécuterait alors sur tout ce contexte, y compris avant la période demandée. Borner
-            # explicitement à la sélection d'exécution effective (jamais (None, None) implicite).
+            # Sans train/test, self.df est le CONTEXTE élargi (historique amont compris) — un
+            # backtest sans bornes explicites exécuterait alors sur tout ce contexte, y compris
+            # avant la période demandée. Borner explicitement à la sélection d'exécution
+            # effective (jamais (None, None) implicite) — comportement historique inchangé,
+            # `end_boundary` reste "inclusive" (défaut).
             train_start, train_end = self._exec_start, self._exec_end
 
         # ── Phase optimisation ─────────────────────────────────
         mode_fn = {
             "single_var": self.run_mode1,
-            "cross_zone": lambda pc, sf, at, ts, te: self.run_mode2(
-                [], pc, sf, at, ts, te),  # pas de prior = zones pleines
+            "cross_zone": lambda pc, sf, at, ts, te, eb: self.run_mode2(
+                [], pc, sf, at, ts, te, eb),  # pas de prior = zones pleines
             "grid":       self.run_mode3,
             "general":    self.run_mode4,
         }.get(cfg.mode, self.run_mode4)
 
         all_results = mode_fn(
             progress_cb, stop_flag_fn, already_tested or set(),
-            train_start, train_end,
+            train_start, train_end, end_boundary_for_optimization,
         )
 
         # Tri par score décroissant
         all_results.sort(key=lambda r: r["score"], reverse=True)
 
         # ── Phase validation (train/test) ──────────────────────
-        if tt.enabled and test_start and all_results:
+        if tt.enabled and all_results:
+            windows = self.resolved_train_test_windows
             top_to_validate = [r for r in all_results if r["score"] > 0][:cfg.top_k_save]
             for result in top_to_validate:
+                # TEST=[boundary, test_end] — début INCLUSIF explicite (même si c'est le défaut
+                # de engine.run_backtest(), l'expliciter ici rend le contrat visible dans le
+                # diff, conformément à la mission).
                 test_result = _run_single(
-                    result["params"], cfg, self.df, test_start, test_end)
+                    result["params"], cfg, self.df, windows.boundary, windows.test_end,
+                    end_boundary=_TEST_END_BOUNDARY,
+                )
                 result["score_train"]      = result["score"]
                 result["score_test"]       = test_result["score"]
                 result["stats_test"]       = test_result.get("stats", {})
@@ -835,13 +1011,18 @@ def _worker_init(df):
 
 
 def _worker_run_single(params: dict, config: OptimizationConfig,
-                       start_date=None, end_date=None) -> dict:
+                       start_date=None, end_date=None,
+                       end_boundary: Literal["inclusive", "exclusive"] = "inclusive") -> dict:
     """
     Point d'entrée top-level pour ProcessPoolExecutor.
     Doit être au module level pour être picklable sous Windows.
 
     Utilise _worker_df_global (chargé par _worker_init) si disponible.
     Fallback sur load_data + filtrage si appelé sans initializer.
+
+    `end_boundary` : même contrat que `_run_single()`, transmis identiquement sur le chemin
+    nominal ET le fallback (jamais une seconde sémantique de filtrage — correction scientifique
+    du split TRAIN/TEST, 2026-09-12).
     """
     global _worker_df_global
 
@@ -871,7 +1052,7 @@ def _worker_run_single(params: dict, config: OptimizationConfig,
             raw_df, config.opt_start_date, config.opt_end_date, config.max_rows
         ).context_df
 
-    return _run_single(params, config, df, start_date, end_date)
+    return _run_single(params, config, df, start_date, end_date, end_boundary)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

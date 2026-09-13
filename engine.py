@@ -14,6 +14,27 @@ from scoring import compute_equity_r_squared
 PARIS = ZoneInfo("Europe/Paris")
 
 
+def _parse_boundary_timestamp(value, tz: str = "Europe/Paris") -> pd.Timestamp:
+    """Convertit `start_date`/`end_date` en `pd.Timestamp` tz-aware Europe/Paris, quel que soit
+    le type d'entrée (correction scientifique du split TRAIN/TEST, 2026-09-12) :
+
+    - chaîne naïve historique (ex. `"2024-01-15"`, `"2024-01-15 09:00:00"`) — comportement
+      identique bit à bit à l'ancien `pd.Timestamp(value, tz=tz)` (vérifié par test) ;
+    - chaîne ISO-8601 complète avec offset et fraction de seconde (ex. produite par
+      `optimizer.TrainTestWindows`, `.isoformat()`) ;
+    - objet `pd.Timestamp` déjà tz-aware.
+
+    Localise si naïve, convertit si déjà tz-aware — jamais de ré-application de `tz=` sur un
+    objet déjà tz-aware (`pd.Timestamp(déjà_aware, tz=...)` lève `ValueError: Cannot pass a
+    datetime or Timestamp with tzinfo with the tz parameter`, régression connue depuis l'audit
+    Dette A). Aucune troncature : la fraction de seconde et l'offset d'origine (converti vers
+    `tz`) sont préservés."""
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize(tz)
+    return ts.tz_convert(tz)
+
+
 def _add_market_time_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Ajoute les colonnes dérivées (fuseau Paris) consommées par run_backtest().
 
@@ -129,7 +150,7 @@ def run_backtest(
     # reste de la fonction (exec_start_idx, loop_start, `i+1`, fermeture forcée) opère
     # génériquement sur "le contexte tel que déjà tronqué ici" — aucun autre changement requis.
     if end_date is not None:
-        end_ts = pd.Timestamp(end_date, tz="Europe/Paris")
+        end_ts = _parse_boundary_timestamp(end_date)
         if end_boundary == "exclusive":
             df = df[df["time_paris"] < end_ts]
         else:
@@ -151,7 +172,7 @@ def run_backtest(
     # donne directement le premier index respectant ">=".
     if start_date is not None:
         exec_start_idx = int(
-            df["time_paris"].searchsorted(pd.Timestamp(start_date, tz="Europe/Paris"), side="left")
+            df["time_paris"].searchsorted(_parse_boundary_timestamp(start_date), side="left")
         )
     else:
         exec_start_idx = 0

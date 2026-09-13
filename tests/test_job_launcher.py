@@ -147,7 +147,7 @@ def test_effective_combinations_total_keeps_full_mode_unlimited():
 
 
 def test_optimizer_limits_actual_scheduled_combinations(monkeypatch):
-    def fake_run_single(params, _config, _df, _start_date=None, _end_date=None):
+    def fake_run_single(params, _config, _df, _start_date=None, _end_date=None, _end_boundary="inclusive"):
         return {
             "score": 0.0,
             "params": params,
@@ -172,7 +172,7 @@ def test_optimizer_limits_actual_scheduled_combinations(monkeypatch):
 
 
 def test_optimizer_keeps_full_mode_unlimited(monkeypatch):
-    def fake_run_single(params, _config, _df, _start_date=None, _end_date=None):
+    def fake_run_single(params, _config, _df, _start_date=None, _end_date=None, _end_boundary="inclusive"):
         return {
             "score": 0.0,
             "params": params,

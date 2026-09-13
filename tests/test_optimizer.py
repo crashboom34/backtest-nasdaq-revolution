@@ -27,7 +27,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import optimizer
-from engine import _add_market_time_columns
+from engine import _add_market_time_columns, run_backtest
 from optimizer import (
     ExecutionWindow,
     FilterConfig,
@@ -36,11 +36,15 @@ from optimizer import (
     ParamRange,
     ScoreWeights,
     TrainTestConfig,
+    TrainTestSemanticsMismatch,
+    TrainTestWindows,
+    TRAIN_TEST_SEMANTICS_VERSION,
     _run_single,
     _worker_run_single,
     benchmark_speed,
     compute_split_dates,
     resolve_execution_window,
+    validate_resume_train_test_semantics,
 )
 
 
@@ -100,11 +104,12 @@ class _RecordingRunBacktest:
 
     def __call__(self, df, strategy, params, **kwargs):
         self.calls.append({
-            "len_df":     len(df),
-            "first_time": df["time_paris"].iloc[0] if len(df) else None,
-            "last_time":  df["time_paris"].iloc[-1] if len(df) else None,
-            "start_date": kwargs.get("start_date"),
-            "end_date":   kwargs.get("end_date"),
+            "len_df":       len(df),
+            "first_time":   df["time_paris"].iloc[0] if len(df) else None,
+            "last_time":    df["time_paris"].iloc[-1] if len(df) else None,
+            "start_date":   kwargs.get("start_date"),
+            "end_date":     kwargs.get("end_date"),
+            "end_boundary": kwargs.get("end_boundary", "inclusive"),
         })
         # n_trades > 0 : évite le court-circuit "Aucun trade" de _run_single() avant même
         # l'appel à compute_score() — la valeur réelle n'a pas d'importance pour ces tests
@@ -244,6 +249,14 @@ class TestRunSingleReceivesResolvedWindow:
 
 
 class TestOptimizerTrainTestUsesExecutionSelectionNotContext:
+    """O6/O7/O8 — RÉÉCRITS (2026-09-12, correction scientifique du split TRAIN/TEST) pour
+    verrouiller le NOUVEAU contrat (`TrainTestWindows`, `end_boundary` explicite), plus C5/C6.
+
+    **Ancien résultat verrouillé par ces tests avant cette mission = BUG historique**
+    (`compute_split_dates()` perdait la précision horaire et créait un trou silencieux
+    TRAIN→TEST — voir l'audit read-only précédent). **Nouveau résultat = correction
+    scientifique** : TRAIN=[train_start,boundary) exclusive, TEST=[boundary,test_end]
+    inclusive, aucune barre perdue ni dupliquée."""
 
     def _config_with_train_test(self, opt_start_date=None):
         return _minimal_config(
@@ -254,27 +267,29 @@ class TestOptimizerTrainTestUsesExecutionSelectionNotContext:
         )
 
     def test_o6_compute_split_dates_matches_the_legacy_physically_filtered_dataframe(self):
-        """O6 — pour une configuration donnée, compute_split_dates() doit produire EXACTEMENT
-        les mêmes bornes que sur l'ancien DataFrame physiquement filtré (comportement legacy),
-        même si Optimizer reçoit désormais le contexte élargi. Le trou de journée déjà connu
-        (compute_split_dates()) n'est ni corrigé ni aggravé ici."""
+        """O6 — pour une configuration donnée, compute_split_dates() doit produire les MÊMES
+        `TrainTestWindows` que sur l'ancien DataFrame physiquement filtré (comportement de
+        sélection legacy inchangé), même si Optimizer reçoit désormais le contexte élargi."""
         df = _build_synthetic_df(30)
         opt_start = _bar_date_str(df, 10)
         tt = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.6)
 
-        # Ancien comportement : DataFrame physiquement réduit à la période demandée.
         legacy_execution_df = df[df["time_paris"] >= pd.Timestamp(opt_start, tz="Europe/Paris")]
         legacy_execution_df = legacy_execution_df.reset_index(drop=True)
-        legacy_bounds = compute_split_dates(legacy_execution_df, tt)
+        legacy_windows = compute_split_dates(legacy_execution_df, tt)
 
         window = resolve_execution_window(df, opt_start_date=opt_start)
-        new_bounds = compute_split_dates(window.execution_df, tt)
+        new_windows = compute_split_dates(window.execution_df, tt)
 
-        assert new_bounds == legacy_bounds
+        assert new_windows == legacy_windows
+        assert isinstance(new_windows, TrainTestWindows)
 
-    def test_o7_train_phase_receives_context_with_train_bounds(self, monkeypatch):
-        """O7 — la phase TRAIN reçoit le contexte élargi (historique amont dispo pour le warmup)
-        mais bornée à train_start/train_end (jamais tout le contexte sans borne)."""
+    def test_o7_train_phase_receives_context_with_train_bounds_and_exclusive_boundary(
+        self, monkeypatch,
+    ):
+        """O7/C5 — la phase TRAIN reçoit le contexte élargi (historique amont dispo pour le
+        warmup) borné à `train_start`/`boundary`, avec `end_boundary="exclusive"` explicite —
+        la barre à `boundary` ne doit jamais influencer TRAIN."""
         df = _build_synthetic_df(30)
         fake = _RecordingRunBacktest()
         import engine
@@ -286,23 +301,24 @@ class TestOptimizerTrainTestUsesExecutionSelectionNotContext:
         opt.run(progress_cb=None, stop_flag_fn=None, already_tested=set())
 
         assert fake.calls, "au moins un backtest doit avoir été lancé (mode='grid' sans ranges)"
-        # Toutes les bornes utilisées doivent être des dates réelles (jamais None,None) et
-        # jamais au-delà du contexte transmis (borné par _run_single/run_backtest lui-même).
-        for call in fake.calls:
-            assert call["start_date"] is not None
-            assert call["end_date"] is not None
+        windows = opt.resolved_train_test_windows
+        assert windows is not None
+        train_calls = [c for c in fake.calls if c["end_date"] == windows.boundary]
+        assert train_calls, "au moins un appel TRAIN attendu (end_date == boundary)"
+        for call in train_calls:
+            assert call["start_date"] == windows.train_start
+            assert call["end_boundary"] == "exclusive"
             assert call["len_df"] == len(opt.df)  # toujours le contexte complet, pas une coupe
 
-    def test_o8_test_phase_never_lets_prepare_see_data_after_test_end(self, monkeypatch):
-        """O8 — la phase TEST reçoit l'historique antérieur disponible (TRAIN inclus, warmup
-        causal légitime) mais jamais de barre postérieure à test_end (pas de fuite du futur)."""
+    def test_o8_test_phase_receives_inclusive_boundary_start_and_never_sees_data_after_test_end(
+        self, monkeypatch,
+    ):
+        """O8/C6 — la phase TEST démarre exactement à `boundary` (inclusif, explicite) et ne
+        voit jamais de barre postérieure à `test_end` (pas de fuite du futur)."""
         df = _build_synthetic_df(30)
         fake = _RecordingRunBacktest()
         import engine
         monkeypatch.setattr(engine, "run_backtest", fake)
-        # Score toujours positif : ce test vérifie les bornes transmises au moteur, pas la
-        # logique de scoring/filtres réelle (hors sujet ici — voir scoring.py pour ses propres
-        # tests dédiés).
         monkeypatch.setattr(optimizer, "compute_score", lambda *a, **k: (1.0, False, None, []))
         config = self._config_with_train_test()
         config.param_ranges = []
@@ -311,15 +327,13 @@ class TestOptimizerTrainTestUsesExecutionSelectionNotContext:
         opt = Optimizer(config, df)
         opt.run(progress_cb=None, stop_flag_fn=None, already_tested=set())
 
-        # Au moins un appel doit porter les bornes TEST (end_date == test_end réel).
-        tt = config.train_test
-        _, _, test_start, test_end = compute_split_dates(df, tt)
-        test_calls = [c for c in fake.calls if c["end_date"] == test_end]
+        windows = opt.resolved_train_test_windows
+        assert windows is not None
+        test_calls = [c for c in fake.calls if c["end_date"] == windows.test_end]
         assert test_calls, "au moins un backtest TEST attendu"
         for call in test_calls:
-            # Le contexte transmis à run_backtest ne dépasse jamais physiquement test_end (les
-            # bornes end_date le garantissent déjà au niveau moteur, vérifié ici au niveau appel).
-            assert call["end_date"] == test_end
+            assert call["start_date"] == windows.boundary
+            assert call["end_boundary"] == "inclusive"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -502,3 +516,430 @@ class TestRealEngineAcceptsResolvedBounds:
         window = resolve_execution_window(df, opt_start_date=config.opt_start_date)
         assert len(window.context_df) == 0
         assert isinstance(ms, float)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Correction scientifique du split TRAIN/TEST (2026-09-12) — TrainTestWindows, C1-C15
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# compute_split_dates() perdait la précision horaire (troncature "%Y-%m-%d") et créait un trou
+# temporel silencieux TRAIN→TEST (audit read-only précédent, quantifié : 28.6% de barres perdues
+# sur un exemple synthétique 7 jours). Correction : TrainTestWindows(train_start, boundary,
+# test_end) en ISO-8601 complet (fraction/offset préservés), TRAIN=[train_start,boundary)
+# exclusive, TEST=[boundary,test_end] inclusive. `compute_split_dates()` reste appelé sur
+# `execution_df` (jamais le contexte élargi) — comportement de sélection inchangé (O6).
+#
+# "Aucune double inclusion à la frontière" est déjà prouvée au niveau moteur par Dette B
+# (tests/test_engine.py::TestEndBoundarySemantics::test_b4_...) — les tests C2/C3 ci-dessous
+# vérifient la partie NOUVELLE : que compute_split_dates() produit des bornes qui couvrent
+# exactement [global_start, global_end] sans reste, pas une re-preuve de la mécanique moteur.
+
+
+def _fine_synthetic_df(n_bars: int, start: str = "2024-01-02T00:00:00", freq_minutes: int = 3):
+    """Bougies M3 (par défaut) — nécessaire pour les tests de précision infra-journalière
+    (contrairement à `_build_synthetic_df`, qui produit une bougie par jour par défaut)."""
+    return _build_synthetic_df(n_bars, start=start, freq_minutes=freq_minutes)
+
+
+def _paris_midnight_df(dates: list):
+    """DataFrame minimal avec `time_paris` explicite, à minuit LOCAL Europe/Paris pour chaque
+    date fournie (contourne le décalage UTC->Paris de `_build_synthetic_df`, dont les bougies
+    "quotidiennes" tombent en réalité à 01h/02h locale puisque `time` y est traité comme UTC —
+    nécessaire ici pour des tests qui exigent une bougie exactement à minuit local)."""
+    times = pd.DatetimeIndex([pd.Timestamp(d, tz="Europe/Paris") for d in dates])
+    return pd.DataFrame({"time_paris": times})
+
+
+class TestTrainTestWindowsContract:
+    """C1, C7, C8, C15 — compute_split_dates() en tant que fonction pure."""
+
+    def test_c1_ratio_method_preserves_sub_second_precision_never_truncated_to_a_date(self):
+        """C1 — la fraction de seconde de `boundary` (méthode ratio) doit survivre, pas être
+        écrasée par une troncature `%Y-%m-%d` comme dans l'ancien comportement bugué."""
+        df = _fine_synthetic_df(100)  # 100 bougies M3 -> duration = 99*180 = 17820s
+        tt = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=1 / 7)  # non entier
+
+        windows = compute_split_dates(df, tt)
+
+        boundary_ts = pd.Timestamp(windows.boundary)
+        assert boundary_ts.microsecond != 0, (
+            f"boundary={windows.boundary!r} a perdu sa fraction de seconde (1/3 de 17820s "
+            "produit un instant non entier — la précision doit être préservée)"
+        )
+
+    def test_c2_c3_train_and_test_windows_cover_the_full_range_without_gap_or_duplicate(self):
+        """C2/C3 — TRAIN ∪ TEST = [global_start, global_end] exactement (aucune barre perdue),
+        et la frontière partagée n'apparaît que dans TEST (aucune duplication) — garanti
+        structurellement par construction (boundary = fin exclusive TRAIN = début inclusif
+        TEST), vérifié ici sur l'identité produite par compute_split_dates()."""
+        df = _fine_synthetic_df(50)
+        tt = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.4)
+
+        windows = compute_split_dates(df, tt)
+
+        assert windows.train_start == df["time_paris"].iloc[0].isoformat()
+        assert windows.test_end == df["time_paris"].iloc[-1].isoformat()
+        # boundary est la SEULE frontière partagée — TRAIN s'arrête juste avant (exclusive),
+        # TEST commence pile dessus (inclusive) : aucun instant n'appartient aux deux, aucun
+        # instant entre train_start et test_end n'est hors des deux fenêtres.
+        assert df["time_paris"].iloc[0].isoformat() < windows.boundary < df["time_paris"].iloc[-1].isoformat()
+
+    def test_c7_test_end_is_the_real_last_timestamp_of_execution_df_never_a_truncated_date(self):
+        """C7 — test_end ne doit jamais être réduit à "YYYY-MM-DD" (ancien bug)."""
+        df = _fine_synthetic_df(20)
+        tt = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.5)
+
+        windows = compute_split_dates(df, tt)
+
+        assert windows.test_end == df["time_paris"].iloc[-1].isoformat()
+        assert len(windows.test_end) > len("2024-01-02")  # pas juste une date
+
+    def test_c8_date_method_boundary_is_midnight_of_split_date_first_day_of_test_d1(self):
+        """C8 — décision D1 : split_date = PREMIER jour de TEST, à 00:00 Europe/Paris. Une
+        bougie datée exactement de split_date (00:00:00 local) appartient à TEST, jamais à
+        TRAIN."""
+        dates = [f"2024-01-{d:02d}" for d in range(2, 32)]  # 30 jours, minuit local exact
+        df = _paris_midnight_df(dates)
+        split_day = "2024-01-12"
+        tt = TrainTestConfig(enabled=True, split_method="date", split_date=split_day)
+
+        windows = compute_split_dates(df, tt)
+
+        expected_boundary = pd.Timestamp(split_day, tz="Europe/Paris").isoformat()
+        assert windows.boundary == expected_boundary
+        # La bougie du 12 janvier (exactement à boundary) doit appartenir à TEST :
+        # TRAIN=[.,boundary) l'exclut structurellement.
+        matching_bar = df[df["time_paris"] == pd.Timestamp(split_day, tz="Europe/Paris")]
+        assert len(matching_bar) == 1
+        assert matching_bar["time_paris"].iloc[0].isoformat() == windows.boundary
+
+    def test_c15_ratio_at_or_below_zero_raises(self):
+        df = _fine_synthetic_df(20)
+        tt = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.0)
+        with pytest.raises(ValueError):
+            compute_split_dates(df, tt)
+
+    def test_c15_ratio_at_or_above_one_raises(self):
+        df = _fine_synthetic_df(20)
+        tt = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=1.0)
+        with pytest.raises(ValueError):
+            compute_split_dates(df, tt)
+
+    def test_c15_negative_ratio_raises(self):
+        df = _fine_synthetic_df(20)
+        tt = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=-0.2)
+        with pytest.raises(ValueError):
+            compute_split_dates(df, tt)
+
+    def test_c15_ratio_above_one_raises(self):
+        df = _fine_synthetic_df(20)
+        tt = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=1.4)
+        with pytest.raises(ValueError):
+            compute_split_dates(df, tt)
+
+    def test_c15_date_method_without_split_date_raises_instead_of_silently_falling_back_to_ratio(self):
+        """Défaut adjacent découvert pendant l'implémentation (repli silencieux vers 'ratio' si
+        split_date est absent malgré split_method="date") — corrigé dans le même mouvement,
+        cohérent avec la politique "jamais de repli silencieux" déjà établie par Dette B."""
+        df = _fine_synthetic_df(20)
+        tt = TrainTestConfig(enabled=True, split_method="date", split_date=None)
+        with pytest.raises(ValueError):
+            compute_split_dates(df, tt)
+
+    def test_c15_split_date_before_dataset_raises(self):
+        df = _build_synthetic_df(20)
+        tt = TrainTestConfig(enabled=True, split_method="date", split_date="2000-01-01")
+        with pytest.raises(ValueError):
+            compute_split_dates(df, tt)
+
+    def test_c15_split_date_after_dataset_raises(self):
+        df = _build_synthetic_df(20)
+        tt = TrainTestConfig(enabled=True, split_method="date", split_date="2099-01-01")
+        with pytest.raises(ValueError):
+            compute_split_dates(df, tt)
+
+    def test_c15_split_date_equal_to_last_bar_raises_only_a_single_test_bar_is_not_acceptable(self):
+        """Mission §9 — `boundary == global_end` ne laisserait qu'une seule barre TEST :
+        rejeté explicitement (global_start < boundary < global_end strict)."""
+        dates = [f"2024-01-{d:02d}" for d in range(2, 22)]  # 20 jours, minuit local exact
+        df = _paris_midnight_df(dates)
+        last_day = "2024-01-21"  # date exacte de la dernière bougie (minuit local)
+        tt = TrainTestConfig(enabled=True, split_method="date", split_date=last_day)
+        with pytest.raises(ValueError):
+            compute_split_dates(df, tt)
+
+    def test_c15_empty_dataset_with_train_test_active_raises(self):
+        df = _build_synthetic_df(0) if False else _build_synthetic_df(1).iloc[0:0]
+        tt = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.5)
+        with pytest.raises(ValueError):
+            compute_split_dates(df, tt)
+
+    def test_c15_single_bar_dataset_with_train_test_active_raises(self):
+        """Une seule barre -> global_start == global_end -> impossible de produire deux régions
+        temporelles distinctes -> ValueError explicite, jamais une fenêtre vide masquée."""
+        df = _build_synthetic_df(1)
+        tt = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.5)
+        with pytest.raises(ValueError):
+            compute_split_dates(df, tt)
+
+    def test_c15_error_messages_are_explicit_not_generic(self):
+        """Les erreurs doivent nommer le problème (pas une AssertionError/KeyError opaque)."""
+        df = _fine_synthetic_df(20)
+        tt = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=1.5)
+        with pytest.raises(ValueError, match="train_ratio"):
+            compute_split_dates(df, tt)
+
+
+class _FakeSequentialPool:
+    """Remplace `ProcessPoolExecutor` dans les tests C10/C11 : exécute `submit()`
+    immédiatement, dans le MÊME process (pas de vrai spawn/pickling — impossible à monkeypatcher
+    autrement, voir mission §19 note O9), tout en exerçant réellement le code de
+    `_run_batch_parallel()` (futures réels, `as_completed`, `initializer`). Honore
+    `max_workers`/`initializer`/`initargs` comme le vrai `ProcessPoolExecutor`."""
+
+    def __init__(self, max_workers=None, initializer=None, initargs=()):
+        if initializer:
+            initializer(*initargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def submit(self, fn, *args, **kwargs):
+        from concurrent.futures import Future
+        fut = Future()
+        try:
+            fut.set_result(fn(*args, **kwargs))
+        except Exception as exc:  # pragma: no cover - defensif, comme le vrai pool
+            fut.set_exception(exc)
+        return fut
+
+
+class TestEndBoundaryPropagationAcrossExecutionPaths:
+    """C5, C6, C10, C11, C12 — `end_boundary` doit être transmis IDENTIQUEMENT quel que soit le
+    chemin d'exécution (séquentiel, "parallèle" via pool factice, fallback worker), et rester
+    "inclusive" par défaut hors train/test (non-régression)."""
+
+    def test_c5_sequential_batch_forwards_explicit_end_boundary(self, monkeypatch):
+        df = _build_synthetic_df(10)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = _minimal_config()
+        opt = Optimizer(config, df)
+
+        opt._run_batch_sequential(
+            [{}], None, None, set(), start_date="2024-01-01", end_date="2024-01-05",
+            end_boundary="exclusive",
+        )
+
+        assert fake.calls and fake.calls[0]["end_boundary"] == "exclusive"
+
+    def test_c12_sequential_batch_defaults_to_inclusive_when_end_boundary_omitted(self, monkeypatch):
+        """Non-régression : le chemin sans train/test n'appelle jamais explicitement
+        `end_boundary`, donc le défaut doit rester `"inclusive"` (comportement historique)."""
+        df = _build_synthetic_df(10)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = _minimal_config()
+        opt = Optimizer(config, df)
+
+        opt._run_batch_sequential(
+            [{}], None, None, set(), start_date="2024-01-01", end_date="2024-01-05")
+
+        assert fake.calls and fake.calls[0]["end_boundary"] == "inclusive"
+
+    def test_c10_parallel_batch_forwards_the_same_end_boundary_as_sequential(self, monkeypatch):
+        df = _build_synthetic_df(10)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        # ProcessPoolExecutor est importé localement dans _run_batch_parallel() (pas un
+        # attribut de module `optimizer`) — patcher à la source (concurrent.futures), relu à
+        # chaque appel grâce à l'import local.
+        monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", _FakeSequentialPool)
+        config = _minimal_config(n_workers=2)
+        opt = Optimizer(config, df)
+
+        opt._run_batch_parallel(
+            [{}], None, None, set(), start_date="2024-01-01", end_date="2024-01-05",
+            end_boundary="exclusive",
+        )
+
+        assert fake.calls and fake.calls[0]["end_boundary"] == "exclusive"
+
+    def test_c11_fallback_worker_forwards_end_boundary(self, monkeypatch):
+        """C11 — `_worker_run_single()` sans `_worker_df_global` (fallback) transmet
+        `end_boundary` exactement comme le chemin nominal."""
+        df = _build_synthetic_df(10)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        monkeypatch.setattr(engine, "load_data_from_source", lambda source, a, t: df.copy())
+        monkeypatch.setattr(optimizer, "_worker_df_global", None)
+        config = _minimal_config()
+
+        _worker_run_single({}, config, "2024-01-01", "2024-01-05", end_boundary="exclusive")
+
+        assert fake.calls and fake.calls[0]["end_boundary"] == "exclusive"
+
+    def test_c11_nominal_worker_path_forwards_end_boundary_too(self, monkeypatch):
+        df = _build_synthetic_df(10)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        monkeypatch.setattr(optimizer, "_worker_df_global", df)
+
+        _worker_run_single({}, _minimal_config(), "2024-01-01", "2024-01-05", end_boundary="exclusive")
+
+        assert fake.calls and fake.calls[0]["end_boundary"] == "exclusive"
+
+
+class TestTrainTestSemanticsVersioning:
+    """C14 — garde de reprise cross-version (fonction pure `validate_resume_train_test_semantics`)."""
+
+    def test_c14_no_train_test_on_the_resumed_run_is_never_blocked(self):
+        """Reprise SANS train/test activé sur le run courant : jamais bloquée par cette dette,
+        quelle que soit la sémantique (ou son absence) côté source."""
+        current = TrainTestConfig(enabled=False)
+        validate_resume_train_test_semantics(current, None, "some_source")
+        validate_resume_train_test_semantics(
+            current, {"train_test_semantics_version": "anything-else"}, "some_source")
+
+    def test_c14_matching_version_is_allowed(self):
+        current = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.6)
+        validate_resume_train_test_semantics(
+            current, {"train_test_semantics_version": TRAIN_TEST_SEMANTICS_VERSION}, "src")
+
+    def test_c14_missing_version_field_treated_as_legacy_and_refused(self):
+        """Job source antérieur à cette correction : jamais de champ -> traité comme "legacy",
+        distinct de la version courante -> reprise refusée."""
+        current = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.6)
+        with pytest.raises(TrainTestSemanticsMismatch):
+            validate_resume_train_test_semantics(current, {}, "legacy_src")
+
+    def test_c14_source_config_none_treated_as_legacy_and_refused(self):
+        """Le job source n'a même pas pu être chargé (config_used.json introuvable) : jamais un
+        mélange silencieux, refus explicite."""
+        current = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.6)
+        with pytest.raises(TrainTestSemanticsMismatch):
+            validate_resume_train_test_semantics(current, None, "missing_src")
+
+    def test_c14_different_version_string_is_refused(self):
+        current = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.6)
+        with pytest.raises(TrainTestSemanticsMismatch):
+            validate_resume_train_test_semantics(
+                current, {"train_test_semantics_version": "some-other-version"}, "src")
+
+    def test_c14_error_message_names_the_source_run_id_and_both_versions(self):
+        current = TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.6)
+        with pytest.raises(TrainTestSemanticsMismatch, match="legacy_src"):
+            validate_resume_train_test_semantics(current, {}, "legacy_src")
+
+
+class TestRealEngineTrainTestIntegration:
+    """§32/C9 — au moins un test traverse réellement Optimizer -> run/batch -> _run_single ->
+    vrai engine.run_backtest(), pour TRAIN ET TEST, sans monkeypatcher le moteur."""
+
+    def test_optimizer_run_with_train_test_resolves_valid_windows_and_executes_train_via_the_real_engine(self):
+        """La phase TRAIN de `Optimizer.run()` passe TOUJOURS par le vrai moteur (indépendant du
+        score obtenu, contrairement à la phase TEST — gating pré-existant, non lié à cette
+        correction, voir §785+)."""
+        from strategies.perfect_revolution_v1 import DEFAULT_PARAMS
+        df = _fine_synthetic_df(400, freq_minutes=180)  # plusieurs jours, réaliste
+        config = _minimal_config(
+            strategy_module="strategies.perfect_revolution_v1",
+            base_params=DEFAULT_PARAMS,
+            mode="grid",
+            param_ranges=[],
+            train_test=TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.5),
+        )
+
+        opt = Optimizer(config, df)
+        all_results, _ = opt.run(progress_cb=None, stop_flag_fn=None, already_tested=set())
+
+        windows = opt.resolved_train_test_windows
+        assert windows is not None
+        assert windows.train_start < windows.boundary < windows.test_end
+        assert all_results, "au moins un résultat attendu (mode grid, 1 combo) — TRAIN a tourné"
+        assert not str(all_results[0].get("filter_reason", "")).startswith("Exception:")
+
+    def test_train_and_test_phases_both_execute_via_the_real_engine_without_exception(self):
+        """§32 — preuve directe, sans monkeypatcher `engine.run_backtest`, que TRAIN
+        (`end_boundary="exclusive"`) ET TEST (`end_boundary="inclusive"`) s'exécutent tous deux
+        via le vrai moteur pour la même fenêtre résolue, indépendamment du filtre de score de
+        `Optimizer.run()` (préexistant, hors scope de cette correction)."""
+        from strategies.perfect_revolution_v1 import DEFAULT_PARAMS
+        df = _fine_synthetic_df(400, freq_minutes=180)
+        config = _minimal_config(
+            strategy_module="strategies.perfect_revolution_v1",
+            base_params=DEFAULT_PARAMS,
+            train_test=TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.5),
+        )
+        opt = Optimizer(config, df)
+        windows = compute_split_dates(opt._execution_df, config.train_test)
+
+        train_result = _run_single(
+            DEFAULT_PARAMS, config, opt.df, windows.train_start, windows.boundary,
+            end_boundary="exclusive",
+        )
+        test_result = _run_single(
+            DEFAULT_PARAMS, config, opt.df, windows.boundary, windows.test_end,
+            end_boundary="inclusive",
+        )
+
+        for label, result in (("TRAIN", train_result), ("TEST", test_result)):
+            assert isinstance(result, dict), label
+            assert "stats" in result and isinstance(result["stats"], dict), label
+            assert not str(result.get("filter_reason", "")).startswith("Exception:"), (
+                f"{label} a été rejeté par le vrai moteur : {result.get('filter_reason')}"
+            )
+
+    def test_c9_dst_spring_forward_boundary_is_handled_end_to_end_without_crash(self):
+        """C9 — dataset traversant le changement d'heure Europe/Paris (2024-03-31, spring
+        forward) : aucune AmbiguousTimeError/NonExistentTimeError, TRAIN et TEST s'exécutent
+        réellement via le vrai moteur."""
+        from strategies.perfect_revolution_v1 import DEFAULT_PARAMS
+        df = _fine_synthetic_df(80, start="2024-03-28T00:00:00", freq_minutes=180)
+        config = _minimal_config(
+            strategy_module="strategies.perfect_revolution_v1",
+            base_params=DEFAULT_PARAMS,
+            mode="grid",
+            param_ranges=[],
+            train_test=TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.5),
+        )
+
+        opt = Optimizer(config, df)
+        all_results, _ = opt.run(progress_cb=None, stop_flag_fn=None, already_tested=set())
+
+        windows = opt.resolved_train_test_windows
+        assert windows is not None
+        # Round-trip : le boundary doit rester parseable et cohérent (pas de décalage d'offset).
+        boundary_ts = pd.Timestamp(windows.boundary)
+        assert boundary_ts.tzinfo is not None
+        assert all_results
+
+
+class TestMaxRowsAndTrainTestCombination:
+    """C13 — max_rows/opt_start_date/opt_end_date combinés à train/test : compute_split_dates()
+    continue d'opérer sur `execution_df` (la sélection réduite), jamais le contexte élargi."""
+
+    def test_c13_train_test_windows_stay_within_the_max_rows_reduced_selection(self):
+        df = _build_synthetic_df(30)
+        config = _minimal_config(
+            opt_start_date=_bar_date_str(df, 5),
+            max_rows=10,
+            train_test=TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.5),
+        )
+
+        opt = Optimizer(config, df)
+        opt.run(progress_cb=None, stop_flag_fn=None, already_tested=set())
+
+        windows = opt.resolved_train_test_windows
+        exec_window = resolve_execution_window(
+            df, opt_start_date=config.opt_start_date, max_rows=config.max_rows)
+        assert windows.train_start == exec_window.execution_df["time_paris"].iloc[0].isoformat()
+        assert windows.test_end == exec_window.execution_df["time_paris"].iloc[-1].isoformat()

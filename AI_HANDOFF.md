@@ -984,7 +984,9 @@ structuration). Détail complet : `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `A
 
 **Statut : Dette A GLOBALE DONE — ENGINE LAYER DONE et OPTIMIZER INTEGRATION DONE. Dette B reste
 OPEN à ce stade de la clôture (mise à jour ultérieure, même jour : voir §17 "Dette B — DONE"
-ci-dessous). Écart `compute_split_dates()` reste DISCOVERED/OPEN. WARMUP dynamique reste OPEN.**
+ci-dessous). Écart `compute_split_dates()` reste DISCOVERED/OPEN à ce stade (corrigé
+ultérieurement, voir §18 "Correction scientifique TRAIN/TEST exacte — DONE"). WARMUP dynamique
+reste OPEN.**
 `AF-V-02` (Walk-Forward) reste **non commencé** — cette clôture ne l'autorise pas et ne prétend
 pas `GATE V` passée. Voir `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-02`, section
 préconditions) pour le détail complet.
@@ -1083,9 +1085,10 @@ préconditions) pour le détail complet.
 ## 17. Dette B — DONE (2026-09-12) — sémantique explicite des frontières temporelles
 
 **Statut : Dette B DONE.** Fait suite au commit Dette A GLOBALE `778d9c33993f830f372d1532d82dac214308d739`
-(§16 ci-dessus). **`compute_split_dates()` reste DISCOVERED/OPEN, WARMUP dynamique reste OPEN,
-`AF-V-02` reste NON COMMENCÉ, GATE V reste NON PASSÉE** — cette clôture ne les affecte pas et ne
-prétend résoudre aucun des trois.
+(§16 ci-dessus). **`compute_split_dates()` reste DISCOVERED/OPEN à ce stade de la clôture (corrigé
+ultérieurement, voir §18 "Correction scientifique TRAIN/TEST exacte — DONE"), WARMUP dynamique
+reste OPEN, `AF-V-02` reste NON COMMENCÉ, GATE V reste NON PASSÉE** — cette clôture ne les affecte
+pas et ne prétend résoudre aucun des trois.
 
 - **Écart corrigé** : `SplitBoundary` (`dataset_split.py`) déclare un intervalle demi-ouvert
   `[start, end)` (borne de fin exclue) ; jusqu'ici, `engine.run_backtest()` ne savait filtrer que
@@ -1139,3 +1142,79 @@ prétend résoudre aucun des trois.
   correction).
 - **Tests** : suite complète **823/823** (811 baseline + 12 nouveaux), 0 régression. `py_compile`
   propre sur `engine.py`/`dataset_split.py`.
+
+## 18. Correction scientifique TRAIN/TEST exacte — DONE (2026-09-13)
+
+**Statut : `compute_split_dates()` / sémantique TRAIN/TEST exacte DONE.** Fait suite au commit
+Dette B `b7b3e9662940a3ac13d16892b7d2562ac147ac7c` (§17 ci-dessus). **WARMUP dynamique reste
+OPEN, `AF-V-02` reste NON COMMENCÉ, GATE V reste NON PASSÉE** — cette clôture ne les affecte pas.
+
+- **Écart corrigé** : `optimizer.py::compute_split_dates()` tronquait `train_end`/`test_start`/
+  `test_end` en chaîne `"YYYY-MM-DD"` (perte totale de l'heure), puis `engine.run_backtest()`
+  interprétait ces dates en filtrage **fermé** sur des timestamps minuit — trou temporel
+  silencieux d'au moins une journée de marché autour du split, jamais signalé. Quantifié
+  empiriquement (audit préalable, synthétique 7 jours M3, split au jour 3/7) : **28.6% des
+  barres perdues, ni TRAIN ni TEST**.
+- **`TrainTestWindows`** : nouvelle dataclass frozen `(train_start: str, boundary: str,
+  test_end: str)` remplace l'ancien tuple `(train_start, train_end, test_start, test_end)`.
+  Invariant unique — jamais deux valeurs indépendantes pouvant diverger : `boundary` est à la
+  fois fin **exclusive** de TRAIN et début **inclusif** de TEST (`TRAIN=[train_start,boundary)`,
+  `TEST=[boundary,test_end]`). Champ nommé `boundary` (pas `split_boundary`) pour éviter toute
+  collision avec `dataset_split.py::SplitBoundary` (Track R, concept différent).
+- **Précision temporelle exacte** : champs ISO-8601 complets (`.isoformat()`, offset ET fraction
+  de seconde préservés) — plus aucune troncature à la date. `engine._parse_boundary_timestamp()`
+  ajouté (naïf → `tz_localize`, déjà tz-aware → `tz_convert`) : élimine le crash historique
+  `pd.Timestamp(déjà tz-aware, tz=...)` sans changer aucun comportement pour les chaînes naïves
+  existantes (vérifié bit à bit).
+- **Décision D1 (nouveau contrat scientifique, PAS une restauration d'intention historique
+  certaine)** : `split_date` (méthode "date") = premier jour de TEST, minuit Europe/Paris —
+  cohérent avec la méthode ratio et avec `SplitBoundary`. Documenté dans
+  `docs/adr/0018-optimizer-train-test-split-boundary-precision-and-semantics-versioning.md`.
+  Libellé UI clarifié (`app.py`) : "Premier jour de la période test" + aide explicite.
+- **`train_ratio`** : reste un ratio de **durée temporelle** (jamais de barres), désormais validé
+  strictement `0 < train_ratio < 1` — `ValueError` explicite sinon. Validation supplémentaire
+  `global_start < boundary < global_end` (train/test actif) — dataset vide/insuffisant/`boundary`
+  hors période lève `ValueError`, jamais une fenêtre vide masquée. Chemin sans train/test resté
+  tolérant, inchangé.
+- **Barre frontière** : appartient exclusivement à TEST — aucune barre perdue, aucune barre
+  dupliquée (mécanique déjà garantie par Dette B, `TestEndBoundarySemantics::test_b4_...`).
+- **Propagation `end_boundary`** : threadée à travers `run_mode1-4`/`_run_batch`/
+  `_run_batch_sequential`/`_run_batch_parallel`/`_run_single`/`_worker_run_single` — TRAIN
+  toujours `"exclusive"`, TEST et chemin sans train/test toujours `"inclusive"` (défaut legacy
+  inchangé). Cohérence séquentiel/parallèle/fallback vérifiée par test (pool factice exerçant
+  réellement `ProcessPoolExecutor`/`as_completed`/`initializer`).
+- **Reprise cross-version (invariant critique)** : `TRAIN_TEST_SEMANTICS_VERSION =
+  "exact-boundary-v2"`, injectée automatiquement (jamais une option UI) dans `config_used.json`
+  pour tout nouveau job train/test. `validate_resume_train_test_semantics()` refuse
+  explicitement (`TrainTestSemanticsMismatch`) toute reprise si le run courant active train/test
+  et que la source a une version différente ou absente (legacy) — jamais un mélange silencieux de
+  scores calculés sous deux contrats de frontière différents. Une reprise sans train/test n'est
+  jamais bloquée par cette garde. Validation placée **avant** le benchmark (coût de calcul évité
+  sur une reprise vouée au refus — corrigé après un finding mineur de revue).
+- **Persistance** : `meta.json` gagne `train_test_windows` (`train_start`/`boundary`/`test_end`/
+  `train_end_boundary="exclusive"`/`test_end_boundary="inclusive"`), absent/`None` par défaut
+  (backward-compatible ; un ancien `meta.json` sans ce champ reste lisible, jamais migré
+  rétroactivement). `git_commit` (déjà capturé par `data_manifest.json`) et
+  `TRAIN_TEST_SEMANTICS_VERSION` restent deux mécanismes distincts, non dupliqués.
+- **`dataset_split.py`** : docstring de `SplitBoundary` reformulé — l'ancienne "dette générique
+  restant ouverte" devient explicitement une "obligation d'intégration restant à la charge du
+  consommateur, PAS une dette moteur" (Dette B moteur = résolue depuis 2026-09-12).
+- **TDD** : RED capturé (`ImportError` de collecte — symboles absents), puis GREEN complet.
+  `/code-review` (2 sous-agents, axes Scientific/Temporal/Reproducibility et
+  Resume/Parallelism/Scope) : **0 finding bloquant** ; un finding mineur (validation de reprise
+  exécutée après le benchmark) **corrigé** avant clôture ; deux points mineurs résiduels non
+  bloquants documentés (message UX non dédié si le champ date UI est vidé manuellement ; cas DST
+  théorique non testé sur `split_method="date"` avec une heure explicite fournie par
+  l'utilisateur).
+- **Tests** : `tests/test_optimizer.py` 50/50, `tests/test_job_resume.py`+
+  `tests/test_job_launcher.py` 23/23 (dont la garde cross-version testée end-to-end via
+  subprocess réel), `tests/test_optimization_store.py` 32/32, `tests/test_engine.py` 44/44.
+  Suite complète **864/864** (823 baseline + 41 nouveaux), 0 régression. `py_compile` propre sur
+  tous les fichiers modifiés.
+- **Incident de process, non bloquant pour le code** : une invocation `pytest` explicitement
+  ciblée sur `test_e2e_parallel.py`/`test_e2e_subprocess.py` (scripts procéduraux hors suite,
+  documentés comme tels dans `pytest.ini`) a déclenché par erreur un vrai run d'optimisation
+  d'environ 13,5 minutes sur `nasdaq_3m.csv` réel pendant la mission d'implémentation — terminé
+  de lui-même (2/2, aucune régression) avant toute intervention, aucun artefact parasite, aucun
+  impact sur le dépôt. Ne pas répéter cette invocation ; la suite officielle (`pytest -q` sans
+  argument) respecte `testpaths=tests` et n'a jamais ce problème.

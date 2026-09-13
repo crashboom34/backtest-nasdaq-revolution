@@ -2851,8 +2851,15 @@ def _render_config_tab(mod, params, initial_capital, spread, slip_in, slip_out,
                 tt_date  = None
             else:
                 tt_ratio = 0.7
-                tt_date  = st.text_input("Date de séparation (YYYY-MM-DD)", **_value_kw("tt_date", "2024-01-01"),
-                                          key="tt_date")
+                tt_date  = st.text_input(
+                    "Premier jour de la période test (YYYY-MM-DD)",
+                    **_value_kw("tt_date", "2024-01-01"),
+                    help=(
+                        "Cette date est le début de la période de test. Les données "
+                        "antérieures servent à l'entraînement."
+                    ),
+                    key="tt_date",
+                )
             tt_alert = st.slider("Alerte dégradation (%)", 10, 60, **_value_kw("tt_alert", 30), step=5, key="tt_alert")
         else:
             tt_method = "ratio"

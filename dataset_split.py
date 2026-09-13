@@ -151,19 +151,25 @@ class SplitBoundary:
     aucune bougie n'existe exactement à la frontière `2025-05-19T00:00:00+00:00` dans
     `nasdaq_3m.csv` (vérifié directement) ; aucune double inclusion n'a donc affecté cette
     `ValidationRun` (fait historique, non réécrit ici).
-    **Dette générique restant ouverte (synchronisation documentaire, 2026-09-12)** : cette
-    exclusivité concerne toute paire de fenêtres temporelles adjacentes qu'un futur protocole
-    choisirait d'exécuter — aucune paire de zones précise n'est présumée ici. En particulier, ne
-    présumer ni que `AF-V-02` (Walk-Forward, protocole encore non conçu) exécutera `TRAIN` et
-    `FINAL_HOLDOUT` comme deux zones adjacentes, ni plus généralement que `FINAL_HOLDOUT`
-    deviendra un jour un fold ordinaire d'un Walk-Forward : `FINAL_HOLDOUT` conserve son rôle
-    distinct de preuve terminale contrôlée, dont l'accès reste exclusivement audité via
-    `HoldoutAccessEvent`. Ne pas supposer l'exclusivité de `end` appliquée par le moteur par
+    **Obligation d'intégration restant à la charge du consommateur (précision documentaire,
+    2026-09-12) — PAS une dette moteur** : maintenant que le moteur sait représenter `[start,end)`
+    (paragraphe précédent), la seule chose qui reste "ouverte" est que rien ne force
+    automatiquement cette sémantique — c'est une obligation d'intégration explicite pour tout
+    futur consommateur de `SplitBoundary`, jamais une limitation résiduelle du moteur lui-même.
+    Cette obligation concerne toute paire de fenêtres temporelles adjacentes qu'un futur
+    protocole choisirait d'exécuter — aucune paire de zones précise n'est présumée ici. En
+    particulier, ne présumer ni que `AF-V-02` (Walk-Forward, protocole encore non conçu)
+    exécutera `TRAIN` et `FINAL_HOLDOUT` comme deux zones adjacentes, ni plus généralement que
+    `FINAL_HOLDOUT` deviendra un jour un fold ordinaire d'un Walk-Forward : `FINAL_HOLDOUT`
+    conserve son rôle distinct de preuve terminale contrôlée, dont l'accès reste exclusivement
+    audité via `HoldoutAccessEvent`. Ne pas supposer l'exclusivité de `end` appliquée par
     défaut : elle ne l'est que si l'appelant demande explicitement `end_boundary="exclusive"` —
     vérifier ce choix pour la paire de zones réellement retenue avant d'en dépendre. **Distinct de
-    `compute_split_dates()`** (répartition train/test interne à une optimisation, toujours ouverte,
-    non traitée par cette correction) : cette dette-ci ne concerne que la capacité du moteur à
-    représenter `[start,end)`, pas la logique de `compute_split_dates()`."""
+    `compute_split_dates()`** (répartition train/test interne à une optimisation — corrigée dans
+    le même mouvement que cette précision documentaire, voir `optimizer.py::TrainTestWindows` et
+    docs/adr/0018-*.md ; statut de clôture non encore synchronisé dans `AI_HANDOFF.md`/la roadmap,
+    différé après revue utilisateur) : cette précision-ci ne concerne que la capacité du moteur à
+    représenter `[start,end)`, pas la logique propre de `compute_split_dates()`."""
 
     start: str
     end: str

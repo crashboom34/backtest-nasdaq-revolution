@@ -46,7 +46,7 @@ if __name__ == "__main__":
 
     from optimization_store import (
         write_progress, load_tested_hashes, save_tested_hashes,
-        append_results_csv, save_meta, save_config, build_meta,
+        append_results_csv, save_meta, save_config, load_config, build_meta,
         check_and_clear_stop_flag, delete_progress, resolve_sibling_job_dir,
     )
     from optimizer import (
@@ -55,6 +55,7 @@ if __name__ == "__main__":
         Optimizer, benchmark_speed, count_combinations,
         effective_combinations_total, estimate_duration, format_duration,
         normalize_max_combinations, resolve_execution_window,
+        TRAIN_TEST_SEMANTICS_VERSION, validate_resume_train_test_semantics,
     )
     from report_generator import generate_report
     from engine import load_data_from_source
@@ -190,6 +191,16 @@ if __name__ == "__main__":
         quick_validation_mode=cfg_dict.get("quick_validation_mode", False),
     )
 
+    # Correction scientifique du split TRAIN/TEST (2026-09-12) : la sémantique train/test est
+    # une propriété LOGICIELLE/reproductible, jamais une option UI — injectée automatiquement,
+    # jamais demandée à l'utilisateur (mission §22). `None` quand train/test n'est pas activé
+    # (rien à versionner). Persistée AVANT save_config() pour que config_used.json en soit la
+    # trace canonique, consommée par validate_resume_train_test_semantics() ci-dessous pour
+    # toute FUTURE reprise de CE job.
+    cfg_dict["train_test_semantics_version"] = (
+        TRAIN_TEST_SEMANTICS_VERSION if train_test.enabled else None
+    )
+
     # Sauvegarder la config (permet relance identique)
     save_config(run_id, cfg_dict, job_dir=job_dir)
 
@@ -280,6 +291,36 @@ if __name__ == "__main__":
     df_rows_used = execution_window.exec_row_count
 
     # ════════════════════════════════════════════════════════════
+    # REPRISE DE RUN INTERROMPU (garde de version AVANT tout traitement coûteux)
+    # ════════════════════════════════════════════════════════════
+    #
+    # Placé AVANT le benchmark (correction scientifique du split TRAIN/TEST, 2026-09-12, revue
+    # /code-review) : une reprise cross-version vouée au refus ne doit payer aucun coût de calcul
+    # (benchmark_speed() lance config.benchmark_n_sample backtests réels) avant d'être rejetée.
+
+    already_tested = set()
+    if config.resume_run_id:
+        # V1 : run_id == job_id — le job source d'une reprise vit dans un dossier FRÈRE de
+        # job_dir (results/{resume_run_id}/), jamais dans job_dir lui-même (celui du run
+        # courant). resolve_sibling_job_dir() retourne None en mode classique (job_dir=None),
+        # préservant la résolution optimization_history/ existante.
+        resume_job_dir = resolve_sibling_job_dir(job_dir, config.resume_run_id)
+
+        # Garde de reprise cross-version (correction scientifique du split TRAIN/TEST,
+        # 2026-09-12, mission §19-20) : AVANT toute lecture des hashs déjà testés, refuser
+        # explicitement une reprise si le run COURANT active train/test et que le job source n'a
+        # pas la MÊME sémantique train/test versionnée (absente = "legacy"). Non capturée par le
+        # try/except plus bas (comme assert_source_signature_unchanged ci-dessus) : une
+        # incohérence scientifique de cette nature doit interrompre le job immédiatement, jamais
+        # être traitée comme une erreur d'exécution ordinaire.
+        source_config = load_config(config.resume_run_id, job_dir=resume_job_dir)
+        validate_resume_train_test_semantics(
+            config.train_test, source_config, config.resume_run_id)
+
+        already_tested = load_tested_hashes(config.resume_run_id, job_dir=resume_job_dir)
+        _log(f"Reprise : {len(already_tested)} combinaisons déjà testées")
+
+    # ════════════════════════════════════════════════════════════
     # BENCHMARK DE VITESSE (sauf si reprise)
     # ════════════════════════════════════════════════════════════
 
@@ -310,20 +351,6 @@ if __name__ == "__main__":
             config, df, n_sample=config.benchmark_n_sample, execution_window=execution_window,
         )
         _log(f"Benchmark : {benchmark_ms:.1f} ms/backtest")
-
-    # ════════════════════════════════════════════════════════════
-    # REPRISE DE RUN INTERROMPU
-    # ════════════════════════════════════════════════════════════
-
-    already_tested = set()
-    if config.resume_run_id:
-        # V1 : run_id == job_id — le job source d'une reprise vit dans un dossier FRÈRE de
-        # job_dir (results/{resume_run_id}/), jamais dans job_dir lui-même (celui du run
-        # courant). resolve_sibling_job_dir() retourne None en mode classique (job_dir=None),
-        # préservant la résolution optimization_history/ existante.
-        resume_job_dir = resolve_sibling_job_dir(job_dir, config.resume_run_id)
-        already_tested = load_tested_hashes(config.resume_run_id, job_dir=resume_job_dir)
-        _log(f"Reprise : {len(already_tested)} combinaisons déjà testées")
 
     n_total = effective_total_combinations
     if max_combinations is not None and raw_total_combinations != n_total:
@@ -447,6 +474,7 @@ if __name__ == "__main__":
 
     final_status = "completed"
     sensitivity  = {}
+    opt          = None  # référencé après le try/except pour la fenêtre TRAIN/TEST résolue
 
     try:
         _log("Lancement de l'optimisation...")
@@ -514,6 +542,13 @@ if __name__ == "__main__":
         _log(f"[report_generator] Erreur : {e}")
         report = {"error": str(e)}
 
+    # Fenêtre TRAIN/TEST réellement résolue (correction scientifique du split, 2026-09-12) —
+    # None si train/test désactivé, ou si l'optimisation a échoué avant sa résolution (opt=None
+    # ou run() jamais atteint). Convertie en dict simple pour build_meta()/JSON.
+    resolved_windows_dict = None
+    if opt is not None and opt.resolved_train_test_windows is not None:
+        resolved_windows_dict = asdict(opt.resolved_train_test_windows)
+
     # Construire et sauvegarder le meta
     meta = build_meta(
         run_id=run_id,
@@ -525,6 +560,7 @@ if __name__ == "__main__":
         combinations_tested=state["completed"] + state["failed"],
         benchmark_ms=benchmark_ms,
         report=report,
+        resolved_train_test_windows=resolved_windows_dict,
     )
     save_meta(run_id, meta, job_dir=job_dir)
 

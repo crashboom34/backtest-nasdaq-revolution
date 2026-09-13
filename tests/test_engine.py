@@ -515,3 +515,77 @@ class TestEndBoundarySemantics:
         pd.testing.assert_frame_equal(trades1, trades2)
         pd.testing.assert_frame_equal(equity1, equity2)
         assert stats1 == stats2
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Correction scientifique du split TRAIN/TEST (2026-09-12) — engine.py doit accepter des
+# start_date/end_date déjà tz-aware ou des chaînes ISO+offset (produits par
+# optimizer.TrainTestWindows), sans jamais casser les chaînes naïves historiques.
+# Régression connue avant cette mission : pd.Timestamp(<déjà tz-aware>, tz="Europe/Paris")
+# lève ValueError ("Cannot pass a datetime or Timestamp with tzinfo with the tz parameter").
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBoundaryTimestampAcceptsTzAwareAndIsoOffsetInputs:
+
+    def test_naive_string_still_works_byte_for_byte_non_regression(self):
+        df = _build_synthetic_df(20)
+        strat1 = _RecordingStrategy(warmup=2)
+        strat2 = _RecordingStrategy(warmup=2)
+
+        r1 = run_backtest(df, strat1, {}, end_date=_bar_time_str(df, 14))
+        r2 = run_backtest(df, strat2, {}, end_date=_bar_time_str(df, 14))
+
+        pd.testing.assert_frame_equal(r1[0], r2[0])
+        pd.testing.assert_frame_equal(r1[1], r2[1])
+        assert r1[2] == r2[2]
+
+    def test_iso_string_with_explicit_offset_is_accepted_and_matches_the_naive_equivalent(self):
+        """`boundary` produit par TrainTestWindows est un ISO complet avec offset — doit
+        produire EXACTEMENT le même résultat que la chaîne naïve équivalente."""
+        df = _build_synthetic_df(20)
+        naive = _bar_time_str(df, 14)
+        iso_with_offset = df["time_paris"].iloc[14].isoformat()
+        assert "+" in iso_with_offset or "-" in iso_with_offset[10:]  # offset bien présent
+
+        strat1 = _RecordingStrategy(warmup=2)
+        strat2 = _RecordingStrategy(warmup=2)
+        r1 = run_backtest(df, strat1, {}, end_date=naive)
+        r2 = run_backtest(df, strat2, {}, end_date=iso_with_offset)
+
+        pd.testing.assert_frame_equal(r1[0], r2[0])
+        pd.testing.assert_frame_equal(r1[1], r2[1])
+        assert r1[2] == r2[2]
+
+    def test_already_tz_aware_timestamp_object_is_accepted_without_crashing(self):
+        """Passer directement un `pd.Timestamp` déjà tz-aware (Europe/Paris) ne doit JAMAIS
+        lever `ValueError` — c'est la régression connue que ce correctif élimine."""
+        df = _build_synthetic_df(20)
+        strat = _RecordingStrategy(warmup=2)
+        already_aware = df["time_paris"].iloc[14]
+
+        run_backtest(df, strat, {}, end_date=already_aware)  # ne doit pas lever
+
+    def test_start_date_also_accepts_iso_offset_and_tz_aware_timestamp(self):
+        df = _build_synthetic_df(20)
+        strat1 = _RecordingStrategy(warmup=2)
+        strat2 = _RecordingStrategy(warmup=2)
+        naive = _bar_time_str(df, 5)
+        iso_with_offset = df["time_paris"].iloc[5].isoformat()
+
+        run_backtest(df, strat1, {}, start_date=naive, end_date=_bar_time_str(df, 14))
+        run_backtest(df, strat2, {}, start_date=iso_with_offset, end_date=_bar_time_str(df, 14))
+
+        assert strat1.prepared_len == strat2.prepared_len
+
+    def test_fractional_second_boundary_from_ratio_style_computation_is_preserved(self):
+        """Un `boundary` calculé par ratio peut tomber sur une fraction de seconde — vérifie
+        que le moteur l'accepte et l'utilise pour une troncature `exclusive` cohérente."""
+        df = _build_synthetic_df(20)
+        strat = _RecordingStrategy(warmup=2)
+        frac_boundary = (df["time_paris"].iloc[10] + pd.Timedelta(seconds=1.5)).isoformat()
+
+        run_backtest(df, strat, {}, end_date=frac_boundary, end_boundary="exclusive")
+
+        # La bougie 10 (avant la fraction) doit être incluse, la bougie 11 (après) exclue.
+        assert strat.prepared_last_time == df["time_paris"].iloc[10]

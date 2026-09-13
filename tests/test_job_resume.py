@@ -243,3 +243,88 @@ class TestResumeJobDirResolution:
         assert resolved is None
         loaded = store.load_tested_hashes("classic_resume_src", job_dir=resolved)
         assert loaded == {"c1", "c2"}
+
+
+class TestTrainTestResumeCrossVersionGuard:
+    """C14 end-to-end (correction scientifique du split TRAIN/TEST, 2026-09-12) — reprise réelle
+    (subprocess optimizer_process.py) : refus explicite si le job source n'a pas la MÊME
+    sémantique train/test versionnée que le run courant (absente = "legacy"), jamais un mélange
+    silencieux de scores calculés sous deux contrats TRAIN/TEST différents."""
+
+    def _run_job_allow_failure(self, config, timeout=120):
+        job_id, job_dir, config_path, cfg = jl.prepare_job_config(config)
+        cmd = jl.build_optimizer_command(job_id, config_path, job_dir)
+        proc = subprocess.run(
+            cmd, cwd=REPO_ROOT, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+        )
+        return job_id, job_dir, proc
+
+    def test_resume_with_train_test_and_legacy_source_config_is_refused(
+        self, isolated_job_base, tmp_path,
+    ):
+        data_file = _synth_ohlcv_csv(tmp_path / "synth.csv", n_days=5)
+
+        # Job source SANS train/test : jamais de train_test_semantics_version persistée
+        # ("legacy" au sens de cette dette).
+        cfg_a = _minimal_config(data_file, run_id="resume_src_legacy")
+        job_id_a, job_dir_a = _run_job_sync(cfg_a)
+
+        # Reprise AVEC train/test activé sur le run courant -> doit être refusée (mission §20 :
+        # "cas source historique : champ absent -> LEGACY -> refus si train/test actif côté
+        # reprise").
+        cfg_b = _minimal_config(data_file, run_id="resume_dst_tt", resume_run_id=job_id_a)
+        cfg_b["train_test"] = {
+            "enabled": True, "split_method": "ratio", "train_ratio": 0.6,
+            "split_date": None, "alert_degradation_pct": 30.0,
+        }
+        job_id_b, job_dir_b, proc = self._run_job_allow_failure(cfg_b)
+
+        assert proc.returncode != 0, (
+            f"la reprise train/test cross-version aurait dû échouer explicitement:\n{proc.stdout}\n{proc.stderr}"
+        )
+        combined = (proc.stdout + proc.stderr).lower()
+        assert "train_test" in combined or "semantics" in combined, (
+            f"le message d'erreur devrait nommer le problème de sémantique train/test:\n{combined}"
+        )
+
+    def test_resume_with_train_test_and_matching_version_source_is_allowed(
+        self, isolated_job_base, tmp_path,
+    ):
+        data_file = _synth_ohlcv_csv(tmp_path / "synth.csv", n_days=5)
+
+        cfg_a = _minimal_config(data_file, run_id="resume_src_tt")
+        cfg_a["train_test"] = {
+            "enabled": True, "split_method": "ratio", "train_ratio": 0.6,
+            "split_date": None, "alert_degradation_pct": 30.0,
+        }
+        job_id_a, job_dir_a = _run_job_sync(cfg_a)
+
+        config_used_a = json.loads(
+            open(store._path(job_id_a, ".config.json", job_dir_a), encoding="utf-8").read())
+        assert config_used_a.get("train_test_semantics_version"), (
+            "config_used.json du job source doit persister train_test_semantics_version quand "
+            "train/test est activé"
+        )
+
+        cfg_b = _minimal_config(data_file, run_id="resume_dst_tt2", resume_run_id=job_id_a)
+        cfg_b["train_test"] = dict(cfg_a["train_test"])
+        job_id_b, job_dir_b, proc = self._run_job_allow_failure(cfg_b)
+
+        assert proc.returncode == 0, f"reprise même-version attendue OK:\n{proc.stdout}\n{proc.stderr}"
+
+    def test_resume_without_train_test_on_the_resumed_run_is_never_blocked_by_this_guard(
+        self, isolated_job_base, tmp_path,
+    ):
+        """Reprise SANS train/test sur le run courant : jamais bloquée par cette garde, même si
+        la source n'a jamais eu de sémantique train/test versionnée."""
+        data_file = _synth_ohlcv_csv(tmp_path / "synth.csv", n_days=3)
+        cfg_a = _minimal_config(data_file, run_id="resume_src_plain")
+        job_id_a, job_dir_a = _run_job_sync(cfg_a)
+
+        cfg_b = _minimal_config(data_file, run_id="resume_dst_plain", resume_run_id=job_id_a)
+        job_id_b, job_dir_b, proc = self._run_job_allow_failure(cfg_b)
+
+        assert proc.returncode == 0, (
+            f"reprise sans train/test ne doit jamais être bloquée:\n{proc.stdout}\n{proc.stderr}"
+        )

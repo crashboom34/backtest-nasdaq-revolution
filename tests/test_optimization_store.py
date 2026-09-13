@@ -406,6 +406,54 @@ class TestMetaFile:
         scores = [e["score"] for e in meta["top_100"]]
         assert scores == sorted(scores, reverse=True), "Top100 non trié par score décroissant"
 
+    def test_build_meta_without_resolved_windows_omits_the_field_backward_compat(self):
+        """C34 (persistance) — un appelant qui ne passe pas `resolved_train_test_windows`
+        (tout le code existant avant cette mission) obtient un meta strictement inchangé."""
+        results = self._make_results(3)
+        config_dict = {"strategy_name": "T", "mode": "grid", "param_ranges": [], "n_workers": 1}
+        meta = store.build_meta(
+            run_id=TEST_RUN_ID, config_dict=config_dict, all_results=results,
+            sensitivity={}, status="completed", duration_seconds=1.0,
+            combinations_tested=3, benchmark_ms=10.0,
+        )
+        assert meta.get("train_test_windows") is None
+
+    def test_build_meta_persists_the_resolved_train_test_windows_when_provided(self):
+        """C23/C34 — la fenêtre RÉELLEMENT résolue (train_start/boundary/test_end + sémantique
+        des bornes) doit être persistée dans meta.json pour les nouveaux jobs train/test —
+        c'était le champ manquant identifié par l'audit read-only précédent."""
+        results = self._make_results(3)
+        config_dict = {"strategy_name": "T", "mode": "grid", "param_ranges": [], "n_workers": 1}
+        windows = {
+            "train_start": "2024-01-01T00:00:00+01:00",
+            "boundary":    "2024-01-10T00:00:00+01:00",
+            "test_end":    "2024-01-20T00:00:00+01:00",
+        }
+        meta = store.build_meta(
+            run_id=TEST_RUN_ID, config_dict=config_dict, all_results=results,
+            sensitivity={}, status="completed", duration_seconds=1.0,
+            combinations_tested=3, benchmark_ms=10.0,
+            resolved_train_test_windows=windows,
+        )
+        tt_windows = meta.get("train_test_windows")
+        assert tt_windows is not None
+        assert tt_windows["train_start"] == windows["train_start"]
+        assert tt_windows["boundary"] == windows["boundary"]
+        assert tt_windows["test_end"] == windows["test_end"]
+        assert tt_windows["train_end_boundary"] == "exclusive"
+        assert tt_windows["test_end_boundary"] == "inclusive"
+
+    def test_load_meta_reads_old_format_files_missing_the_new_field_without_crashing(self):
+        """Backward compat de lecture : un vieux meta.json (écrit avant cette mission, sans
+        `train_test_windows`) doit rester lisible tel quel, jamais migré rétroactivement."""
+        old_style_meta = {
+            "run_id": TEST_RUN_ID, "status": "completed", "top_100": [], "train_test": {},
+        }
+        store.save_meta(TEST_RUN_ID, old_style_meta)
+        loaded = store.load_meta(TEST_RUN_ID)
+        assert loaded is not None
+        assert "train_test_windows" not in loaded  # jamais ajouté rétroactivement
+
 
 class TestConfigFile:
 

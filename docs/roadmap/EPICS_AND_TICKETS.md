@@ -644,8 +644,9 @@ Dette A — documentées séparément, aucune des deux prouvée comme ayant affe
   trades/`net_ret_pct` de référence inchangés sans fenêtre ; `compute_split_dates()` produit des
   bornes identiques à l'ancien comportement physiquement filtré). Suite complète : 811/811 tests.
   **`AF-V-02` reste néanmoins non prêt pour une exécution scientifique complète** : l'écart
-  `compute_split_dates()` et la dette WARMUP dynamique (ci-dessous) restent `OPEN`, non tranchés.
-  Détail complet : `AI_HANDOFF.md` §16.
+  `compute_split_dates()` (OPEN à ce stade, corrigé depuis — voir plus bas et `AI_HANDOFF.md`
+  §18) et la dette WARMUP dynamique (ci-dessous) restaient `OPEN`, non tranchés. Détail complet :
+  `AI_HANDOFF.md` §16.
 - **Dette B — sémantique des frontières `SplitBoundary`, générique — DONE (2026-09-12)** :
   `SplitBoundary` déclare `[start, end)` (fin exclue) ; `engine.run_backtest()` ne savait
   auparavant filtrer que sur un intervalle **fermé** des deux côtés (`time_paris >= start_date`
@@ -663,14 +664,24 @@ Dette A — documentées séparément, aucune des deux prouvée comme ayant affe
   `/code-review` sans finding bloquant. **Dette distincte de la Dette A** — elle concernait la
   capacité du moteur à représenter `[start,end)`, pas le warmup/cold-start. Détail complet :
   `AI_HANDOFF.md` §17. **`AF-V-02` reste néanmoins non prêt scientifiquement** malgré cette
-  clôture : l'écart `compute_split_dates()` et la dette WARMUP dynamique restent `OPEN`, et aucun
-  câblage réel `SplitBoundary` → `AF-V-02` n'existe encore (à concevoir lors de la conception du
-  protocole Walk-Forward lui-même).
-- **Écart `compute_split_dates()` — DISCOVERED / OPEN, distinct de Dette A et B, non numéroté
-  sans décision de roadmap** : `optimizer.py::compute_split_dates()` convertit le point de split
-  en chaîne `"YYYY-MM-DD"` (perte de l'heure précise) puis positionne `test_start` au lendemain —
-  peut créer un trou temporel silencieux d'au moins une journée de marché autour du split. Non
-  corrigé, non rattaché à un ticket existant.
+  clôture : l'écart `compute_split_dates()` (corrigé depuis, voir ci-dessous) et la dette WARMUP
+  dynamique restaient `OPEN`, et aucun câblage réel `SplitBoundary` → `AF-V-02` n'existe encore (à
+  concevoir lors de la conception du protocole Walk-Forward lui-même).
+- **Correction scientifique du split TRAIN/TEST (`compute_split_dates()`) — DONE (2026-09-13)** :
+  l'ancien `optimizer.py::compute_split_dates()` convertissait le point de split en chaîne
+  `"YYYY-MM-DD"` (perte de l'heure précise) puis positionnait `test_start` au lendemain — trou
+  temporel silencieux d'au moins une journée de marché autour du split, jusqu'à 28.6% de barres
+  perdues mesuré empiriquement sur un exemple synthétique. **Corrigé** : nouvelle dataclass
+  `TrainTestWindows(train_start, boundary, test_end)` en ISO-8601 complet (précision exacte,
+  offset et fraction de seconde préservés) — `TRAIN=[train_start,boundary)` exclusif via
+  `engine.run_backtest(end_boundary="exclusive")`, `TEST=[boundary,test_end]` inclusif explicite,
+  aucune barre perdue ni dupliquée. `split_date` (méthode "date") redéfini comme premier jour de
+  TEST (décision D1, nouveau contrat scientifique — voir `docs/adr/0018-*.md`) ; `train_ratio`
+  reste un ratio de durée temporelle, désormais validé strictement (`0 < train_ratio < 1`,
+  `ValueError` sinon). Reprise de job cross-version protégée par
+  `TRAIN_TEST_SEMANTICS_VERSION="exact-boundary-v2"` (refus explicite si le job source a une
+  version différente ou absente). Suite complète : 864/864 tests, `/code-review` sans finding
+  bloquant. Détail complet : `AI_HANDOFF.md` §18, `docs/adr/0018-*.md`.
 - **Dette WARMUP dynamique — OPEN, hors périmètre stratégie** : `strategies/perfect_revolution_v1.py`
   conserve `WARMUP=130` (constante fixe), alors que `ema_trend_len` est paramétrable jusqu'à 500
   dans `PARAM_SCHEMA` — convergence stricte non garantie par 130 barres pour un paramétrage
