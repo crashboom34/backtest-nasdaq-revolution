@@ -679,6 +679,7 @@ def build_meta(
     benchmark_ms: float,
     report: dict = None,
     resolved_train_test_windows: Optional[dict] = None,
+    state_readiness_resolution: Optional[dict] = None,
 ) -> dict:
     """
     Construit le dictionnaire méta complet pour {run_id}.meta.json.
@@ -689,7 +690,15 @@ def build_meta(
     conserve que la recette brute `split_method`/`train_ratio`/`split_date`, jamais la borne
     calculée). `None` par défaut (train/test désactivé, ou appelant antérieur à cette mission —
     100% backward-compatible, `meta["train_test_windows"]` reste alors `None`, jamais ajouté
-    rétroactivement à un ancien meta.json chargé tel quel par `load_meta()`)."""
+    rétroactivement à un ancien meta.json chargé tel quel par `load_meta()`).
+
+    `state_readiness_resolution` (State/Session Readiness V1, 2026-09-14) : dict
+    `{requested_boundary, effective_boundary, adjusted}` (voir
+    `strategy_contracts.StateReadinessResolution`) — `boundary` dans `train_test_windows` reste
+    la frontière EFFECTIVE (celle réellement utilisée) ; `requested_boundary`/`adjusted` sont
+    ajoutés à côté, jamais en écrasant `boundary`. `None` (stratégie stateless, ou pas de
+    résolution readiness) : `requested_boundary` vaut alors `boundary` lui-même et
+    `adjusted=False` — comportement explicite, jamais un champ manquant."""
     # Top 100
     valid = [r for r in all_results if r["score"] > 0]
     valid.sort(key=lambda r: r["score"], reverse=True)
@@ -750,6 +759,14 @@ def build_meta(
                 "test_end":          resolved_train_test_windows["test_end"],
                 "train_end_boundary": "exclusive",
                 "test_end_boundary":  "inclusive",
+                "requested_boundary": (
+                    state_readiness_resolution["requested_boundary"]
+                    if state_readiness_resolution
+                    else resolved_train_test_windows["boundary"]
+                ),
+                "adjusted": bool(
+                    state_readiness_resolution["adjusted"]
+                ) if state_readiness_resolution else False,
             }
             if resolved_train_test_windows else None
         ),

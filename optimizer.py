@@ -30,6 +30,7 @@ from scoring import (
     compute_sensitivity_filtered,
     compute_sensitivity_correlation,
 )
+from strategy_contracts import resolve_state_ready_boundary
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -444,6 +445,53 @@ def validate_resume_train_test_semantics(
         )
 
 
+# Identifie la sémantique de la POLITIQUE de readiness d'état (State/Session Readiness, V1,
+# 2026-09-14) — INDÉPENDANTE de TRAIN_TEST_SEMANTICS_VERSION : `exact-boundary-v2` décrit la
+# géométrie temporelle TRAIN/TEST (compute_split_dates(), inchangée par cette mission) ;
+# STATE_READINESS_SEMANTICS_VERSION décrit l'ajustement strategy-aware appliqué AU-DESSUS de
+# cette géométrie. Deux contrats distincts, deux versions distinctes — ne jamais les fusionner
+# (voir docs/adr à venir).
+STATE_READINESS_SEMANTICS_VERSION = "daily-state-ready-v1"
+
+
+class NoStateReadyBoundary(ValueError):
+    """Levée quand aucune frontière effective ne peut satisfaire à la fois la readiness d'état
+    déclarée par la stratégie ET `train_start < effective_boundary < test_end` — jamais une
+    fenêtre TEST vide ou un repli silencieux vers `requested_boundary`."""
+
+
+class StateReadinessSemanticsMismatch(ValueError):
+    """Levée quand un job repris a été créé sous une politique de readiness différente de
+    `STATE_READINESS_SEMANTICS_VERSION` courante (absente = "legacy", antérieure à cette
+    mission) — jamais un mélange silencieux de scores calculés sous deux contrats de readiness
+    différents. Contrat séparé de `TrainTestSemanticsMismatch` (voir constante ci-dessus)."""
+
+
+def validate_resume_state_readiness_semantics(
+    current_is_readiness_aware: bool,
+    source_config: Optional[dict],
+    source_run_id: str,
+) -> None:
+    """Garde de reprise cross-version dédiée à la readiness (State/Session Readiness V1,
+    2026-09-14) — mirroring exact de `validate_resume_train_test_semantics()`.
+
+    `current_is_readiness_aware` : `True` uniquement si le run COURANT active train/test ET que
+    la stratégie chargée expose `state_readiness()` — une reprise sans train/test, ou avec une
+    stratégie stateless, n'est JAMAIS bloquée par cette garde, quelle que soit la source."""
+    if not current_is_readiness_aware:
+        return
+    source_version = (source_config or {}).get("state_readiness_semantics_version")
+    if source_version != STATE_READINESS_SEMANTICS_VERSION:
+        raise StateReadinessSemanticsMismatch(
+            f"Reprise refusée : le job source {source_run_id!r} utilise la politique de "
+            f"readiness d'état {source_version!r} (legacy si absente), incompatible avec la "
+            f"version courante {STATE_READINESS_SEMANTICS_VERSION!r}. Mélanger, au sein d'un "
+            "même run repris, des frontières TRAIN/TEST résolues sous deux politiques de "
+            "readiness différentes produirait des métriques scientifiquement incohérentes. "
+            "Relancer un nouveau run sans resume_run_id plutôt que de reprendre ce job source."
+        )
+
+
 def compute_split_dates(df, train_test: TrainTestConfig) -> TrainTestWindows:
     """Résout les fenêtres TRAIN/TEST à partir de la sélection d'exécution (`df` =
     `execution_df`, jamais le contexte élargi — comportement de sélection inchangé, voir
@@ -546,6 +594,10 @@ class Optimizer:
         # persister dans meta.json (voir job_store/build_meta) sans changer le contrat de
         # retour de run() (tuple (all_results, sensitivity) inchangé).
         self.resolved_train_test_windows: Optional[TrainTestWindows] = None
+        # Résolution de readiness d'état (State/Session Readiness V1, 2026-09-14) — None tant
+        # que run() ne l'a pas calculée, si train/test n'est pas activé, ou si la stratégie
+        # n'expose pas state_readiness() (stateless, jamais bloquée par cette dette).
+        self.state_readiness_resolution = None
         self._active_ranges = [pr for pr in config.param_ranges if pr.enabled]
         self._max_combinations = normalize_max_combinations(config.max_combinations)
         self._scheduled_combinations = 0
@@ -920,6 +972,44 @@ class Optimizer:
             # et fausserait le ratio train/test) — comportement de sélection hérité de Dette A,
             # inchangé par cette correction.
             windows = compute_split_dates(self._execution_df, tt)
+
+            # ── State/Session Readiness V1 (2026-09-14) — étape SÉPARÉE, APRÈS
+            # compute_split_dates(), jamais dedans (compute_split_dates() reste inchangé,
+            # géométrie temporelle générique). La stratégie DÉCLARE (state_readiness(params)),
+            # ce protocole RÉSOUT (resolve_state_ready_boundary(), pur, sans DataFrame) —
+            # architecture READY-3, voir strategy_contracts.py. Stateless (pas de
+            # state_readiness()) -> aucun ajustement, comportement identique à avant cette
+            # mission.
+            _mod, _strat_for_readiness = _load_strategy(cfg.strategy_module)
+            readiness_spec = (
+                _strat_for_readiness.state_readiness(cfg.base_params)
+                if hasattr(_strat_for_readiness, "state_readiness") else None
+            )
+            resolution = resolve_state_ready_boundary(windows.boundary, readiness_spec)
+            self.state_readiness_resolution = resolution if readiness_spec is not None else None
+
+            # Validation stricte sur les INSTANTS réels (jamais une comparaison de chaînes ISO —
+            # piège offset/DST déjà documenté), jamais un fallback silencieux ni une fenêtre
+            # TEST vide.
+            ts_train_start = pd.Timestamp(windows.train_start)
+            ts_effective    = pd.Timestamp(resolution.effective_boundary)
+            ts_test_end     = pd.Timestamp(windows.test_end)
+            if not (ts_train_start < ts_effective < ts_test_end):
+                raise NoStateReadyBoundary(
+                    f"Aucune frontière effective ne satisfait à la fois la readiness d'état "
+                    f"déclarée par la stratégie et train_start < effective_boundary < test_end "
+                    f"(train_start={windows.train_start!r}, "
+                    f"effective_boundary={resolution.effective_boundary!r} "
+                    f"[requested={resolution.requested_boundary!r}], "
+                    f"test_end={windows.test_end!r}). Jamais une fenêtre TEST vide ou un repli "
+                    "silencieux vers la frontière demandée."
+                )
+
+            windows = TrainTestWindows(
+                train_start=windows.train_start,
+                boundary=resolution.effective_boundary,
+                test_end=windows.test_end,
+            )
             self.resolved_train_test_windows = windows
             train_start = windows.train_start
             train_end   = windows.boundary

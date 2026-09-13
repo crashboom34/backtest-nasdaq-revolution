@@ -1226,8 +1226,9 @@ OPEN à ce stade (corrigé ultérieurement, voir §19 "WARMUP dynamique des indi
 
 **Statut : WARMUP dynamique DONE.** Fait suite au commit correction TRAIN/TEST exacte
 `b1c11c69698b403e8364823d22d01d23fa34a0be` (§18 ci-dessus). **STATE/SESSION READINESS reste une
-dette distincte, OPEN, bloquante avant `AF-V-02`** — cette clôture ne la traite pas et ne prétend
-pas la résoudre. `AF-V-02` reste non commencé, `GATE V` reste non passée.
+dette distincte, OPEN à ce stade, bloquante avant `AF-V-02`** (corrigée ultérieurement, voir §20
+"State/Session Readiness V1 — DONE") — cette clôture ne la traite pas et ne prétend pas la
+résoudre. `AF-V-02` reste non commencé, `GATE V` reste non passée.
 
 - **Écart corrigé** : `WARMUP=130` (constante fixe) était mathématiquement insuffisant dès que
   le contexte réel disponible avant `start_date` est court (optimisation sans `opt_start_date`,
@@ -1294,3 +1295,78 @@ pas la résoudre. `AF-V-02` reste non commencé, `GATE V` reste non passée.
   pendant la mission d'implémentation, alors qu'aucun gros backtest n'était autorisé dans cette
   mission précise — nécessaire pour confirmer la non-régression scientifique critique de ce
   changement, mais formellement une déviation de la consigne ; non répété depuis.
+
+## 20. State/Session Readiness V1 — DONE (2026-09-14)
+
+**Statut : State/Session Readiness V1 DONE.** Fait suite au commit WARMUP dynamique
+`2e133b3d76720f5540b0f832fc8e909fa5c99822` (§19 ci-dessus). `AF-V-02` reste non commencé, GATE V
+reste non passée — cette clôture ne les affecte pas.
+
+- **Écart corrigé** : les corrections TRAIN/TEST exacte (§18) et WARMUP dynamique (§19)
+  garantissent des frontières temporelles exactes et des indicateurs correctement convergés, mais
+  aucune ne rejoue `on_bar()` avant `loop_start`. Perfect Revolution construit son Opening Range
+  (`_or_high`/`_or_low`/`_or_ready`, fenêtre `or_start_h:m`→`or_end_h:m`) exclusivement dans
+  `on_bar()` — une frontière TRAIN/TEST exacte peut tomber pendant ou après cette fenêtre, coupant
+  silencieusement l'état nécessaire à la première décision (prouvé empiriquement par l'audit
+  précédent : `_or_ready` reste `False` toute la journée, ou l'Opening Range calculé est
+  silencieusement faux).
+- **Classification centrale (réduit fortement le périmètre)** : état **informational**
+  (`_or_high`/`_or_low`/`_or_ready` — dérivé uniquement des prix, reconstructible depuis les
+  données) vs état **execution** (`_trades_today`/`_day_start_profit`/`_system_on`/positions/PnL —
+  propre à CE backtest, jamais reconstructible sans rompre l'indépendance scientifique TRAIN/TEST).
+  L'état execution est déjà correctement traité (reset automatique sur nouvelle journée + instance
+  `Strategy()` fraîche par backtest, aucune fuite TRAIN→TEST) — cette mission ne traite QUE
+  l'informational.
+- **Architecture READY-3** : la stratégie DÉCLARE (`Strategy.state_readiness(params) ->
+  DailyStateReadiness`, staticmethod, mirroring exact de `required_warmup(params)`) ; le protocole
+  RÉSOUD (`Optimizer.run()`, juste après `compute_split_dates()`, jamais dedans, via
+  `strategy_contracts.resolve_state_ready_boundary()`, fonction pure sans DataFrame). Nouveau
+  module leaf `strategy_contracts.py` (aucune dépendance vers `engine.py`/`optimizer.py`).
+  **`engine.py` reste totalement inchangé** — le moteur ne connaît aucune notion de session.
+- **Règle V1, volontairement simple** : frontière demandée convertie en heure locale (Europe/Paris
+  pour Perfect Revolution) ; `<= or_start` (inclusif) → inchangée ; `> or_start` → décalée au
+  **minuit local du jour calendaire suivant**, construction DST-safe (date locale + 1 jour, puis
+  relocalisation via `pd.Timestamp(date, tz=)` — jamais `+ Timedelta(hours=24)`, vérifié
+  empiriquement décalé d'1h les jours de changement d'heure). Aucune notion de "jour de marché" :
+  une frontière tombant un week-end est acceptée telle quelle, le moteur démarre à la première
+  barre réellement disponible — aucune donnée perdue. **Data quality explicitement hors scope** :
+  cette V1 ne garantit ni la complétude du dataset, ni un calendrier d'exchange, ni l'absence de
+  trous — seulement que la frontière elle-même ne coupe pas artificiellement l'état informational
+  disponible.
+- **Stratégie stateless** : aucune déclaration `state_readiness` → `requested_boundary ==
+  effective_boundary`, aucun ajustement, comportement legacy strictement inchangé.
+- **`requested_boundary`/`effective_boundary`/`adjusted`** conservés distincts
+  (`StateReadinessResolution`), jamais l'un n'écrase l'autre. TRAIN/TEST restent contigus sur la
+  MÊME frontière effective (`TRAIN=[train_start,effective_boundary)`,
+  `TEST=[effective_boundary,test_end]`) — invariant Dette B préservé (aucune barre perdue/
+  dupliquée). Validation stricte `train_start < effective_boundary < test_end` (comparaison de
+  vrais `pd.Timestamp`, jamais de chaînes ISO) : `NoStateReadyBoundary` explicite sinon, jamais une
+  fenêtre TEST vide ou un repli silencieux.
+- **Versioning séparé** : `STATE_READINESS_SEMANTICS_VERSION = "daily-state-ready-v1"`,
+  indépendante de `TRAIN_TEST_SEMANTICS_VERSION = "exact-boundary-v2"` (confirmé inchangée) — deux
+  contrats scientifiques distincts. `validate_resume_state_readiness_semantics()`
+  (`StateReadinessSemanticsMismatch`) refuse la reprise si le job source n'a pas la même politique
+  de readiness (absente = legacy), jamais bloquante pour une stratégie stateless ou un run sans
+  train/test. Placée avant le benchmark (même précédent que la garde TRAIN/TEST).
+- **Persistance additive** : `config_used.json` gagne `state_readiness_semantics_version` (None si
+  non readiness-aware) ; `meta.json`'s `train_test_windows` gagne `requested_boundary`/`adjusted` à
+  côté de `boundary` (qui reste la frontière EFFECTIVE) — aucun champ existant écrasé, anciens
+  `meta.json` restent lisibles tels quels. `opt_start_date`/`max_rows`/`params_hash` strictement
+  inchangés.
+- **TDD** : RED capturé (3 erreurs de collecte — module/symboles absents), puis GREEN, puis un
+  cycle correctif après revue (test de non-régression DST renforcé — la première version ne
+  prouvait pas réellement le bug d'1h qu'elle prétendait démontrer). `/code-review` (2 sous-agents,
+  axes State-semantics/Temporal et Architecture/Reproducibility/Scope) : **0 finding bloquant** ;
+  points mineurs acceptés et documentés dans l'ADR (double chargement de la stratégie dans
+  `Optimizer.run()`, coût négligeable ; fuseau non-Paris non testé explicitement, générique en
+  lecture).
+- **Référence historique (GATE DATA)** : **STRICT NON-RÉGRESSION confirmée** — 114 trades/
+  `net_ret_pct` inchangés (aucune modification d'`on_bar()`/`engine.py`).
+- **Tests** : `tests/test_strategy_contracts.py` 13/13 (nouveau), `tests/test_perfect_revolution_v1.py`
+  33/33, `tests/test_optimizer.py` 61/61, `tests/test_optimization_store.py` 34/34,
+  `tests/test_job_resume.py` 16/16 (dont 2 nouveaux end-to-end subprocess réels pour la garde de
+  reprise readiness). Suite complète **934/934** (904 baseline + 30 nouveaux), 0 régression.
+  `py_compile` propre sur tous les fichiers modifiés.
+- **ADR** : `docs/adr/0020-state-session-readiness-v1.md`.
+- **`/implement` invoqué formellement** cette fois — écart de process de la mission WARMUP
+  dynamique (§19) non répété.

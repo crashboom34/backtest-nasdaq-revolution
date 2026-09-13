@@ -695,16 +695,26 @@ Dette A — documentées séparément, aucune des deux prouvée comme ayant affe
   empiriquement : 114 trades/`net_ret_pct` de référence inchangés malgré le warmup DEFAULT passant
   de 130 à 282. Suite complète : 904/904 tests, `/code-review` sans finding bloquant. Détail
   complet : `AI_HANDOFF.md` §19, `docs/adr/0019-*.md`.
-- **Dette STATE/SESSION READINESS — découverte séparément, OPEN, BLOQUANTE avant `AF-V-02`** :
-  Perfect Revolution construit un état path-dependent (`_or_high`/`_or_low`/`_or_ready`/
-  `_trades_today`/`_day_start_profit`/`_system_on`) exclusivement dans `on_bar()`, jamais rejoué
-  avant `loop_start` — aucun warmup indicateur, même correct, ne résout ce problème (`on_bar()` ne
-  voit jamais les bougies antérieures à `loop_start`). Preuve empirique : une frontière tombant
-  après la fenêtre Opening Range (15:30–16:00) laisse `_or_ready=False` toute la journée (aucune
-  entrée possible, silencieusement) ; une frontière tombant au milieu de cette fenêtre produit un
-  Opening Range silencieusement faux. **Dette distincte de WARMUP dynamique** — non traitée par
-  cette correction, non traitée par la correction TRAIN/TEST exacte. `AF-V-02` (Walk-Forward,
-  multi-fenêtres) ne doit pas démarrer avant décision sur cette dette.
+- **Dette STATE/SESSION READINESS — DONE (2026-09-14)** : Perfect Revolution construit un état
+  path-dependent (`_or_high`/`_or_low`/`_or_ready`/`_trades_today`/`_day_start_profit`/
+  `_system_on`) exclusivement dans `on_bar()`, jamais rejoué avant `loop_start` — aucun warmup
+  indicateur, même correct, ne résout ce problème. Preuve empirique (audit préalable) : une
+  frontière tombant après la fenêtre Opening Range (15:30–16:00) laissait `_or_ready=False` toute
+  la journée (aucune entrée possible, silencieusement) ; une frontière tombant au milieu de cette
+  fenêtre produisait un Opening Range silencieusement faux. **Corrigé** : classification
+  informational (Opening Range, reconstructible depuis les prix) vs execution (compteurs/PnL,
+  déjà correctement traités par reset+instance fraîche, hors scope) ; architecture READY-3 — la
+  stratégie déclare (`Strategy.state_readiness(params)`), le protocole résout
+  (`Optimizer.run()`, via le nouveau module `strategy_contracts.py`, jamais dans `engine.py` ni
+  dans `compute_split_dates()`) ; frontière `> or_start` décalée au minuit local Europe/Paris du
+  jour calendaire suivant (DST-safe, aucun calendrier de marché construit — data quality reste
+  hors scope) ; stratégies stateless inchangées ; version `STATE_READINESS_SEMANTICS_VERSION`
+  indépendante d'`exact-boundary-v2`, reprise cross-version protégée. Suite complète : 934/934
+  tests, `/code-review` sans finding bloquant. Détail complet : `AI_HANDOFF.md` §20,
+  `docs/adr/0020-*.md`. **Dette distincte de WARMUP dynamique** — les deux préconditions
+  scientifiques précédant `AF-V-02` identifiées jusqu'ici sont désormais résolues ; `AF-V-02`
+  (Walk-Forward, multi-fenêtres) devient éligible à sa phase de CONCEPTION (pas de démarrage
+  d'implémentation dans cette clôture).
 
 ### AF-V-03 — Monte-Carlo
 

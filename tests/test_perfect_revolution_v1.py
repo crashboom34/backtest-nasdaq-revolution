@@ -26,6 +26,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from strategies.perfect_revolution_v1 import DEFAULT_PARAMS, PARAM_SCHEMA, Strategy
+from strategy_contracts import DailyStateReadiness
 
 
 def _independent_k(alpha: float, epsilon: float = 0.01) -> int:
@@ -164,3 +165,33 @@ class TestRequiredWarmupLookbackLock:
 
         assert result == k_trend_alone + 5
         assert result != k_trend_alone
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# State/Session Readiness V1 (2026-09-14) — déclaration de contrainte (SR-T7, §34)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Perfect Revolution déclare son besoin (fenêtre Opening Range) via `state_readiness(params)` —
+# le protocole (optimizer.py) résout la frontière effective, jamais la stratégie elle-même
+# (architecture READY-3, voir tests/test_strategy_contracts.py pour le resolver pur).
+
+
+class TestStateReadinessDeclaration:
+
+    def test_sr_t7_derived_from_real_or_start_params_not_hardcoded(self):
+        """Vraie stratégie chargée (pas un fake) — la déclaration doit refléter les paramètres
+        RÉELS transmis, jamais une constante 15:30 codée en dur."""
+        custom_params = dict(DEFAULT_PARAMS, or_start_h=9, or_start_m=15)
+
+        spec = Strategy.state_readiness(custom_params)
+
+        assert isinstance(spec, DailyStateReadiness)
+        assert spec.latest_safe_start_hour == 9
+        assert spec.latest_safe_start_minute == 15
+        assert spec.timezone == "Europe/Paris"
+
+    def test_state_readiness_matches_default_params_or_start(self):
+        spec = Strategy.state_readiness(DEFAULT_PARAMS)
+
+        assert spec.latest_safe_start_hour == DEFAULT_PARAMS["or_start_h"]
+        assert spec.latest_safe_start_minute == DEFAULT_PARAMS["or_start_m"]

@@ -56,6 +56,8 @@ if __name__ == "__main__":
         effective_combinations_total, estimate_duration, format_duration,
         normalize_max_combinations, resolve_execution_window,
         TRAIN_TEST_SEMANTICS_VERSION, validate_resume_train_test_semantics,
+        STATE_READINESS_SEMANTICS_VERSION, validate_resume_state_readiness_semantics,
+        _load_strategy,
     )
     from report_generator import generate_report
     from engine import load_data_from_source
@@ -201,6 +203,17 @@ if __name__ == "__main__":
         TRAIN_TEST_SEMANTICS_VERSION if train_test.enabled else None
     )
 
+    # State/Session Readiness V1 (2026-09-14) — même principe, contrat SÉPARÉ (voir
+    # optimizer.py::STATE_READINESS_SEMANTICS_VERSION) : une stratégie n'est "readiness-aware"
+    # que si train/test est activé ET qu'elle expose réellement `state_readiness()` (stateless
+    # -> jamais versionné, jamais bloquant à la reprise).
+    _current_strategy_mod, _current_strategy_instance = _load_strategy(config.strategy_module)
+    _current_is_readiness_aware = train_test.enabled and hasattr(
+        _current_strategy_instance, "state_readiness")
+    cfg_dict["state_readiness_semantics_version"] = (
+        STATE_READINESS_SEMANTICS_VERSION if _current_is_readiness_aware else None
+    )
+
     # Sauvegarder la config (permet relance identique)
     save_config(run_id, cfg_dict, job_dir=job_dir)
 
@@ -316,6 +329,10 @@ if __name__ == "__main__":
         source_config = load_config(config.resume_run_id, job_dir=resume_job_dir)
         validate_resume_train_test_semantics(
             config.train_test, source_config, config.resume_run_id)
+        # Garde SÉPARÉE dédiée à la readiness d'état (State/Session Readiness V1, 2026-09-14) —
+        # même précédent, contrat indépendant (voir STATE_READINESS_SEMANTICS_VERSION).
+        validate_resume_state_readiness_semantics(
+            _current_is_readiness_aware, source_config, config.resume_run_id)
 
         already_tested = load_tested_hashes(config.resume_run_id, job_dir=resume_job_dir)
         _log(f"Reprise : {len(already_tested)} combinaisons déjà testées")
@@ -549,6 +566,12 @@ if __name__ == "__main__":
     if opt is not None and opt.resolved_train_test_windows is not None:
         resolved_windows_dict = asdict(opt.resolved_train_test_windows)
 
+    # Résolution readiness d'état (State/Session Readiness V1, 2026-09-14) — None si stratégie
+    # stateless ou train/test désactivé. Convertie en dict simple pour build_meta()/JSON.
+    readiness_resolution_dict = None
+    if opt is not None and opt.state_readiness_resolution is not None:
+        readiness_resolution_dict = asdict(opt.state_readiness_resolution)
+
     # Construire et sauvegarder le meta
     meta = build_meta(
         run_id=run_id,
@@ -561,6 +584,7 @@ if __name__ == "__main__":
         benchmark_ms=benchmark_ms,
         report=report,
         resolved_train_test_windows=resolved_windows_dict,
+        state_readiness_resolution=readiness_resolution_dict,
     )
     save_meta(run_id, meta, job_dir=job_dir)
 

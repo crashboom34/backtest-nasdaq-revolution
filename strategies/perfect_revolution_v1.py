@@ -8,6 +8,8 @@ import math
 import pandas as pd
 import numpy as np
 
+from strategy_contracts import DailyStateReadiness
+
 STRATEGY_NAME = "NASDAQ Perfect Revolution V1.1"
 WARMUP        = 130
 
@@ -177,6 +179,27 @@ class Strategy:
         k_atr    = _k(1 / params["atr_len"])
 
         return max(k_trend, k_filter, k_atr)
+
+    # ── State/Session Readiness (déclaration, 2026-09-14) ──────
+    @staticmethod
+    def state_readiness(params: dict) -> DailyStateReadiness:
+        """Déclare la contrainte de readiness d'état INFORMATIONAL de cette stratégie : elle a
+        besoin que toutes les barres locales Europe/Paris jusqu'à `or_start_h:or_start_m`
+        (paramètres RÉELS, jamais une constante 15:30 codée en dur) soient disponibles le jour
+        courant, pour reconstruire son Opening Range (`_or_high`/`_or_low`/`_or_ready`) avant sa
+        première décision possible.
+
+        Résolue par le protocole (`optimizer.py::resolve_state_ready_boundary()`), jamais par
+        cette méthode elle-même — la stratégie déclare, elle n'orchestre rien (architecture
+        READY-3, voir `strategy_contracts.py`). Ne couvre PAS l'état EXECUTION
+        (`_trades_today`/`_day_start_profit`/`_system_on`) — déjà correctement traité par le
+        reset automatique sur nouvelle journée + une instance `Strategy()` fraîche par backtest,
+        aucun ajustement de frontière requis pour cette partie de l'état."""
+        return DailyStateReadiness(
+            latest_safe_start_hour=params["or_start_h"],
+            latest_safe_start_minute=params["or_start_m"],
+            timezone="Europe/Paris",
+        )
 
     # ── Indicateurs ───────────────────────────────────────────
     def prepare(self, df: pd.DataFrame, params: dict) -> pd.DataFrame:

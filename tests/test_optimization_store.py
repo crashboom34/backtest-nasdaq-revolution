@@ -454,6 +454,54 @@ class TestMetaFile:
         assert loaded is not None
         assert "train_test_windows" not in loaded  # jamais ajouté rétroactivement
 
+    def test_sr_t17_train_test_windows_persists_requested_boundary_and_adjusted_flag(self):
+        """State/Session Readiness V1 (2026-09-14) — SR-T17 : requested_boundary/adjusted
+        conservés séparément de boundary (effective), jamais l'un n'écrase l'autre."""
+        results = self._make_results(2)
+        config_dict = {"strategy_name": "T", "mode": "grid", "param_ranges": [], "n_workers": 1}
+        windows = {
+            "train_start": "2024-01-10T00:00:00+01:00",
+            "boundary":    "2024-01-11T00:00:00+01:00",  # effective (décalée)
+            "test_end":    "2024-01-12T00:00:00+01:00",
+        }
+        readiness = {
+            "requested_boundary": "2024-01-10T16:48:00+01:00",
+            "effective_boundary": "2024-01-11T00:00:00+01:00",
+            "adjusted": True,
+        }
+        meta = store.build_meta(
+            run_id=TEST_RUN_ID, config_dict=config_dict, all_results=results,
+            sensitivity={}, status="completed", duration_seconds=1.0,
+            combinations_tested=2, benchmark_ms=10.0,
+            resolved_train_test_windows=windows,
+            state_readiness_resolution=readiness,
+        )
+        tt_windows = meta["train_test_windows"]
+        assert tt_windows["boundary"] == windows["boundary"]
+        assert tt_windows["requested_boundary"] == readiness["requested_boundary"]
+        assert tt_windows["requested_boundary"] != tt_windows["boundary"]
+        assert tt_windows["adjusted"] is True
+
+    def test_train_test_windows_without_readiness_resolution_reports_unadjusted(self):
+        """Stratégie stateless (aucune résolution readiness) : requested_boundary == boundary,
+        adjusted=False — comportement legacy explicite, pas un champ manquant."""
+        results = self._make_results(2)
+        config_dict = {"strategy_name": "T", "mode": "grid", "param_ranges": [], "n_workers": 1}
+        windows = {
+            "train_start": "2024-01-10T00:00:00+01:00",
+            "boundary":    "2024-01-10T14:24:00+01:00",
+            "test_end":    "2024-01-12T00:00:00+01:00",
+        }
+        meta = store.build_meta(
+            run_id=TEST_RUN_ID, config_dict=config_dict, all_results=results,
+            sensitivity={}, status="completed", duration_seconds=1.0,
+            combinations_tested=2, benchmark_ms=10.0,
+            resolved_train_test_windows=windows,
+        )
+        tt_windows = meta["train_test_windows"]
+        assert tt_windows["requested_boundary"] == tt_windows["boundary"]
+        assert tt_windows["adjusted"] is False
+
 
 class TestConfigFile:
 

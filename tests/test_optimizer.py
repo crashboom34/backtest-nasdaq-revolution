@@ -31,10 +31,13 @@ from engine import _add_market_time_columns, run_backtest
 from optimizer import (
     ExecutionWindow,
     FilterConfig,
+    NoStateReadyBoundary,
     OptimizationConfig,
     Optimizer,
     ParamRange,
     ScoreWeights,
+    StateReadinessSemanticsMismatch,
+    STATE_READINESS_SEMANTICS_VERSION,
     TrainTestConfig,
     TrainTestSemanticsMismatch,
     TrainTestWindows,
@@ -44,8 +47,10 @@ from optimizer import (
     benchmark_speed,
     compute_split_dates,
     resolve_execution_window,
+    validate_resume_state_readiness_semantics,
     validate_resume_train_test_semantics,
 )
+from strategy_contracts import DailyStateReadiness
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -259,9 +264,15 @@ class TestOptimizerTrainTestUsesExecutionSelectionNotContext:
     inclusive, aucune barre perdue ni dupliquée."""
 
     def _config_with_train_test(self, opt_start_date=None):
+        # base_params réels (Dette WARMUP/State Readiness dynamiques appellent désormais
+        # Strategy.required_warmup()/state_readiness() sur cfg.base_params) — {} n'est plus
+        # suffisant depuis que ces deux contrats existent (adaptation mécanique, aucun
+        # changement de comportement pour ce que ces tests vérifient : les bornes transmises).
+        from strategies.perfect_revolution_v1 import DEFAULT_PARAMS
         return _minimal_config(
             mode="grid",
             param_ranges=[],
+            base_params=dict(DEFAULT_PARAMS),
             train_test=TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.6),
             opt_start_date=opt_start_date,
         )
@@ -928,10 +939,12 @@ class TestMaxRowsAndTrainTestCombination:
     continue d'opérer sur `execution_df` (la sélection réduite), jamais le contexte élargi."""
 
     def test_c13_train_test_windows_stay_within_the_max_rows_reduced_selection(self):
+        from strategies.perfect_revolution_v1 import DEFAULT_PARAMS
         df = _build_synthetic_df(30)
         config = _minimal_config(
             opt_start_date=_bar_date_str(df, 5),
             max_rows=10,
+            base_params=dict(DEFAULT_PARAMS),
             train_test=TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.5),
         )
 
@@ -943,3 +956,176 @@ class TestMaxRowsAndTrainTestCombination:
             df, opt_start_date=config.opt_start_date, max_rows=config.max_rows)
         assert windows.train_start == exec_window.execution_df["time_paris"].iloc[0].isoformat()
         assert windows.test_end == exec_window.execution_df["time_paris"].iloc[-1].isoformat()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# State/Session Readiness V1 (2026-09-14) — intégration Optimizer, SR-T1/T2/T3/T4/T14-16/T21
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Architecture READY-3 : la stratégie déclare (state_readiness(params)), le protocole
+# (Optimizer.run(), APRÈS compute_split_dates(), jamais dedans) résout requested->effective.
+# engine.py et compute_split_dates() restent strictement inchangés.
+
+
+def _paris_range_df(start: str, end: str, freq_minutes: int = 60):
+    """DataFrame minimal (`time_paris` uniquement) sur une plage Europe/Paris exacte et
+    contrôlée — nécessaire pour placer `boundary` à un instant local précis et prévisible
+    (contourne le décalage UTC->Paris de `_build_synthetic_df`)."""
+    times = pd.date_range(start, end, freq=f"{freq_minutes}min", tz="Europe/Paris")
+    return pd.DataFrame({"time_paris": pd.DatetimeIndex(times)})
+
+
+class _StatelessFakeStrategy:
+    """Stratégie factice SANS `state_readiness` — legacy pur, ne doit jamais déclencher
+    d'ajustement (SR-T1)."""
+    WARMUP = 2
+    def reset(self): pass
+    def prepare(self, df, params): return df
+    def on_bar(self, i, df, context, params): return None
+
+
+def _ratio_boundary_iso(start: str, end: str, ratio: float, tz: str = "Europe/Paris") -> str:
+    """Recalcule le `boundary` EXACT que produirait `compute_split_dates()` pour ces bornes/ce
+    ratio — même formule (`global_start + Timedelta(seconds=duration*ratio)`), pour éviter toute
+    hypothèse sur une valeur "ronde" que l'arithmétique flottante ne produit pas forcément à la
+    nanoseconde près."""
+    global_start = pd.Timestamp(start, tz=tz)
+    global_end = pd.Timestamp(end, tz=tz)
+    duration = (global_end - global_start).total_seconds()
+    return (global_start + pd.Timedelta(seconds=duration * ratio)).isoformat()
+
+
+class TestStateReadinessAdjustsRatioBoundary:
+
+    def _config_with_ratio(self, train_ratio):
+        from strategies.perfect_revolution_v1 import DEFAULT_PARAMS
+        return _minimal_config(
+            mode="grid",
+            param_ranges=[],
+            base_params=dict(DEFAULT_PARAMS),
+            train_test=TrainTestConfig(enabled=True, split_method="ratio", train_ratio=train_ratio),
+        )
+
+    def test_sr_admissible_boundary_before_or_start_is_never_adjusted(self, monkeypatch):
+        """ratio=0.3 sur 48h depuis 2024-01-10T00:00 -> boundary brute ≈ 14:24, avant
+        or_start=15:30 (DEFAULT_PARAMS) -> aucun ajustement attendu."""
+        df = _paris_range_df("2024-01-10T00:00:00", "2024-01-12T00:00:00", freq_minutes=60)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = self._config_with_ratio(0.3)
+
+        opt = Optimizer(config, df)
+        opt.run(progress_cb=None, stop_flag_fn=None, already_tested=set())
+
+        requested = _ratio_boundary_iso("2024-01-10T00:00:00", "2024-01-12T00:00:00", 0.3)
+        windows = opt.resolved_train_test_windows
+        resolution = opt.state_readiness_resolution
+        assert windows.boundary == requested
+        assert resolution is not None
+        assert resolution.adjusted is False
+        assert resolution.requested_boundary == requested
+        assert resolution.effective_boundary == requested
+
+    def test_sr_t4_boundary_after_or_start_is_shifted_to_next_local_midnight(self, monkeypatch):
+        """ratio=0.35 sur 48h -> boundary brute ≈ 16:48, après or_start=15:30 -> décalée au
+        minuit local Europe/Paris du jour suivant."""
+        df = _paris_range_df("2024-01-10T00:00:00", "2024-01-12T00:00:00", freq_minutes=60)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        # Score forcé positif : ce test vérifie les bornes transmises au moteur pour la phase
+        # TEST (gating pré-existant sur score>0, non lié à cette mission — voir O8), pas la
+        # logique de scoring/filtres réelle.
+        monkeypatch.setattr(optimizer, "compute_score", lambda *a, **k: (1.0, False, None, []))
+        config = self._config_with_ratio(0.35)
+        config.top_k_save = 1
+
+        opt = Optimizer(config, df)
+        opt.run(progress_cb=None, stop_flag_fn=None, already_tested=set())
+
+        requested = _ratio_boundary_iso("2024-01-10T00:00:00", "2024-01-12T00:00:00", 0.35)
+        expected_effective = pd.Timestamp("2024-01-11 00:00:00", tz="Europe/Paris").isoformat()
+        windows = opt.resolved_train_test_windows
+        resolution = opt.state_readiness_resolution
+        assert windows.boundary == expected_effective
+        assert resolution.adjusted is True
+        assert resolution.requested_boundary == requested
+        assert resolution.effective_boundary == expected_effective
+
+        # SR-T14 (contiguïté) / SR-T15 (aucune duplication) : TRAIN et TEST utilisent la MÊME
+        # frontière effective, TRAIN exclusive / TEST inclusive.
+        train_calls = [c for c in fake.calls if c["end_date"] == expected_effective]
+        test_calls = [c for c in fake.calls if c["start_date"] == expected_effective]
+        assert train_calls and train_calls[0]["end_boundary"] == "exclusive"
+        assert test_calls and test_calls[0]["end_boundary"] == "inclusive"
+
+    def test_sr_t1_stateless_strategy_never_adjusted(self, monkeypatch):
+        """Même configuration que le test précédent (qui provoquerait un ajustement pour une
+        stratégie readiness-aware) mais avec une stratégie SANS state_readiness -> aucun
+        ajustement, comportement legacy strictement inchangé."""
+        df = _paris_range_df("2024-01-10T00:00:00", "2024-01-12T00:00:00", freq_minutes=60)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        monkeypatch.setattr(
+            optimizer, "_load_strategy",
+            lambda module_path: (None, _StatelessFakeStrategy()),
+        )
+        config = self._config_with_ratio(0.35)
+
+        opt = Optimizer(config, df)
+        opt.run(progress_cb=None, stop_flag_fn=None, already_tested=set())
+
+        requested = _ratio_boundary_iso("2024-01-10T00:00:00", "2024-01-12T00:00:00", 0.35)
+        windows = opt.resolved_train_test_windows
+        assert windows.boundary == requested  # jamais décalée
+        assert opt.state_readiness_resolution is None
+
+    def test_sr_t16_no_room_after_adjustment_raises_explicitly(self, monkeypatch):
+        """ratio=0.7 sur 24h (2024-01-10T00:00 -> 2024-01-11T00:00) -> boundary brute ≈ 16:48,
+        décalée au 2024-01-11T00:00 == test_end EXACTEMENT -> aucune barre TEST possible ->
+        NoStateReadyBoundary explicite, jamais une fenêtre TEST vide silencieuse."""
+        df = _paris_range_df("2024-01-10T00:00:00", "2024-01-11T00:00:00", freq_minutes=60)
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", _RecordingRunBacktest())
+        config = self._config_with_ratio(0.7)
+
+        opt = Optimizer(config, df)
+        with pytest.raises(NoStateReadyBoundary):
+            opt.run(progress_cb=None, stop_flag_fn=None, already_tested=set())
+
+    def test_sr_t21_train_test_semantics_version_unaffected_by_readiness(self):
+        """La correction readiness n'altère jamais la géométrie exact-boundary-v2 elle-même."""
+        assert TRAIN_TEST_SEMANTICS_VERSION == "exact-boundary-v2"
+
+
+class TestStateReadinessSemanticsVersioning:
+    """C14-style — garde de reprise cross-version dédiée à la readiness, INDÉPENDANTE de
+    TrainTestSemanticsMismatch (deux contrats distincts, voir docs/adr à venir)."""
+
+    def test_not_readiness_aware_never_blocked(self):
+        validate_resume_state_readiness_semantics(False, None, "src")
+        validate_resume_state_readiness_semantics(
+            False, {"state_readiness_semantics_version": "anything-else"}, "src")
+
+    def test_matching_version_is_allowed(self):
+        validate_resume_state_readiness_semantics(
+            True, {"state_readiness_semantics_version": STATE_READINESS_SEMANTICS_VERSION}, "src")
+
+    def test_missing_version_field_treated_as_legacy_and_refused(self):
+        with pytest.raises(StateReadinessSemanticsMismatch):
+            validate_resume_state_readiness_semantics(True, {}, "legacy_src")
+
+    def test_source_config_none_treated_as_legacy_and_refused(self):
+        with pytest.raises(StateReadinessSemanticsMismatch):
+            validate_resume_state_readiness_semantics(True, None, "missing_src")
+
+    def test_different_version_string_is_refused(self):
+        with pytest.raises(StateReadinessSemanticsMismatch):
+            validate_resume_state_readiness_semantics(
+                True, {"state_readiness_semantics_version": "some-other-version"}, "src")
+
+    def test_error_message_names_the_source_run_id(self):
+        with pytest.raises(StateReadinessSemanticsMismatch, match="legacy_src"):
+            validate_resume_state_readiness_semantics(True, {}, "legacy_src")

@@ -328,3 +328,77 @@ class TestTrainTestResumeCrossVersionGuard:
         assert proc.returncode == 0, (
             f"reprise sans train/test ne doit jamais être bloquée:\n{proc.stdout}\n{proc.stderr}"
         )
+
+
+class TestStateReadinessResumeCrossVersionGuard:
+    """SR-T18/T19/T20 (State/Session Readiness V1, 2026-09-14) — garde de reprise DÉDIÉE à la
+    readiness, INDÉPENDANTE de `TrainTestSemanticsMismatch`. Perfect Revolution est
+    readiness-aware par construction (state_readiness() réel) : tout job train/test récent
+    persiste automatiquement `state_readiness_semantics_version` — simulée absente ici pour
+    représenter un job "legacy" antérieur à cette mission."""
+
+    def _run_job_allow_failure(self, config, timeout=120):
+        job_id, job_dir, config_path, cfg = jl.prepare_job_config(config)
+        cmd = jl.build_optimizer_command(job_id, config_path, job_dir)
+        proc = subprocess.run(
+            cmd, cwd=REPO_ROOT, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+        )
+        return job_id, job_dir, proc
+
+    def test_sr_t19_resume_refused_when_source_lacks_readiness_version(
+        self, isolated_job_base, tmp_path,
+    ):
+        data_file = _synth_ohlcv_csv(tmp_path / "synth.csv", n_days=5)
+        cfg_a = _minimal_config(data_file, run_id="resume_src_readiness_legacy")
+        cfg_a["train_test"] = {
+            "enabled": True, "split_method": "ratio", "train_ratio": 0.6,
+            "split_date": None, "alert_degradation_pct": 30.0,
+        }
+        job_id_a, job_dir_a = _run_job_sync(cfg_a)
+
+        # Simule un job "legacy" (antérieur à cette mission) : train_test_semantics_version
+        # déjà présente (Dette TRAIN/TEST exact déjà DONE à l'époque), mais jamais de
+        # state_readiness_semantics_version (mission pas encore implémentée).
+        config_path = store._path(job_id_a, ".config.json", job_dir_a)
+        source_cfg = json.loads(open(config_path, encoding="utf-8").read())
+        assert source_cfg.get("train_test_semantics_version"), "précondition : train_test versionné"
+        source_cfg.pop("state_readiness_semantics_version", None)
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(source_cfg, f)
+
+        cfg_b = _minimal_config(data_file, run_id="resume_dst_readiness", resume_run_id=job_id_a)
+        cfg_b["train_test"] = dict(cfg_a["train_test"])
+        job_id_b, job_dir_b, proc = self._run_job_allow_failure(cfg_b)
+
+        assert proc.returncode != 0, (
+            f"la reprise readiness cross-version aurait dû échouer explicitement:\n{proc.stdout}\n{proc.stderr}"
+        )
+        combined = (proc.stdout + proc.stderr).lower()
+        assert "readiness" in combined or "semantics" in combined, (
+            f"le message d'erreur devrait nommer le problème de sémantique readiness:\n{combined}"
+        )
+
+    def test_sr_t18_resume_with_matching_readiness_version_is_allowed(
+        self, isolated_job_base, tmp_path,
+    ):
+        data_file = _synth_ohlcv_csv(tmp_path / "synth.csv", n_days=5)
+        cfg_a = _minimal_config(data_file, run_id="resume_src_readiness_ok")
+        cfg_a["train_test"] = {
+            "enabled": True, "split_method": "ratio", "train_ratio": 0.6,
+            "split_date": None, "alert_degradation_pct": 30.0,
+        }
+        job_id_a, job_dir_a = _run_job_sync(cfg_a)
+
+        config_used_a = json.loads(
+            open(store._path(job_id_a, ".config.json", job_dir_a), encoding="utf-8").read())
+        assert config_used_a.get("state_readiness_semantics_version"), (
+            "config_used.json du job source doit persister state_readiness_semantics_version "
+            "pour une stratégie readiness-aware avec train/test activé"
+        )
+
+        cfg_b = _minimal_config(data_file, run_id="resume_dst_readiness_ok", resume_run_id=job_id_a)
+        cfg_b["train_test"] = dict(cfg_a["train_test"])
+        job_id_b, job_dir_b, proc = self._run_job_allow_failure(cfg_b)
+
+        assert proc.returncode == 0, f"reprise même-version readiness attendue OK:\n{proc.stdout}\n{proc.stderr}"
