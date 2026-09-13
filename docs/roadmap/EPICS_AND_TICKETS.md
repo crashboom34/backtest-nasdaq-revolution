@@ -645,8 +645,8 @@ Dette A — documentées séparément, aucune des deux prouvée comme ayant affe
   bornes identiques à l'ancien comportement physiquement filtré). Suite complète : 811/811 tests.
   **`AF-V-02` reste néanmoins non prêt pour une exécution scientifique complète** : l'écart
   `compute_split_dates()` (OPEN à ce stade, corrigé depuis — voir plus bas et `AI_HANDOFF.md`
-  §18) et la dette WARMUP dynamique (ci-dessous) restaient `OPEN`, non tranchés. Détail complet :
-  `AI_HANDOFF.md` §16.
+  §18) et la dette WARMUP dynamique (OPEN à ce stade, corrigée depuis — voir plus bas et
+  `AI_HANDOFF.md` §19) restaient `OPEN`, non tranchés. Détail complet : `AI_HANDOFF.md` §16.
 - **Dette B — sémantique des frontières `SplitBoundary`, générique — DONE (2026-09-12)** :
   `SplitBoundary` déclare `[start, end)` (fin exclue) ; `engine.run_backtest()` ne savait
   auparavant filtrer que sur un intervalle **fermé** des deux côtés (`time_paris >= start_date`
@@ -665,8 +665,9 @@ Dette A — documentées séparément, aucune des deux prouvée comme ayant affe
   capacité du moteur à représenter `[start,end)`, pas le warmup/cold-start. Détail complet :
   `AI_HANDOFF.md` §17. **`AF-V-02` reste néanmoins non prêt scientifiquement** malgré cette
   clôture : l'écart `compute_split_dates()` (corrigé depuis, voir ci-dessous) et la dette WARMUP
-  dynamique restaient `OPEN`, et aucun câblage réel `SplitBoundary` → `AF-V-02` n'existe encore (à
-  concevoir lors de la conception du protocole Walk-Forward lui-même).
+  dynamique (corrigée depuis, voir ci-dessous) restaient `OPEN`, et aucun câblage réel
+  `SplitBoundary` → `AF-V-02` n'existe encore (à concevoir lors de la conception du protocole
+  Walk-Forward lui-même).
 - **Correction scientifique du split TRAIN/TEST (`compute_split_dates()`) — DONE (2026-09-13)** :
   l'ancien `optimizer.py::compute_split_dates()` convertissait le point de split en chaîne
   `"YYYY-MM-DD"` (perte de l'heure précise) puis positionnait `test_start` au lendemain — trou
@@ -682,10 +683,28 @@ Dette A — documentées séparément, aucune des deux prouvée comme ayant affe
   `TRAIN_TEST_SEMANTICS_VERSION="exact-boundary-v2"` (refus explicite si le job source a une
   version différente ou absente). Suite complète : 864/864 tests, `/code-review` sans finding
   bloquant. Détail complet : `AI_HANDOFF.md` §18, `docs/adr/0018-*.md`.
-- **Dette WARMUP dynamique — OPEN, hors périmètre stratégie** : `strategies/perfect_revolution_v1.py`
-  conserve `WARMUP=130` (constante fixe), alors que `ema_trend_len` est paramétrable jusqu'à 500
-  dans `PARAM_SCHEMA` — convergence stricte non garantie par 130 barres pour un paramétrage
-  éloigné du défaut. Stratégie non modifiée par cette mission.
+- **Dette WARMUP dynamique des indicateurs — DONE (2026-09-13)** : `WARMUP=130` (constante fixe)
+  était mathématiquement insuffisant — résiduel de l'influence de la condition initiale de l'EWM
+  `(1-alpha)^k` à k=130 = ~11,5 % pour `ema_trend_len=120` (DEFAULT_PARAMS), ~59,5 % pour
+  `ema_trend_len=500` (max `PARAM_SCHEMA`). **Corrigé** : `Strategy.required_warmup(params) ->
+  int` (`strategies/perfect_revolution_v1.py`) calcule le warmup réellement nécessaire pour une
+  tolérance de convergence explicite `WARMUP_EPSILON=0.01` (1 %), lookback `ema_trend[i-5]`
+  inclus (`+5` barres) — `required_warmup(DEFAULT_PARAMS)=282`, max schéma=`1157`. Moteur
+  générique (`engine.py` reste ignorant d'EMA/ATR) : `required_warmup()` présent → utilisé ;
+  sinon `WARMUP` → utilisé (legacy) ; sinon `130`. Non-régression stricte confirmée
+  empiriquement : 114 trades/`net_ret_pct` de référence inchangés malgré le warmup DEFAULT passant
+  de 130 à 282. Suite complète : 904/904 tests, `/code-review` sans finding bloquant. Détail
+  complet : `AI_HANDOFF.md` §19, `docs/adr/0019-*.md`.
+- **Dette STATE/SESSION READINESS — découverte séparément, OPEN, BLOQUANTE avant `AF-V-02`** :
+  Perfect Revolution construit un état path-dependent (`_or_high`/`_or_low`/`_or_ready`/
+  `_trades_today`/`_day_start_profit`/`_system_on`) exclusivement dans `on_bar()`, jamais rejoué
+  avant `loop_start` — aucun warmup indicateur, même correct, ne résout ce problème (`on_bar()` ne
+  voit jamais les bougies antérieures à `loop_start`). Preuve empirique : une frontière tombant
+  après la fenêtre Opening Range (15:30–16:00) laisse `_or_ready=False` toute la journée (aucune
+  entrée possible, silencieusement) ; une frontière tombant au milieu de cette fenêtre produit un
+  Opening Range silencieusement faux. **Dette distincte de WARMUP dynamique** — non traitée par
+  cette correction, non traitée par la correction TRAIN/TEST exacte. `AF-V-02` (Walk-Forward,
+  multi-fenêtres) ne doit pas démarrer avant décision sur cette dette.
 
 ### AF-V-03 — Monte-Carlo
 

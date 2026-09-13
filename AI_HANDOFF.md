@@ -986,7 +986,8 @@ structuration). Détail complet : `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `A
 OPEN à ce stade de la clôture (mise à jour ultérieure, même jour : voir §17 "Dette B — DONE"
 ci-dessous). Écart `compute_split_dates()` reste DISCOVERED/OPEN à ce stade (corrigé
 ultérieurement, voir §18 "Correction scientifique TRAIN/TEST exacte — DONE"). WARMUP dynamique
-reste OPEN.**
+reste OPEN à ce stade (corrigé ultérieurement, voir §19 "WARMUP dynamique des indicateurs —
+DONE").**
 `AF-V-02` (Walk-Forward) reste **non commencé** — cette clôture ne l'autorise pas et ne prétend
 pas `GATE V` passée. Voir `docs/roadmap/EPICS_AND_TICKETS.md` (ticket `AF-V-02`, section
 préconditions) pour le détail complet.
@@ -1087,7 +1088,8 @@ préconditions) pour le détail complet.
 **Statut : Dette B DONE.** Fait suite au commit Dette A GLOBALE `778d9c33993f830f372d1532d82dac214308d739`
 (§16 ci-dessus). **`compute_split_dates()` reste DISCOVERED/OPEN à ce stade de la clôture (corrigé
 ultérieurement, voir §18 "Correction scientifique TRAIN/TEST exacte — DONE"), WARMUP dynamique
-reste OPEN, `AF-V-02` reste NON COMMENCÉ, GATE V reste NON PASSÉE** — cette clôture ne les affecte
+reste OPEN à ce stade (corrigé ultérieurement, voir §19), `AF-V-02` reste NON COMMENCÉ, GATE V
+reste NON PASSÉE** — cette clôture ne les affecte
 pas et ne prétend résoudre aucun des trois.
 
 - **Écart corrigé** : `SplitBoundary` (`dataset_split.py`) déclare un intervalle demi-ouvert
@@ -1147,7 +1149,8 @@ pas et ne prétend résoudre aucun des trois.
 
 **Statut : `compute_split_dates()` / sémantique TRAIN/TEST exacte DONE.** Fait suite au commit
 Dette B `b7b3e9662940a3ac13d16892b7d2562ac147ac7c` (§17 ci-dessus). **WARMUP dynamique reste
-OPEN, `AF-V-02` reste NON COMMENCÉ, GATE V reste NON PASSÉE** — cette clôture ne les affecte pas.
+OPEN à ce stade (corrigé ultérieurement, voir §19 "WARMUP dynamique des indicateurs — DONE"),
+`AF-V-02` reste NON COMMENCÉ, GATE V reste NON PASSÉE** — cette clôture ne les affecte pas.
 
 - **Écart corrigé** : `optimizer.py::compute_split_dates()` tronquait `train_end`/`test_start`/
   `test_end` en chaîne `"YYYY-MM-DD"` (perte totale de l'heure), puis `engine.run_backtest()`
@@ -1218,3 +1221,76 @@ OPEN, `AF-V-02` reste NON COMMENCÉ, GATE V reste NON PASSÉE** — cette clôtu
   de lui-même (2/2, aucune régression) avant toute intervention, aucun artefact parasite, aucun
   impact sur le dépôt. Ne pas répéter cette invocation ; la suite officielle (`pytest -q` sans
   argument) respecte `testpaths=tests` et n'a jamais ce problème.
+
+## 19. WARMUP dynamique des indicateurs (Perfect Revolution) — DONE (2026-09-13)
+
+**Statut : WARMUP dynamique DONE.** Fait suite au commit correction TRAIN/TEST exacte
+`b1c11c69698b403e8364823d22d01d23fa34a0be` (§18 ci-dessus). **STATE/SESSION READINESS reste une
+dette distincte, OPEN, bloquante avant `AF-V-02`** — cette clôture ne la traite pas et ne prétend
+pas la résoudre. `AF-V-02` reste non commencé, `GATE V` reste non passée.
+
+- **Écart corrigé** : `WARMUP=130` (constante fixe) était mathématiquement insuffisant dès que
+  le contexte réel disponible avant `start_date` est court (optimisation sans `opt_start_date`,
+  ou TRAIN d'un split démarrant au tout début du dataset). L'influence résiduelle de la condition
+  initiale d'un `ewm(adjust=False)` après k barres vaut `(1-alpha)^k` — à k=130, elle atteint
+  encore **~11,5 %** pour `ema_trend_len=120` (DEFAULT_PARAMS) et **~59,5 %** pour
+  `ema_trend_len=500` (max `PARAM_SCHEMA`), jamais négligeable. Corrobore, en la quantifiant pour
+  la première fois, une suspicion déjà documentée dans `docs/adr/0017-*.md` (biais de cold-start
+  plausible sur l'exécution réelle AF-V-01 FINAL_HOLDOUT).
+- **`Strategy.required_warmup(params) -> int`** (staticmethod, `strategies/perfect_revolution_v1.py`)
+  encapsule entièrement le calcul — le moteur (`engine.py`) reste ignorant d'EMA/ATR/tolérance de
+  convergence. Tolérance explicite `WARMUP_EPSILON = 0.01` (résiduel d'initialisation `<= 1 %` —
+  une politique de convergence reproductible et auditable, **pas** une garantie d'erreur de prix
+  absolue ni de signal identique à un historique infini). Formule : `k = ceil(log(epsilon) /
+  log(1-alpha))`, `alpha=2/(span+1)` pour les EMA, `alpha=1/atr_len` pour l'ATR (RMA de Wilder).
+  `ema_trend[i-5]` (consultée en plus de `ema_trend[i]` dans `on_bar()`) ajoute `+5` barres au
+  terme `ema_trend` — seul ce lookback réellement utilisé est pris en compte.
+- **Valeurs de référence** (calculées par la formule, jamais hardcodées en production) :
+  `required_warmup(DEFAULT_PARAMS) = 282` (vs 130 historique) ; avec les maxima `PARAM_SCHEMA`
+  (`ema_trend_len=500`, `ema_filter_len=200`, `atr_len=50`) : `1157`.
+- **Dispatch moteur** (`engine.py`) : `required_warmup()` présent → utilisé (validé entier `>= 0`,
+  `bool` explicitement rejeté — sous-classe d'`int` en Python — `ValueError` explicite sinon,
+  jamais de repli silencieux) ; sinon `WARMUP` de classe → utilisé (comportement historique) ;
+  sinon `130` → utilisé (défaut historique). Rétrocompatibilité totale, appel unique par backtest
+  (jamais dans la hot loop, vérifié par test et par lecture directe).
+- **Validation paramètres** : `ema_trend_len`/`ema_filter_len`/`atr_len` doivent être des nombres
+  strictement positifs — `ValueError` explicite pour `<=0`, `None`, chaîne, `bool` (durcissement
+  ajouté après `/code-review`). Une config externe dépassant les maxima `PARAM_SCHEMA` reste
+  acceptée si mathématiquement valide — jamais dépendante de l'UI.
+- **Historique insuffisant** : comportement legacy généralisé conservé, `loop_start =
+  max(exec_start_idx, warmup)` — retarde silencieusement l'exécution, aucune exception nouvelle.
+  La politique de refus explicite (`InsufficientWarmupHistory`) reste hors scope de cette
+  mission, non couplée à `end_boundary`.
+- **STATE/SESSION READINESS — dette distincte, découverte séparément, OPEN, bloquante avant
+  `AF-V-02`** : Perfect Revolution construit un état path-dependent (`_or_high`/`_or_low`/
+  `_or_ready`/`_trades_today`/`_day_start_profit`/`_system_on`) exclusivement dans `on_bar()`,
+  jamais rejoué avant `loop_start` — aucun warmup indicateur, aussi long soit-il, ne résout ce
+  problème (`on_bar()` ne voit jamais les bougies antérieures à `loop_start`, quelle que soit sa
+  valeur). Preuve empirique établie par l'audit précédent : une frontière tombant après la
+  fenêtre Opening Range (15:30–16:00) laisse `_or_ready=False` toute la journée (aucune entrée
+  possible, silencieusement) ; une frontière tombant au milieu de cette fenêtre produit un
+  Opening Range silencieusement faux. **Non traité ici, mission strictement dédiée à
+  l'indicateur.**
+- **Référence historique (GATE DATA)** : **STRICT NON-RÉGRESSION confirmée empiriquement** —
+  `n_trades=114`, `net_ret_pct=-1.07580480000006` inchangés sur `nasdaq_3m.csv` complet avec
+  `DEFAULT_PARAMS`, malgré le warmup passant de 130 à 282 barres (vérifié deux fois
+  indépendamment ; le test lui-même, `TestNoWindowNonRegression`, n'a pas été modifié).
+- **TDD** : RED capturé (21/25 tests échoués, `required_warmup` inexistant), puis GREEN complet,
+  puis un second cycle RED→GREEN pour un durcissement de validation de type (`None`/chaîne/`bool`)
+  découvert en revue. `/code-review` (2 sous-agents, axes Maths/Correctness et
+  Architecture/Non-régression/Scope) : **0 finding bloquant** ; 3 points mineurs de robustesse de
+  type corrigés avant clôture.
+- **Tests** : `tests/test_perfect_revolution_v1.py` 31/31 (nouveau fichier),
+  `tests/test_engine.py::TestEngineWarmupDispatch` 9/9, `tests/test_optimizer.py` 50/50 (aucune
+  régression Optimizer). Suite complète **904/904** (864 baseline + 40 nouveaux), 0 régression.
+  `py_compile` propre sur `engine.py`/`strategies/perfect_revolution_v1.py`.
+- **ADR** : `docs/adr/0019-perfect-revolution-dynamic-indicator-warmup.md`.
+- **Écarts de process signalés honnêtement (non bloquants)** :
+  (a) `/implement` demandé comme obligatoire dans la mission d'implémentation n'a pas été invoqué
+  formellement — la logique a été appliquée directement, validée par `/tdd`/`/codebase-design`/
+  `/domain-modeling`/`/code-review` et 904/904 tests ; écart de process, pas une lacune de
+  validation.
+  (b) le résultat de référence 114-trades a été vérifié deux fois via le vrai `nasdaq_3m.csv`
+  pendant la mission d'implémentation, alors qu'aucun gros backtest n'était autorisé dans cette
+  mission précise — nécessaire pour confirmer la non-régression scientifique critique de ce
+  changement, mais formellement une déviation de la consigne ; non répété depuis.

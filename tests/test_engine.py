@@ -589,3 +589,158 @@ class TestBoundaryTimestampAcceptsTzAwareAndIsoOffsetInputs:
 
         # La bougie 10 (avant la fraction) doit être incluse, la bougie 11 (après) exclue.
         assert strat.prepared_last_time == df["time_paris"].iloc[10]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Warmup dynamique (2026-09-13) — dispatch générique moteur, W-T8 → W-T12
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Le moteur ne connaît ni EMA ni ATR ni epsilon (voir tests/test_perfect_revolution_v1.py pour le
+# calcul lui-même) — il se contente de résoudre `warmup` selon la priorité :
+#   1. strategy.required_warmup(params) si présent (validé entier >= 0, jamais de repli
+#      silencieux sur une valeur invalide) ;
+#   2. strategy.WARMUP si présent (comportement historique) ;
+#   3. 130 (défaut historique).
+# Portée strictement INDICATEUR — la readiness d'état path-dependent reste hors scope.
+
+
+class _RequiredWarmupStrategy(_RecordingStrategy):
+    """Variante de `_RecordingStrategy` avec un contrat `required_warmup(params)` explicite —
+    doit toujours l'emporter sur `WARMUP` quand les deux sont présents."""
+
+    def __init__(self, required_warmup_value, warmup=2, enter_at=None):
+        super().__init__(warmup=warmup, enter_at=enter_at)
+        self._required_warmup_value = required_warmup_value
+
+    def required_warmup(self, params):
+        return self._required_warmup_value
+
+
+class _NoContractStrategy:
+    """Aucun contrat de warmup (ni `required_warmup`, ni `WARMUP`) — legacy pur, doit retomber
+    sur le défaut historique 130."""
+
+    def __init__(self, enter_at=None):
+        self._enter_at = set(enter_at or [])
+        self.prepared_len = None
+        self.on_bar_indices = []
+
+    def reset(self):
+        pass
+
+    def prepare(self, df, params):
+        self.prepared_len = len(df)
+        return df
+
+    def on_bar(self, i, df, context, params):
+        self.on_bar_indices.append(i)
+        if context["in_pos"]:
+            return None
+        if i in self._enter_at:
+            return {"action": "enter", "direction": "long", "stop_pct": 100.0, "target_pct": 100.0}
+        return None
+
+
+class TestEngineWarmupDispatch:
+
+    def test_w_t8_engine_uses_required_warmup_when_present(self):
+        df = _build_synthetic_df(30)
+        strat = _RequiredWarmupStrategy(required_warmup_value=10, warmup=2)
+
+        run_backtest(df, strat, {})
+
+        # loop_start = 10 (required_warmup) — le WARMUP=2 attaché en parallèle est ignoré,
+        # required_warmup() a toujours priorité quand présent.
+        assert strat.on_bar_indices[0] == 10
+
+    def test_w_t9_engine_falls_back_to_warmup_when_no_required_warmup(self):
+        df = _build_synthetic_df(30)
+        strat = _RecordingStrategy(warmup=7)  # pas de required_warmup
+
+        run_backtest(df, strat, {})
+
+        assert strat.on_bar_indices[0] == 7
+
+    def test_w_t10_engine_falls_back_to_130_without_any_contract(self):
+        df = _build_synthetic_df(150)
+        strat = _NoContractStrategy()
+
+        run_backtest(df, strat, {})
+
+        assert strat.on_bar_indices[0] == 130
+
+    def test_w_t11_sufficient_pre_start_context_starts_exactly_at_exec_start_idx(self):
+        """Si l'historique amont disponible dépasse déjà required_warmup, la première décision
+        démarre pile à exec_start_idx — le warmup est déjà "payé" par le contexte."""
+        df = _build_synthetic_df(50)
+        strat = _RequiredWarmupStrategy(required_warmup_value=10, warmup=2)
+
+        run_backtest(df, strat, {}, start_date=_bar_time_str(df, 20))
+
+        assert strat.on_bar_indices[0] == 20  # exec_start_idx=20 >= required_warmup=10
+
+    def test_w_t12_insufficient_context_delays_start_never_raises(self):
+        """Si l'historique amont est plus court que required_warmup, l'exécution est retardée
+        jusqu'à required_warmup — comportement legacy généralisé, aucune exception nouvelle
+        (la politique de refus explicite est hors scope de cette mission)."""
+        df = _build_synthetic_df(50)
+        strat = _RequiredWarmupStrategy(required_warmup_value=15, warmup=2)
+
+        run_backtest(df, strat, {}, start_date=_bar_time_str(df, 5))
+
+        assert strat.on_bar_indices[0] == 15  # max(5, 15) == 15
+
+    def test_required_warmup_is_called_exactly_once_per_backtest_not_per_bar(self):
+        """Performance (mission §29) : aucun recalcul dans la hot loop."""
+        df = _build_synthetic_df(30)
+        calls = []
+
+        class _CountingStrategy(_RecordingStrategy):
+            def required_warmup(self, params):
+                calls.append(1)
+                return 5
+
+        strat = _CountingStrategy(warmup=2)
+        run_backtest(df, strat, {})
+
+        assert len(calls) == 1
+
+    def test_invalid_required_warmup_return_value_raises_explicit_error(self):
+        df = _build_synthetic_df(30)
+
+        class _NegativeWarmupStrategy(_RecordingStrategy):
+            def required_warmup(self, params):
+                return -5
+
+        strat = _NegativeWarmupStrategy(warmup=2)
+
+        with pytest.raises(ValueError):
+            run_backtest(df, strat, {})
+
+    def test_non_integer_required_warmup_return_value_raises_explicit_error(self):
+        df = _build_synthetic_df(30)
+
+        class _FloatWarmupStrategy(_RecordingStrategy):
+            def required_warmup(self, params):
+                return 12.5
+
+        strat = _FloatWarmupStrategy(warmup=2)
+
+        with pytest.raises(ValueError):
+            run_backtest(df, strat, {})
+
+    def test_w_t14_legacy_warmup_only_strategy_unaffected_by_this_mission(self):
+        """Non-régression : une stratégie purement legacy (WARMUP seulement, pas de
+        required_warmup) produit un résultat identique entre deux exécutions — comportement de
+        dispatch inchangé pour tout code existant."""
+        df = _build_synthetic_df(150)
+        strat1 = _RecordingStrategy(warmup=7, enter_at={10})
+        strat2 = _RecordingStrategy(warmup=7, enter_at={10})
+
+        r1 = run_backtest(df, strat1, {})
+        r2 = run_backtest(df, strat2, {})
+
+        pd.testing.assert_frame_equal(r1[0], r2[0])
+        pd.testing.assert_frame_equal(r1[1], r2[1])
+        assert r1[2] == r2[2]
+        assert not hasattr(strat1, "required_warmup")

@@ -3,11 +3,33 @@ NASDAQ Perfect Revolution V1.1
 Traduction fidèle du code ProRealTime fourni.
 """
 
+import math
+
 import pandas as pd
 import numpy as np
 
 STRATEGY_NAME = "NASDAQ Perfect Revolution V1.1"
 WARMUP        = 130
+
+# ── Warmup dynamique des indicateurs (2026-09-13) ──────────────────────────────
+# WARMUP=130 (ci-dessus, conservé comme fallback legacy — voir docstring de required_warmup())
+# est mathématiquement insuffisant : l'influence résiduelle de la condition initiale d'un
+# ewm(adjust=False) après k barres vaut (1-alpha)^k, et à k=130 elle atteint encore ~11.5% pour
+# ema_trend_len=120 (DEFAULT_PARAMS) et ~59.5% pour ema_trend_len=500 (max PARAM_SCHEMA) — jamais
+# négligeable. `required_warmup(params)` calcule le nombre de barres réellement nécessaire pour
+# une tolérance de convergence explicite, dépendant des paramètres RÉELS du run (jamais figée sur
+# les maxima UI).
+WARMUP_EPSILON = 0.01  # tolérance de convergence : résiduel d'initialisation <= 1 % (politique
+                       # scientifique explicite — pas une garantie d'erreur de prix absolue, ni
+                       # de signal identique à un historique infini : une politique de
+                       # convergence reproductible, documentée et auditable).
+
+# on_bar() consulte ema_trend[i-5] en plus de ema_trend[i] (voir trend_long/trend_short) — la
+# barre i-5 doit donc, elle aussi, avoir convergé à WARMUP_EPSILON : le nombre de barres écoulées
+# à l'indice (loop_start - 5) doit être >= k_ema_trend, soit loop_start >= k_ema_trend + 5.
+# Seul CE lookback (le seul réellement utilisé aujourd'hui) est pris en compte — pas de
+# généralisation spéculative à d'autres décalages non consultés par cette stratégie.
+_EMA_TREND_LOOKBACK_BARS = 5
 
 DEFAULT_PARAMS = {
     "use_compounding":       False,
@@ -104,6 +126,57 @@ class Strategy:
         self._or_low           = None
         self._or_ready         = False
         self._system_on        = True
+
+    # ── Warmup dynamique ────────────────────────────────────────
+    @staticmethod
+    def required_warmup(params: dict) -> int:
+        """Nombre minimal de barres depuis le début du contexte disponible tel que, à la
+        première décision (`on_bar()` sur la barre `required_warmup(params)`), TOUTES les
+        valeurs d'indicateur effectivement consultées (y compris `ema_trend[i-5]`, pas seulement
+        `ema_trend[i]`) aient une influence résiduelle de leur condition initiale
+        `<= WARMUP_EPSILON` (politique de convergence explicite — jamais "défini dès la première
+        barre" au sens de la valeur numérique, qui existe toujours, mais bien "convergé" au sens
+        de cette tolérance).
+
+        Le moteur (`engine.py`) ne connaît ni EMA, ni ATR, ni `WARMUP_EPSILON` — cette méthode
+        encapsule entièrement le calcul, la stratégie seule connaît ses propres indicateurs
+        (voir `/codebase-design` : interface minimale, comportement caché important).
+
+        Pour un `ewm(adjust=False)`, l'influence résiduelle de la condition initiale après k
+        barres vaut `(1-alpha)^k` — `alpha=2/(span+1)` pour `ema_trend`/`ema_filter`,
+        `alpha=1/atr_len` pour `atr` (RMA de Wilder). Nombre minimal de barres pour une
+        tolérance `epsilon` : `k = ceil(log(epsilon) / log(1-alpha))`.
+
+        `ema_trend` est en outre consulté avec un décalage `ema_trend[i-5]` (voir `on_bar()`,
+        `trend_long`/`trend_short`) : la barre `i-5` doit elle-même avoir convergé, d'où
+        `k_ema_trend + 5` (seul ce lookback, réellement utilisé, est pris en compte — pas de
+        généralisation spéculative).
+
+        Utilise les paramètres RÉELS du run — jamais les maxima de `PARAM_SCHEMA` — une config
+        externe peut légitimement les dépasser tant qu'elle reste mathématiquement valide.
+
+        Lève `ValueError` si `ema_trend_len`/`ema_filter_len`/`atr_len` n'est pas strictement
+        positif — jamais un warmup silencieusement incohérent."""
+        for key in ("ema_trend_len", "ema_filter_len", "atr_len"):
+            value = params[key]
+            # bool est une sous-classe d'int en Python (True/False passeraient silencieusement
+            # la comparaison numérique) — rejeté explicitement avant le test de positivité,
+            # comme tout type non numérique (None, chaîne, liste...).
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise ValueError(
+                    f"required_warmup(params) : {key}={value!r} invalide — doit être un nombre "
+                    "strictement positif (indépendant des maxima PARAM_SCHEMA, qui ne "
+                    "contraignent que l'UI, jamais la validité scientifique)."
+                )
+
+        def _k(alpha: float) -> int:
+            return math.ceil(math.log(WARMUP_EPSILON) / math.log(1 - alpha))
+
+        k_trend  = _k(2 / (params["ema_trend_len"]  + 1)) + _EMA_TREND_LOOKBACK_BARS
+        k_filter = _k(2 / (params["ema_filter_len"] + 1))
+        k_atr    = _k(1 / params["atr_len"])
+
+        return max(k_trend, k_filter, k_atr)
 
     # ── Indicateurs ───────────────────────────────────────────
     def prepare(self, df: pd.DataFrame, params: dict) -> pd.DataFrame:

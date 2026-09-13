@@ -213,12 +213,28 @@ def run_backtest(
     trades       = []
     equity_curve = []
 
-    warmup = getattr(strategy, "WARMUP", 130)
-    # loop_start : au moins WARMUP bougies de contexte avant la première décision, ET jamais
+    # Warmup dynamique des indicateurs (2026-09-13) — le moteur reste ignorant d'EMA/ATR/
+    # epsilon : il délègue entièrement le calcul à la stratégie quand elle expose un contrat
+    # `required_warmup(params)`, sinon retombe sur l'attribut `WARMUP` historique, sinon 130
+    # (comportement 100% inchangé pour toute stratégie antérieure à cette mission). Appelé UNE
+    # seule fois ici, jamais dans la boucle de décision plus bas (coût nul en hot loop).
+    if hasattr(strategy, "required_warmup"):
+        warmup = strategy.required_warmup(params)
+        if isinstance(warmup, bool) or not isinstance(warmup, int) or warmup < 0:
+            raise ValueError(
+                f"{strategy.__class__.__name__}.required_warmup(params) a retourné {warmup!r} "
+                "— un entier >= 0 est attendu. Jamais de repli silencieux vers WARMUP/130 sur "
+                "une valeur invalide renvoyée par la stratégie."
+            )
+    else:
+        warmup = getattr(strategy, "WARMUP", 130)
+    # loop_start : au moins `warmup` bougies de contexte avant la première décision, ET jamais
     # avant exec_start_idx (la fenêtre demandée). Si assez d'historique existe avant start_date,
     # l'exécution démarre pile à exec_start_idx (le warmup est déjà "payé" par le contexte
-    # amont). Si le contexte disponible avant start_date est plus court que WARMUP, le garde-fou
-    # WARMUP historique continue de s'appliquer (protection contre un historique insuffisant).
+    # amont). Si le contexte disponible avant start_date est plus court que `warmup`, le
+    # garde-fou continue de s'appliquer (protection contre un historique insuffisant — la
+    # politique de refus explicite en cas d'historique insuffisant reste hors scope de cette
+    # mission, voir la dette READINESS d'état séparée).
     # Sans start_date (exec_start_idx=0), identique au contrat historique : loop_start == warmup.
     loop_start = max(exec_start_idx, warmup)
 
