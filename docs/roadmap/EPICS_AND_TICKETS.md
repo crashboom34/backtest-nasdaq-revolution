@@ -609,21 +609,27 @@ dans l'ADR-0017, à traiter par un futur ticket dédié à `engine.py` si jugé 
 
 ### AF-V-02 — Walk-Forward
 
-**Status** : **READY** (`AF-V-01` terminé — débloqué mécaniquement, **non commencé**, `GATE V`
-toujours ouverte). **Précédence architecturale satisfaite (2026-09-12)** : `AF-V-06` (socle
-`ValidationSpecification`/`ValidationEvidence` typé) est désormais **DONE** — ce ticket doit
-ajouter sa propre paire `WalkForwardSpecification`/`WalkForwardEvidence` au registre
-`_VALIDATION_TYPES` existant (`validation_run.py`), jamais retyper une évidence déjà produite en
-`dict`. **Effort** : M. **Skills recommended** : `tdd`.
+**Status** : **READY** — spec figée (2026-09-14), `docs/adr/0021-walk-forward-rolling-
+calendar-v1.md` (`Proposed`, points restant à valider par l'utilisateur avant implémentation) ;
+**implémentation NON commencée**, `GATE V` reste **NON PASSÉE**. Toutes les préconditions
+scientifiques (Dette A, Dette B, TRAIN/TEST exact, WARMUP dynamique, State/Session Readiness V1)
+sont désormais `DONE` — détail complet `AI_HANDOFF.md` §21. **Précédence architecturale
+satisfaite (2026-09-12)** : `AF-V-06` (socle `ValidationSpecification`/`ValidationEvidence` typé)
+est désormais **DONE** — ce ticket ajoute sa propre paire `WalkForwardSpecification`/
+`WalkForwardEvidence` au registre `_VALIDATION_TYPES` existant (`validation_run.py`), jamais
+retyper une évidence déjà produite en `dict`. **Prérequis d'implémentation identifié (pas encore
+résolu)** : construction d'un nouveau `DatasetSplitPlan` avec zone `VALIDATION` peuplée (le plan
+réel actuel a `validation: null`), `FINAL_HOLDOUT` inchangé. **Effort** : M. **Skills recommended** :
+`tdd`.
 
 **What to build** : moteur walk-forward sur `CURRENT REFERENCE ENGINE`, `ValidationEvidence`
-dédiée. **Zones consommées : non tranchées ici, décision de conception propre à ce ticket**
-(correction 2026-09-12 — une version antérieure de cette entrée présumait à tort une exécution de
-`TRAIN`/`FINAL_HOLDOUT`) : `TRAIN` reste la zone de recherche/ajustement selon le protocole
-retenu ; les fenêtres out-of-sample répétées (folds) proviendront de `VALIDATION` et/ou
-`DISCOVERY_OOS`, conformément à `DOMAIN_MODEL.md` §12 — le choix précis entre les deux, ou leur
-usage combiné, appartient à la conception réelle d'`AF-V-02`, pas à cette réconciliation
-documentaire. **`FINAL_HOLDOUT` garde son statut distinct de preuve terminale contrôlée** : son
+dédiée. **Zones consommées : tranché par `docs/adr/0021-*.md` Décision 8 (2026-09-14, remplace la
+formulation "non tranchées ici" d'une version antérieure de cette entrée)** : les fenêtres de fold
+(TRAIN **et** TEST du protocole Walk-Forward, imbriquées) proviennent exclusivement de la zone
+`VALIDATION` d'un `DatasetSplitPlan` — jamais de la zone macro `TRAIN` (réservée à Discovery) ni de
+`DISCOVERY_OOS` (réservée à un futur Discovery, non combinée avec Walk-Forward en V1),
+conformément à `DOMAIN_MODEL.md` §12. **`FINAL_HOLDOUT` garde son statut distinct de preuve
+terminale contrôlée** : son
 accès reste exclusivement audité via `HoldoutAccessEvent` (même mécanisme que pour `AF-V-01`), et
 il ne doit **jamais** être implicitement réutilisé comme fold ordinaire à travers un futur
 Walk-Forward — toute évaluation qui le consulterait resterait un événement d'accès distinct et

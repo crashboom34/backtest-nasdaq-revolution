@@ -1370,3 +1370,108 @@ reste non passée — cette clôture ne les affecte pas.
 - **ADR** : `docs/adr/0020-state-session-readiness-v1.md`.
 - **`/implement` invoqué formellement** cette fois — écart de process de la mission WARMUP
   dynamique (§19) non répété.
+
+## 21. AF-V-02 — Walk-Forward V1 — SPEC FIGÉE, `Proposed` (2026-09-14) — AUCUN CODE MODIFIÉ
+
+**Statut : conception documentaire uniquement.** `AF-V-02 implementation: NOT STARTED`, `GATE V:
+NOT PASSED`. Fait suite à la clôture de State/Session Readiness V1 (§20) — toutes les
+préconditions scientifiques précédant `AF-V-02` sont désormais `DONE`. Cette mission fige la
+géométrie, le modèle de domaine, les invariants et la matrice TDD ; **elle n'implémente rien**.
+Détail complet : `docs/adr/0021-walk-forward-rolling-calendar-v1.md` (statut `Proposed` — reste à
+valider explicitement par l'utilisateur avant toute implémentation).
+
+- **Géométrie retenue V1** : Rolling, préréglage `P24M/P6M/P6M` (`train_period`/`test_period`/
+  `step_period`, invariant `step_period == test_period`), durées **calendaires** — Anchored/
+  Hybride gardées `FUTURE`, `geometry != "rolling"` lève `UnsupportedWalkForwardGeometry`.
+- **Pas de nouveau `WalkForwardRun`** : extension du registre `_VALIDATION_TYPES` existant
+  (`validation_run.py`, posé par `AF-V-06`) avec `"walk_forward"` →
+  (`WalkForwardSpecification`, `WalkForwardEvidence`) — mêmes relations `research_run_id`/
+  `split_plan_id`/`dataset_snapshot_id` que `ValidationRun` porte déjà pour `"oos"`.
+- **`FoldDefinition`** minimal (pas de variante `effective` pour `train_start`, jamais ajusté —
+  seule une frontière interne à une exécution continue a besoin de la résolution readiness,
+  jamais un point de démarrage). Non-chevauchement des fenêtres TEST **dérivé par construction**
+  (déterminisme de `resolve_state_ready_boundary()` sur des cibles calendaires identiques entre
+  folds adjacents), jamais par coordination explicite. `WALK_FORWARD_SEMANTICS_VERSION =
+  "rolling-calendar-v1"`, troisième contrat indépendant de `exact-boundary-v2`/
+  `daily-state-ready-v1`.
+- **Sélection TRAIN Top-1** : nouveau seam additif `Optimizer.run(..., run_test_validation:
+  bool = True)` — `False` saute la phase de validation multi-candidats existante
+  (`top_to_validate[:cfg.top_k_save]`), comportement par défaut strictement inchangé pour tout
+  appelant existant. Walk-Forward exécute ensuite `optimizer._run_single()` **exactement une
+  fois** par fold (réutilisée telle quelle) — jamais le comportement multi-candidats actuel.
+- **`VALIDATION`** (zone du `DatasetSplitPlan`, jusqu'ici jamais peuplée — vérifié :
+  `results/dataset_splits/split_perfect_revolution_v1_final_holdout/split_plan.json` a
+  `validation: null`) devient le conteneur macro des folds. **Prérequis d'implémentation identifié,
+  non résolu par cette mission** : construction d'un nouveau `DatasetSplitPlan` avec `VALIDATION`
+  peuplée (`FINAL_HOLDOUT` inchangé, `2025-05-19` → `2026-05-20`), avant tout premier fold réel.
+- **`FINAL_HOLDOUT`** structurellement inaccessible (aucune référence dans les objets Walk-Forward,
+  jamais un fold implicite, `FinalHoldoutOverlapError` en garde défensive).
+- **Taxonomie d'erreurs consolidée** : 10 nouvelles (`UnsupportedWalkForwardGeometry`,
+  `DatasetTooShortForWalkForward`, `InsufficientWarmupHistory`, `NonDeterministicSearchWithoutSeed`,
+  `NoEligibleTrainCandidate`, `FinalHoldoutOverlapError`, `WalkForwardResumeMismatch`,
+  `WalkForwardSemanticsMismatch`, `FoldArtifactConflict`, `OosOverlapError`) + 1 réutilisée
+  (`NoStateReadyBoundary`) — 3 candidates de la proposition initiale écartées par redondance
+  (`NoValidWalkForwardFold`, `EmptyTrainWindow`, `EmptyTestWindow`).
+- **Verdict scientifique séparé de la preuve factuelle** : `PASS` structurellement impossible sans
+  `verdict_policy_id` pré-enregistré (sinon `INCONCLUSIVE` systématique) — jamais une décision
+  Champion (hors scope, `GATE V` reste distincte de toute future notion Champion).
+- **Persistance additive** : `results/job_xxx/walk_forward/` (manifest/state/folds/aggregate/
+  `validation_run.json`), fingerprint de reprise à 3 versions de sémantique + seed + politique de
+  verdict, `atomic_json_store.py` réutilisé sans duplication.
+- **Compléments ajoutés lors de la mission de clôture Git (2026-09-14), répartis sur les Décisions
+  1, 4, 6, 13, 14, 15** — trouvés manquants par la relecture finale ciblée (checklist explicite de
+  la mission), pas des changements scientifiques : des clarifications de décisions déjà arrêtées
+  mais jamais transcrites (attribution exacte corrigée ici après une 1ʳᵉ version de cette section
+  qui les regroupait tous, à tort, sous « Décisions 14/15 » — trouvaille `/code-review` de cette
+  même mission de clôture) :
+  - **Décision 1** : `allow_partial_last_fold=False` (dernier segment incomplet enregistré, jamais
+    exécuté ni compté).
+  - **Décision 4** : notation explicite `TRAIN_k = [train_start_k, effective_boundary_k)`
+    (symétrique de `TEST_k`, déjà présente).
+  - **Décision 6** : `_run_single()` réelle jette `trades`/`equity` (`optimizer.py:266`) — la phase
+    TEST d'un fold doit donc l'appeler différemment (paramètre renvoyant aussi `trades`/`equity`,
+    ou appel direct à `run_backtest()`) pour produire `oos_trades.csv`/`oos_equity.csv` (Décision
+    12) et `FoldResult.expectancy` (métrique introduite par Walk-Forward lui-même, PnL net moyen
+    par trade — `engine.py` n'a pas de champ `expectancy` natif, `CONTEXT.md` le documente comme
+    non défini projet-wide).
+  - **Décision 13** : séparation explicite `execution_status`/`scientific_verdict` (une erreur
+    technique n'est jamais traduite en `FAIL` scientifique).
+  - **Décision 14** : `position_transition_policy="flat_each_fold_v1"` (instance `Strategy()`
+    fraîche, capital initial identique, aucune position/PnL hérité par fold) ; absence explicite de
+    rétroaction TEST inter-fold (search space/scoring/seed/budget gelés pour tout le run, seules
+    les DONNÉES avancent dans le temps, jamais les résultats — distinct de la reprise/Décision 12,
+    qui ne fait que sauter les folds déjà terminés, jamais lire leur résultat pour en influencer un
+    autre).
+  - **Décision 15** : agrégation OOS — **trades concaténés littéralement** (PF/win-rate insensibles
+    au capital de base) mais **courbe d'équity reconstruite par rendements normalisés chaînés**
+    (jamais une concaténation brute des capitaux absolus, qui donnerait un artefact en dents de
+    scie puisque chaque fold repart du même capital) ; `oos_profit_factor = gross_win_total /
+    gross_loss_total` (mêmes noms que `engine.py`, `float("inf")` si `gross_loss_total==0` avec
+    trades — jamais `None` dans ce cas, jamais une moyenne de `profit_factor` par fold) ;
+    zéro-trade TEST = observation valide, jamais un `FAIL` automatique.
+- **`/domain-modeling`, `/codebase-design`, `/grill-with-docs`, `/to-spec`, `/tdd` (conception de
+  matrice uniquement), `ui-ux-pro-max` (revue d'exploitabilité backend, aucune UI codée)**
+  réellement invoqués. `/code-review` exécuté sur le diff documentaire de cette mission (2
+  sous-agents `general-purpose`, axes scientifique/architecture et reproductibilité/documentation)
+  — **0 blocker, 4+2 important, 3+5 minor**, tous corrigés dans l'ADR/cette section avant clôture :
+  prémisse explicite d'un `base_params` unique partagé par tous les folds pour la résolution
+  readiness (Décision 4) ; réutilisation de `NoStateReadyBoundary` comme TYPE seulement, messages
+  reconstruits par fold (Décision 11) ; absence de double résolution de frontière grâce à
+  `train_test.enabled=False` sur l'appel `Optimizer.run()` par fold (Décision 6) ; paragraphe
+  "Zones consommées" de la roadmap resynchronisé avec la Décision 8. `/implement`, `/to-tickets`,
+  `/speckit-*` **non invoqués** (mission de conception, pas d'implémentation ni de spec Kit).
+- **Mission de clôture Git distincte (2026-09-14)** — relecture finale ciblée sur checklist
+  explicite (24 points), `/grill-with-docs` + `/code-review` (1 sous-agent `general-purpose`)
+  réellement invoqués pour CETTE mission (ne pas confondre avec la revue de la mission de
+  conception ci-dessus) : **0 blocker, 3 important, 1 minor**, tous corrigés — attribution exacte
+  Décisions 1/4/6/13/14/15 (une 1ʳᵉ version de cette section les regroupait à tort sous « 14/15 
+  seulement ») ; `expectancy` explicitement défini comme métrique introduite par Walk-Forward
+  (jamais un champ `engine.py` natif) et dépendance technique identifiée (`_run_single()` jette
+  `trades`/`equity`) ; réconciliation trades-concaténés-littéralement vs équity-normalisée-chaînée
+  entre Décisions 14/15. `/simplify` invoqué mais jugé non pertinent mécaniquement pour un diff
+  purement documentaire (ses 4 axes — reuse/simplification/efficiency/altitude — sont conçus pour
+  du code) ; vérification manuelle de redondance effectuée à la place, aucune trouvée au-delà du
+  style déjà établi par ce document. `ui-ux-pro-max` confirmé sans régression sur le contrat
+  d'exploitabilité UI déjà validé.
+- **Prochaine mission unique recommandée** : `AF-V-02` — implémentation TDD du Walk-Forward V1
+  conformément à `docs/adr/0021-*.md` et à la spec figée — **non commencée dans cette mission**.
