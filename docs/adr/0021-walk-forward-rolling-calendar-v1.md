@@ -36,6 +36,23 @@ l'impression qu'une portion de `VALIDATION` a été silencieusement ignorée) ma
 ni compté** comme fold comparable — aucun `TEST` raccourci, jamais de dégradation silencieuse de
 la géométrie déclarée.
 
+**Condition d'arrêt formalisée (précision de la mission corrective, 2026-09-15 — trouvaille
+`/code-review` : la garantie "structurelle" de la Décision 10 n'était sinon adossée qu'à une
+description en prose, jamais à une inégalité vérifiable)** : le fold `k` (0-indexé) est généré
+**si et seulement si** `train_start_k + train_period + test_period <= VALIDATION.end`, où
+`train_start_k = VALIDATION.start + k * step_period` — comparaison sur les instants **calendaires
+bruts** (`requested_*`, jamais `effective_*`) puisque c'est cette borne, avant toute résolution
+readiness, qui doit déjà tenir dans `VALIDATION` pour qu'un fold soit seulement candidat. La
+génération s'arrête au premier `k` où l'inégalité échoue ; `N` = index du dernier `k` satisfaisant
+l'inégalité. Cette condition garantit `requested_test_end_N <= VALIDATION.end`, prémisse
+nécessaire à la Décision 4/10 (le dernier fold généré ne dépasse jamais `VALIDATION.end` même
+avant toute readiness). **Marge résiduelle documentée, non un défaut** : `effective_boundary_k`
+(frontière interne TRAIN/TEST, non terminale) reste résolue par readiness et peut dériver en avant
+jusqu'à un jour calendaire (`resolve_state_ready_boundary()`) — négligeable face à `test_period =
+P6M`, mais toute future géométrie V2+ autorisant un `test_period` beaucoup plus court devra
+revérifier que cette marge reste petite face à la période choisie avant de relâcher l'invariant
+`step_period == test_period`.
+
 **Alternatives rejetées pour V1, gardées FUTURE** : **Anchored** (TRAIN démarre toujours au même
 point, grandit à chaque fold) — utile pour mesurer la dégradation d'un jeu de paramètres figé
 dans le temps, mais change la question scientifique posée (stabilité d'un choix vs. capacité de
@@ -75,8 +92,10 @@ FoldDefinition (frozen) :
     effective_boundary: str       # resolve_state_ready_boundary(requested_boundary, spec)
     boundary_adjusted: bool
     requested_test_end: str       # = requested_boundary + test_period (cible calendaire)
-    effective_test_end: str       # resolve_state_ready_boundary(requested_test_end, spec)
-    test_end_adjusted: bool
+    effective_test_end: str       # non terminal : resolve_state_ready_boundary(requested_test_end, spec)
+                                   # terminal (is_last_fold=True) : == requested_test_end, JAMAIS résolu
+                                   # (correction post-clôture — voir Décision 4)
+    test_end_adjusted: bool       # toujours False si is_last_fold=True (voir ci-dessous)
     is_last_fold: bool
 ```
 
@@ -100,18 +119,28 @@ erreur).
 
 ## Décision 4 — Non-chevauchement OOS garanti par déterminisme, jamais par coordination inter-fold
 
-Chaque fold résout **indépendamment** ses deux frontières (`effective_boundary`,
+**Correction post-clôture (2026-09-15)** — un défaut a été trouvé lors de la préparation de la
+première mission d'implémentation, **avant l'écriture du moindre code ou test** : la version
+initialement poussée de cette Décision résolvait `effective_test_end` via
+`resolve_state_ready_boundary()` pour **tous** les folds, y compris le dernier, et déclarait
+`TEST_N` **inclusif** pour le dernier fold (généralisé, à tort, du précédent `TrainTestWindows`).
+Ces deux choix sont **corrigés ci-dessous** ; voir Décision 9 pour le changement de version de
+sémantique qui en découle. Aucun run Walk-Forward n'a jamais été exécuté ni persisté sous l'ancien
+comportement — la correction ne casse aucun artefact réel (voir Décision 9).
+
+Chaque fold **non terminal** résout **indépendamment** ses deux frontières (`effective_boundary`,
 `effective_test_end`) via `resolve_state_ready_boundary()`, réutilisée telle quelle depuis
 `strategy_contracts.py` — **aucune donnée n'est jamais passée d'un fold à l'autre pour ce calcul**.
 La non-duplication/non-perte de barres entre `TEST_k` et `TEST_{k+1}` n'est donc pas assurée par
 une coordination explicite, mais **dérivée par construction** : avec `step_period == test_period`,
-`requested_test_end` du fold `k` est arithmétiquement identique à `requested_boundary` du fold
-`k+1` (même instant calendaire) ; `resolve_state_ready_boundary()` étant une fonction **pure**
-(mêmes entrées → même sortie), `effective_test_end_k == effective_boundary_{k+1}` est **garanti**,
-**à condition que `readiness_spec` soit LUI AUSSI identique aux deux appels** — prémisse qui doit
-être rendue explicite, pas seulement supposée (trouvaille `/code-review`, revue adversariale de
-cette mission) : **`WalkForwardSpecification` fige UN SEUL `base_params`**, utilisé à la fois
-comme `ValidationRun.strategy_params` (le même champ, même sémantique que pour `"oos"` : un jeu de
+`requested_test_end` du fold `k` (`k < N`, `N` = dernier fold) est arithmétiquement identique à
+`requested_boundary` du fold `k+1` (même instant calendaire) ; `resolve_state_ready_boundary()`
+étant une fonction **pure** (mêmes entrées → même sortie), `effective_test_end_k ==
+effective_boundary_{k+1}` est **garanti pour tout fold non terminal**, **à condition que
+`readiness_spec` soit LUI AUSSI identique aux deux appels** — prémisse qui doit être rendue
+explicite, pas seulement supposée (trouvaille `/code-review`, revue adversariale de la mission de
+conception) : **`WalkForwardSpecification` fige UN SEUL `base_params`**, utilisé à la fois comme
+`ValidationRun.strategy_params` (le même champ, même sémantique que pour `"oos"` : un jeu de
 paramètres fixe décrivant le run, pas une valeur par fold) et comme argument unique de
 `strategy.state_readiness(base_params)` pour **la résolution de frontière de TOUS les folds**,
 quel que soit ce que la recherche TRAIN de chaque fold sélectionne ensuite pour les dimensions
@@ -123,19 +152,43 @@ actuel, mais **doit rester une invariant explicite de `WalkForwardSpecification`
 coïncidence non documentée : si une future stratégie exposait `or_start_h`/`or_start_m` comme
 paramètres balayables, ce théorème de non-chevauchement cesserait de tenir et devrait être
 reconsidéré avant d'autoriser leur ajout au search space d'un Walk-Forward. Un test de régression
-dédié (voir matrice TDD) doit vérifier `effective_test_end_k == effective_boundary_{k+1}`
-directement sur l'implémentation, jamais seulement supposer l'argument ci-dessus.
+dédié (voir matrice TDD) doit vérifier `effective_test_end_k == effective_boundary_{k+1}` pour
+tout `k < N` directement sur l'implémentation, jamais seulement supposer l'argument ci-dessus.
 
-**Sémantique d'inclusivité, TRAIN et TEST** : `TRAIN_k = [train_start_k, effective_boundary_k)`
-(exclusif — même contrat que `TrainTestWindows`, jamais deux valeurs indépendantes pouvant
-diverger). `TEST_k = [effective_boundary_k, effective_test_end_k)` (demi-ouvert)
-pour tout fold **non terminal** — sinon la barre exactement à la frontière partagée serait comptée
-deux fois. `TEST_N = [effective_boundary_N, effective_test_end_N]` (**inclusif**) pour le
-**dernier** fold uniquement — généralisation directe et non inventive du précédent déjà établi par
-`TrainTestWindows` (`TRAIN` exclusif / `TEST` terminal inclusif), étendue à N zones chaînées au
-lieu de 2. `WALK_FORWARD_SEMANTICS_VERSION = "rolling-calendar-v1"` fige ce contrat, indépendant
-de `TRAIN_TEST_SEMANTICS_VERSION`/`STATE_READINESS_SEMANTICS_VERSION` (troisième contrat
-scientifique distinct, même famille de garde de reprise — voir Décision 9).
+**Le dernier fold (`N`) est une frontière TERMINALE, jamais résolue par readiness** — corrigé, même
+raisonnement que `train_start` du fold 0 (Décision 3) : la readiness protège la session d'un
+**successeur** ; le dernier fold n'en a aucun, et le décalage en avant que peut produire
+`resolve_state_ready_boundary()` (jusqu'au minuit local du jour calendaire suivant) risquerait de
+pousser `effective_test_end_N` au-delà de `VALIDATION.end`, donc **dans `FINAL_HOLDOUT`** —
+violation directe de la Décision 10. `effective_test_end_N = requested_test_end_N` **inconditionnellement**,
+`test_end_adjusted` toujours `False` pour ce fold — aucun appel à `resolve_state_ready_boundary()`
+sur cette frontière.
+
+**Sémantique d'inclusivité, TRAIN et TEST — corrigée, plus aucune exception terminale** :
+`TRAIN_k = [train_start_k, effective_boundary_k)` (exclusif — même contrat que `TrainTestWindows`,
+jamais deux valeurs indépendantes pouvant diverger). `TEST_k = [effective_boundary_k,
+effective_test_end_k)` (demi-ouvert) **pour tout fold, y compris le dernier — sans exception** :
+la barre exactement à `effective_test_end_k` appartiendrait sinon deux fois (folds non terminaux)
+ou empiéterait sur `FINAL_HOLDOUT` (dernier fold, quand `VALIDATION.end == FINAL_HOLDOUT.start`,
+cas normal puisque `DatasetSplitPlan` déclare ses zones `[start,end)` — voir Décision 10).
+**L'ancien précédent `TrainTestWindows` (`TRAIN` exclusif / `TEST` terminal inclusif) NE
+S'APPLIQUE PAS ICI** : il concernait un split à 2 zones internes à une sélection d'exécution
+arbitraire (aucune zone `[start,end)` déclarée après `TEST`), alors qu'ici `TEST_N` reste borné
+par `VALIDATION.end` elle-même `[start,end)`, quelle que soit la zone qui suit concrètement
+`VALIDATION` dans le plan (`FINAL_HOLDOUT` directement, ou `DISCOVERY_OOS` en position
+intermédiaire — Décision 8 ne fige pas cette adjacence) : généraliser l'exception ferait toujours
+fuiter, au minimum, le premier instant hors `VALIDATION` dans `TEST_N`. **Aucune barre `TEST_N`
+perdue** (précision de portée, `/code-review` de cette mission corrective — à ne pas confondre
+avec une garantie de couverture totale de `VALIDATION`, non promise ici, voir ci-dessous) :
+l'instant `effective_test_end_N` (== `VALIDATION.end` dans le cas exact, condition d'arrêt
+ci-dessus) n'appartient de toute façon jamais à `VALIDATION` selon la déclaration `[start,end)` du
+plan lui-même — l'exclure de `TEST_N` n'exclut donc aucune barre qui aurait légitimement dû
+figurer dans **la fenêtre `TEST_N` elle-même**. **Distinct** : la couverture complète de
+`VALIDATION` par l'ensemble des folds n'est **jamais** garantie — une éventuelle queue partielle
+en fin de `VALIDATION` (`effective_test_end_N < VALIDATION.end` strictement) reste, par Décision 1,
+délibérément enregistrée mais non exécutée ; ce n'est pas une barre "perdue" par erreur, c'est une
+exclusion assumée et déjà documentée, indépendante de la correction d'inclusivité ci-dessus.
+Voir Décision 9 pour le changement de version de sémantique qu'entraîne cette correction.
 
 ## Décision 5 — Common Window Rule et warmup causal déjà satisfaits par l'architecture existante, aucun nouveau mécanisme
 
@@ -173,8 +226,9 @@ existante (lignes ~1044-1065) sans y toucher autrement ; comportement par défau
 inchangé** pour tout appelant existant (`app.py`, tout job actuel). Walk-Forward appelle
 `Optimizer.run(run_test_validation=False)`, prend `all_results[0]` (meilleur score TRAIN) comme
 `FoldSelection.selected_params`, puis exécute **exactement une fois** `optimizer._run_single()`
-(réutilisée telle quelle, déjà top-level et picklable) sur `[effective_boundary, effective_test_end]`
-pour produire le `FoldResult`.
+(réutilisée telle quelle, déjà top-level et picklable) sur `[effective_boundary, effective_test_end)`
+— avec `end_boundary="exclusive"` **pour tout fold, y compris le dernier** (corrigé, 2026-09-15 :
+plus d'inclusivité terminale, voir Décision 4) — pour produire le `FoldResult`.
 
 **Précision issue de la revue adversariale de cette mission** : l'appel `Optimizer.run()` fait
 pour la recherche TRAIN d'un fold doit être configuré avec `train_test.enabled=False` (fenêtre
@@ -246,7 +300,22 @@ de `VALIDATION` (combien d'années réserver à Walk-Forward vs. laisser à Disc
 
 ## Décision 9 — Versioning et garde de reprise, troisième contrat indépendant
 
-`WALK_FORWARD_SEMANTICS_VERSION = "rolling-calendar-v1"`, indépendante de
+`WALK_FORWARD_SEMANTICS_VERSION = "rolling-calendar-v2"` (**corrigé de `"rolling-calendar-v1"`,
+2026-09-15** — mirroring exact du précédent déjà établi par `TRAIN_TEST_SEMANTICS_VERSION =
+"exact-boundary-v2"`, ADR 0018 : une correction d'inclusivité de frontière incrémente la version,
+jamais une réutilisation silencieuse du même nom pour un contrat différent. `v1` désignait la
+double correction de la Décision 4 ci-dessus [readiness appliquée à tort au dernier `effective_test_end`,
+`TEST_N` inclusif] — trouvée et corrigée **avant l'écriture du moindre code ou test** de la
+mission d'implémentation, donc **avant qu'aucun `config_used.json`/`meta.json` réel n'ait jamais
+porté la valeur `"rolling-calendar-v1"`** ; seul le commit ADR `90d49b31d727ee2d17443268a71df66b929e30d3`,
+un document de conception, l'a rendue publique — le bump reste néanmoins appliqué par discipline
+(le document publié décrivait un contrat erroné sous ce nom, jamais silencieusement réinterprété
+sous le même nom). `"rolling-calendar-v1"` ne doit plus jamais être utilisée comme valeur de
+`WALK_FORWARD_SEMANTICS_VERSION` pour un contrat différent de celui, erroné, qu'elle décrivait ici.
+**Distinct du nom de la fonctionnalité** : le produit reste « Walk-Forward V1 » (première version
+livrable du protocole) — `v1`/`v2` ici ne qualifient QUE la chaîne de version du contrat
+d'inclusivité temporelle, jamais le nom de la fonctionnalité elle-même ; cet ADR n'est pas
+renommé.), indépendante de
 `TRAIN_TEST_SEMANTICS_VERSION`/`STATE_READINESS_SEMANTICS_VERSION` — même famille de garde,
 `validate_resume_walk_forward_semantics()` mirroring exact des deux fonctions existantes,
 `WalkForwardSemanticsMismatch(ValueError)`. `fold_seed = sha256(f"{master_seed}:
@@ -261,15 +330,29 @@ futur mode stochastique (Random/Genetic/Bayesian/CMA-ES, hors scope V1).
 
 Aucun champ de `WalkForwardSpecification`/`FoldDefinition`/`WalkForwardEvidence` ne référence
 jamais `FINAL_HOLDOUT` — l'exclusion est **architecturale** (les fenêtres de fold sont dérivées
-exclusivement de la zone `VALIDATION` du plan référencé), pas seulement documentée. Avant
-exécution, `walk_forward.py` vérifie que la zone `VALIDATION` du plan ne chevauche pas
-`final_holdout` du même plan (`FinalHoldoutOverlapError` sinon — garde défensive, la construction
-correcte d'un `DatasetSplitPlan` via `build_dataset_split_plan()` refuse déjà tout chevauchement
-entre zones adjacentes, donc ce garde ne devrait jamais se déclencher avec un plan bien formé,
-mais protège contre un plan construit hors du chemin normal). Aucun `HoldoutAccessEvent` n'est
-jamais créé par un Walk-Forward normal. `FINAL_HOLDOUT` ne devient **jamais** un dernier fold
-implicite — principe déjà acté dans `dataset_split.py`/`EPICS_AND_TICKETS.md` (AF-V-02), confirmé
-inchangé ici.
+exclusivement de la zone `VALIDATION` du plan référencé), pas seulement documentée.
+
+**Mécanisme principal (corrigé, 2026-09-15)** : `effective_test_end_N < VALIDATION.end` **ou**
+`effective_test_end_N == VALIDATION.end`, jamais au-delà — garanti par construction par la Décision
+4 corrigée (dernier fold jamais readiness-ajusté sur sa borne de fin) **et** par la sémantique
+`TEST_k = [...)` demi-ouverte sans exception terminale. Combiné à `VALIDATION.end <=
+FINAL_HOLDOUT.start` (garanti par `build_dataset_split_plan()`, zones non chevauchantes), aucune
+barre de `FINAL_HOLDOUT` n'est structurellement jamais atteignable par un `TEST_k`, quel que soit
+`k` — ce n'est **plus** une propriété qui dépendrait d'un garde exécuté au bon moment, c'est une
+conséquence arithmétique directe des frontières telles que construites.
+
+**`FinalHoldoutOverlapError`** reste une **défense supplémentaire**, jamais le mécanisme
+garantissant l'absence de fuite (précision de cette mission corrective) : avant exécution,
+`walk_forward.py` vérifie explicitement que la zone `VALIDATION` du plan ne chevauche pas
+`final_holdout` du même plan — la construction correcte d'un `DatasetSplitPlan` via
+`build_dataset_split_plan()` refuse déjà tout chevauchement entre zones adjacentes, donc ce garde
+ne devrait jamais se déclencher avec un plan bien formé, mais protège contre un plan construit hors
+du chemin normal (ex. deux `DatasetSplitPlan` distincts incohérents entre eux, ou une construction
+directe de `DatasetSplitPlan(...)` contournant le builder). Aucun `HoldoutAccessEvent` n'est jamais
+créé par un Walk-Forward normal. `FINAL_HOLDOUT` ne devient **jamais** un dernier fold implicite —
+principe déjà acté dans `dataset_split.py`/`EPICS_AND_TICKETS.md` (AF-V-02), confirmé inchangé ici.
+Le fonctionnement normal Walk-Forward ne lit jamais `FINAL_HOLDOUT` (ni pour l'exécution, ni pour
+le warmup, ni dans `prepare()`).
 
 ## Décision 11 — Taxonomie d'erreurs consolidée, réutilisation prioritaire
 

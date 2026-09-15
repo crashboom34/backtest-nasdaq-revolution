@@ -1389,11 +1389,26 @@ valider explicitement par l'utilisateur avant toute implémentation).
   `split_plan_id`/`dataset_snapshot_id` que `ValidationRun` porte déjà pour `"oos"`.
 - **`FoldDefinition`** minimal (pas de variante `effective` pour `train_start`, jamais ajusté —
   seule une frontière interne à une exécution continue a besoin de la résolution readiness,
-  jamais un point de démarrage). Non-chevauchement des fenêtres TEST **dérivé par construction**
+  jamais un point de démarrage ; le dernier fold suit désormais le même principe pour sa borne de
+  fin, voir correction ci-dessous). Non-chevauchement des fenêtres TEST **dérivé par construction**
   (déterminisme de `resolve_state_ready_boundary()` sur des cibles calendaires identiques entre
-  folds adjacents), jamais par coordination explicite. `WALK_FORWARD_SEMANTICS_VERSION =
-  "rolling-calendar-v1"`, troisième contrat indépendant de `exact-boundary-v2`/
+  folds adjacents **non terminaux**), jamais par coordination explicite. `WALK_FORWARD_SEMANTICS_VERSION =
+  "rolling-calendar-v2"`, troisième contrat indépendant de `exact-boundary-v2`/
   `daily-state-ready-v1`.
+- **Correction scientifique pré-implémentation (2026-09-15), AVANT tout code/test** : la
+  préparation de la Slice 1 a révélé que la version initiale de l'ADR résolvait
+  `effective_test_end` par readiness pour **tous** les folds y compris le dernier, et déclarait
+  `TEST_N` inclusif — un dernier fold pouvait ainsi voir sa borne de fin décalée en avant jusque
+  dans `FINAL_HOLDOUT`. **Corrigé** : `effective_test_end` du dernier fold = `requested_test_end`
+  (jamais résolu par readiness, `test_end_adjusted` toujours `False`) ; **tous** les `TEST_k` sont
+  demi-ouverts `[start,end)`, y compris le dernier — plus d'exception terminale héritée de
+  `TrainTestWindows` (celle-ci ne s'applique pas ici puisque `VALIDATION`/`FINAL_HOLDOUT` sont
+  eux-mêmes `[start,end)`). Aucune barre perdue : l'instant exclu n'appartenait de toute façon
+  jamais à `VALIDATION`. `WALK_FORWARD_SEMANTICS_VERSION` incrémentée `"rolling-calendar-v1"` →
+  `"rolling-calendar-v2"` (mirroring `exact-boundary-v2`, ADR 0018) — aucun run/artefact réel
+  n'a jamais porté `v1` (seul le commit ADR `90d49b3` l'a rendue publique). Aucun code ni test
+  écrit ni pour la Slice 1 ni pour cette correction — trouvé et corrigé **avant** l'implémentation,
+  conformément à la discipline du dépôt. Détail complet : `docs/adr/0021-*.md`, Décisions 4/9/10.
 - **Sélection TRAIN Top-1** : nouveau seam additif `Optimizer.run(..., run_test_validation:
   bool = True)` — `False` saute la phase de validation multi-candidats existante
   (`top_to_validate[:cfg.top_k_save]`), comportement par défaut strictement inchangé pour tout
