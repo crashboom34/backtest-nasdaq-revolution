@@ -113,7 +113,17 @@ ALLOWED_TRANSITIONS: dict = {
         AutopilotState.STOPPED,
     ),
     AutopilotState.HUMAN_GATE_REQUIRED: (AutopilotState.STOPPED, AutopilotState.PLANNING),
-    AutopilotState.BLOCKED_SAFETY: (AutopilotState.STOPPED,),
+    # Finalisation V1.1 (§2.E) : reprise CONTRÔLÉE — `_handle_blocked_safety()` ne transitionne
+    # vers l'une de ces cibles QUE si la cause précise catégorisée (`blocked_reason_category`) a
+    # été revérifiée comme réellement résolue (ex. worktree redevenu propre, espace disque
+    # suffisant) ; sinon reste en BLOCKED_SAFETY. Jamais un effacement d'état, jamais un
+    # contournement de `requires_clean_worktree` ou de toute autre garde.
+    AutopilotState.BLOCKED_SAFETY: (
+        AutopilotState.STOPPED, AutopilotState.READY, AutopilotState.PLANNING,
+        AutopilotState.DEVELOPING, AutopilotState.TESTING, AutopilotState.REVIEWING,
+        AutopilotState.CORRECTING, AutopilotState.PRE_COMMIT_CHECK, AutopilotState.COMMITTING,
+        AutopilotState.PUSHING,
+    ),
     AutopilotState.COMPLETED: (),
     AutopilotState.STOPPED: (AutopilotState.READY,),
 }
@@ -154,6 +164,9 @@ class AutopilotStateRecord:
     diagnostic_attempted: bool = False
     # -- Finalisation V1.1 §2.B : lie la preuve de review au contenu EXACT finalement committé --
     reviewed_files: Tuple[str, ...] = ()
+    # -- Finalisation V1.1 §2.E : catégorise la cause d'un BLOCKED_SAFETY pour permettre une
+    # résolution CONTRÔLÉE (revérifier la cause précise, jamais un redémarrage aveugle) --
+    blocked_reason_category: Optional[str] = None
 
 
 def build_state_record(

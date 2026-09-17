@@ -340,11 +340,14 @@ class AutopilotSupervisor:
             # V1.1 : reprise réelle (mission §3.5), plus un no-op.
             AutopilotState.WAITING_FOR_CLAUDE: self._handle_waiting_for_claude,
             AutopilotState.WAITING_FOR_EXTERNAL_RESOURCE: self._handle_waiting_for_external_resource,
+            # Finalisation V1.1 (§2.E) : résolution CONTRÔLÉE, plus un no-op — revérifie la cause
+            # précise avant toute reprise, ne force jamais.
+            AutopilotState.BLOCKED_SAFETY: self._handle_blocked_safety,
         }.get(phase)
         if handler is None:
-            # États terminaux/d'attente restants (COMPLETED, STOPPED, HUMAN_GATE_REQUIRED,
-            # BLOCKED_SAFETY) : rien à faire tant qu'un appelant externe ne change pas
-            # explicitement l'état (résolution Human Gate, `autopilot stop`/reprise manuelle...).
+            # États terminaux/d'attente restants (COMPLETED, STOPPED, HUMAN_GATE_REQUIRED) : rien
+            # à faire tant qu'un appelant externe ne change pas explicitement l'état (résolution
+            # Human Gate, `autopilot stop`/reprise manuelle...).
             return phase
         return handler()
 
@@ -366,7 +369,10 @@ class AutopilotSupervisor:
         try:
             return load_missions(self._missions_path, prompts_base_dir=self._prompts_base_dir)
         except MissionQueueError as exc:
-            self._transition(AutopilotState.BLOCKED_SAFETY, stop_reason=f"file de missions invalide : {exc}")
+            self._transition(
+                AutopilotState.BLOCKED_SAFETY, stop_reason=f"file de missions invalide : {exc}",
+                blocked_reason_category="missions_invalid",
+            )
             return None
 
     def _handle_bootstrapping(self) -> AutopilotState:
@@ -375,7 +381,10 @@ class AutopilotSupervisor:
         # nécessaire ici.
         disk_reason = git_safety.check_disk_space()
         if disk_reason:
-            return self._transition(AutopilotState.BLOCKED_SAFETY, stop_reason=disk_reason)
+            return self._transition(
+                AutopilotState.BLOCKED_SAFETY, stop_reason=disk_reason,
+                blocked_reason_category="disk_space", resume_to_phase=AutopilotState.READY.value,
+            )
         return self._transition(AutopilotState.READY, branch=self._branch)
 
     def _handle_ready(self) -> AutopilotState:
@@ -407,6 +416,7 @@ class AutopilotSupervisor:
                     "mais des modifications non liées sont présentes — jamais démarrée sur un état "
                     "ambigu (mission Autopilot V1.1 §4/§13)."
                 ),
+                blocked_reason_category="dirty_worktree", resume_to_phase=AutopilotState.PLANNING.value,
             )
         self._failure_signatures = []
         return self._transition(
@@ -435,6 +445,7 @@ class AutopilotSupervisor:
                     "modifié pendant l'exécution) — jamais dégradé silencieusement vers un appel "
                     "réel sans contexte (mission Autopilot V1.1 §4)."
                 ),
+                blocked_reason_category="mission_not_found",
             )
             return None, blocked
         return mission, None
@@ -526,10 +537,16 @@ class AutopilotSupervisor:
         record = self._current_record()
         scope_reason = git_safety.check_scope_files(record.artifacts)
         if scope_reason:
-            return self._transition(AutopilotState.BLOCKED_SAFETY, stop_reason=scope_reason)
+            return self._transition(
+                AutopilotState.BLOCKED_SAFETY, stop_reason=scope_reason,
+                blocked_reason_category="scope_violation",
+            )
         disk_reason = git_safety.check_disk_space()
         if disk_reason:
-            return self._transition(AutopilotState.BLOCKED_SAFETY, stop_reason=disk_reason)
+            return self._transition(
+                AutopilotState.BLOCKED_SAFETY, stop_reason=disk_reason,
+                blocked_reason_category="disk_space", resume_to_phase=AutopilotState.PRE_COMMIT_CHECK.value,
+            )
         # Finalisation V1.1 (§2.B) : "lier les preuves de tests et de review au contenu EXACT
         # finalement committé" — si le Reviewer a rapporté quels fichiers il a réellement couverts
         # (`reviewed_files`), tout fichier sur le point d'être committé mais jamais couvert par
@@ -545,6 +562,7 @@ class AutopilotSupervisor:
                     f"fichier(s) sur le point d'être committé(s) jamais couvert(s) par la review "
                     f"indépendante : {unreviewed} (mission finalisation V1.1 §2.B)."
                 ),
+                blocked_reason_category="unreviewed_files",
             )
         return self._transition(AutopilotState.COMMITTING, next_action="commit atomique")
 
@@ -583,7 +601,9 @@ class AutopilotSupervisor:
             self._git_ops.add(scope)
             sha = self._git_ops.commit(intended_message)
         except ForbiddenGitCommandError as exc:
-            return self._transition(AutopilotState.BLOCKED_SAFETY, stop_reason=str(exc))
+            return self._transition(
+                AutopilotState.BLOCKED_SAFETY, stop_reason=str(exc), blocked_reason_category="git_forbidden",
+            )
         except Exception as exc:  # échec Git réel non couvert par git_safety (hook, disque, ...)
             # Jamais retenté silencieusement à l'identique (mission §7) : un commit qui échoue
             # pour une raison autre qu'une commande interdite est un cas qui n'a jamais été prévu
@@ -592,6 +612,7 @@ class AutopilotSupervisor:
             return self._transition(
                 AutopilotState.BLOCKED_SAFETY,
                 stop_reason=f"échec Git inattendu au commit (jamais retenté automatiquement) : {exc}",
+                blocked_reason_category="commit_error",
             )
         return self._transition(AutopilotState.PUSHING, next_action="push origin master", last_commit_sha=sha)
 
@@ -605,7 +626,9 @@ class AutopilotSupervisor:
                 return self._transition(AutopilotState.CHECKPOINTED, next_action="checkpoint (déjà poussé)")
             pushed_sha = self._git_ops.push()
         except ForbiddenGitCommandError as exc:
-            return self._transition(AutopilotState.BLOCKED_SAFETY, stop_reason=str(exc))
+            return self._transition(
+                AutopilotState.BLOCKED_SAFETY, stop_reason=str(exc), blocked_reason_category="git_forbidden",
+            )
         except Exception as exc:  # push refusé/échoué pour une raison non couverte par git_safety
             # Mission §8 : "jamais force, récupérer l'état distant, diagnostiquer la divergence" —
             # WAITING_FOR_EXTERNAL_RESOURCE est réservé exactement pour ce cas dans la machine à
@@ -658,6 +681,45 @@ class AutopilotSupervisor:
 
     def _handle_waiting_for_external_resource(self) -> AutopilotState:
         return self._resume_to_recorded_phase()
+
+    # ── Résolution contrôlée de BLOCKED_SAFETY (finalisation V1.1 §2.E) ─────────────────────
+
+    def _handle_blocked_safety(self) -> AutopilotState:
+        """Ne JAMAIS reprendre aveuglément (ni effacer l'état, ni désactiver une garde comme
+        `requires_clean_worktree`) : revérifie explicitement la cause précise catégorisée
+        (`blocked_reason_category`) et ne quitte `BLOCKED_SAFETY` QUE si elle est réellement
+        résolue maintenant. Seules certaines catégories ont une résolution automatique connue
+        (`dirty_worktree`, `disk_space`) — toute autre catégorie (fichier de missions invalide,
+        mission introuvable, violation de scope, review incomplète, commande Git interdite,
+        échec de commit inattendu) nécessite une intervention externe réelle (édition d'un
+        fichier, changement de configuration) et reste bloquée indéfiniment sans une telle
+        intervention — jamais une résolution automatique inventée pour une cause qui n'en a pas."""
+        record = self._current_record()
+        if record is None:
+            return AutopilotState.BLOCKED_SAFETY
+        category = record.blocked_reason_category
+        resolved = False
+        if category == "dirty_worktree":
+            resolved = self._git_ops.is_worktree_clean()
+        elif category == "disk_space":
+            resolved = git_safety.check_disk_space() is None
+        if not resolved:
+            return AutopilotState.BLOCKED_SAFETY  # cause toujours présente -> reste bloqué
+        target: Optional[AutopilotState] = None
+        if record.resume_to_phase:
+            try:
+                candidate = AutopilotState(record.resume_to_phase)
+                if candidate in ALLOWED_TRANSITIONS.get(AutopilotState.BLOCKED_SAFETY, ()):
+                    target = candidate
+            except ValueError:
+                target = None
+        if target is None:
+            target = AutopilotState.PLANNING
+        return self._transition(
+            target,
+            stop_reason=f"BLOCKED_SAFETY résolu (cause {category!r} revérifiée) — reprise contrôlée.",
+            blocked_reason_category=None, resume_to_phase=None,
+        )
 
     # ── Échecs / diagnostic / escalade (mission §7/§8/§13) ───────────────────────────────────
 

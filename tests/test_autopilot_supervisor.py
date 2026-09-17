@@ -161,6 +161,67 @@ def test_requires_clean_worktree_false_proceeds_despite_a_dirty_worktree(tmp_pat
     assert final_state == AutopilotState.DEVELOPING
 
 
+def test_blocked_safety_on_dirty_worktree_resolves_once_the_worktree_becomes_clean(tmp_path):
+    """Finalisation V1.1 §2.E : une résolution CONTRÔLÉE — jamais un effacement d'état ni une
+    désactivation de `requires_clean_worktree` — revérifie la cause précise (ici : le worktree
+    est-il RÉELLEMENT redevenu propre ?) et ne reprend que si c'est authentiquement vrai."""
+    class ToggleableGitOps(FakeGitOps):
+        def __init__(self):
+            super().__init__()
+            self.clean = False
+
+        def is_worktree_clean(self):
+            return self.clean
+
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(id="M1", title="x", status="PLANNED", prompt_file="m1.md", requires_clean_worktree=True),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = ToggleableGitOps()
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    supervisor.acquire_lock()
+
+    blocked = supervisor.run_until({AutopilotState.BLOCKED_SAFETY})
+    assert blocked == AutopilotState.BLOCKED_SAFETY
+    assert state_store.load().blocked_reason_category == "dirty_worktree"
+
+    # Toujours sale : rappeler run_one_step() ne doit RIEN changer, jamais forcé.
+    still_blocked = supervisor.run_one_step()
+    assert still_blocked == AutopilotState.BLOCKED_SAFETY
+
+    # Redevenu réellement propre : la reprise doit maintenant progresser.
+    git_ops.clean = True
+    final_state = supervisor.run_until({AutopilotState.NEXT_MISSION})
+    assert final_state == AutopilotState.NEXT_MISSION
+
+
+def test_blocked_safety_with_no_known_auto_resolution_never_resumes_by_itself(tmp_path):
+    """Une catégorie sans résolution automatique connue (ex. file de missions invalide) doit
+    rester bloquée INDÉFINIMENT, quel que soit le nombre de `run_one_step()` — jamais une reprise
+    aveugle après un simple redémarrage (mission finalisation V1.1 §2.E)."""
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    missions_path = tmp_path / "missions.json"  # jamais créé -> "missions_invalid"
+    git_ops = FakeGitOps()
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    supervisor.acquire_lock()
+
+    blocked = supervisor.run_until({AutopilotState.BLOCKED_SAFETY})
+    assert blocked == AutopilotState.BLOCKED_SAFETY
+    assert state_store.load().blocked_reason_category == "missions_invalid"
+
+    for _ in range(5):
+        assert supervisor.run_one_step() == AutopilotState.BLOCKED_SAFETY
+
+
 def test_mission_done_status_is_committed_together_with_its_own_work(tmp_path):
     """Régression — trouvé RÉELLEMENT cassé par le canary V1.1 : l'ancien `_handle_next_mission()`
     marquait la mission `DONE` dans `missions.json` APRÈS le push, donc ce changement n'était
