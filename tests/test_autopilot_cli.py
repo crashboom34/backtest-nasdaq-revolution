@@ -469,6 +469,129 @@ def test_real_tester_fn_skips_full_suite_for_low_risk_mission_with_no_scientific
     assert len(calls) == 1  # ciblé suffit, jamais la suite complète pour ce cas
 
 
+def _fake_claude_json(verdict="CLEAN", findings=None, is_error=False, session_id="sess-1"):
+    import json as _json
+
+    return _json.dumps({
+        "is_error": is_error, "session_id": session_id,
+        "structured_output": {"verdict": verdict, "findings": findings or []},
+    })
+
+
+def test_real_reviewer_fn_covers_a_new_untracked_file_via_intent_to_add(monkeypatch):
+    """Régression — bug réel confirmé (mission finalisation V1.1 §2.B) : `git diff HEAD` seul
+    n'affiche RIEN pour un fichier jamais suivi — un NOUVEAU fichier créé par le Developer était
+    invisible au Reviewer. `git add --intent-to-add` doit le rendre visible sans le committer."""
+    import scripts.autopilot.cli as cli_module
+    from scripts.autopilot.mission_queue import Mission
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")
+        if argv == ["git", "status", "--porcelain"]:
+            return _fake_result(stdout="?? new_file.py\n")
+        if argv[:3] == ["git", "ls-files", "--error-unmatch"]:
+            return _fake_result(returncode=1)  # non suivi
+        if "--intent-to-add" in argv:
+            return _fake_result()
+        if argv == ["git", "diff", "HEAD", "--", "new_file.py"]:
+            return _fake_result(stdout="+++ b/new_file.py\n+contenu du nouveau fichier\n")
+        if argv[0] == "claude":
+            return _fake_result(stdout=_fake_claude_json())
+        return _fake_result()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    supervisor = cli_module._build_real_supervisor()
+    mission = Mission(id="M1", title="x", status="PLANNED", prompt_file="m1.md")
+
+    result = supervisor._reviewer_fn(mission)
+
+    assert result["success"] is True
+    assert result["reviewed_files"] == ["new_file.py"]
+    assert any("--intent-to-add" in c for c in calls)
+
+
+def test_real_reviewer_fn_splits_a_large_diff_into_multiple_batches_and_aggregates_findings(monkeypatch):
+    """Régression — bug réel confirmé (mission finalisation V1.1 §2.B) : le diff total était
+    tronqué silencieusement à 20000 caractères — un gros diff pouvait être partiellement invisible
+    au Reviewer. Doit désormais être découpé en lots bornés, chacun revu séparément, avec les
+    findings de TOUS les lots agrégés."""
+    import scripts.autopilot.cli as cli_module
+    from scripts.autopilot.mission_queue import Mission
+
+    claude_calls = {"count": 0}
+
+    def fake_run(argv, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")
+        if argv == ["git", "status", "--porcelain"]:
+            return _fake_result(stdout=" M big_file_a.py\n M big_file_b.py\n")
+        if argv[:3] == ["git", "ls-files", "--error-unmatch"]:
+            return _fake_result(returncode=0)  # déjà suivis
+        if argv == ["git", "diff", "HEAD", "--", "big_file_a.py"]:
+            return _fake_result(stdout="+x\n" * 6000)  # gros diff, dépasse le budget à lui seul
+        if argv == ["git", "diff", "HEAD", "--", "big_file_b.py"]:
+            return _fake_result(stdout="+y\n" * 6000)
+        if argv[0] == "claude":
+            claude_calls["count"] += 1
+            # Le 1er lot rapporte 1 finding MINOR, le 2e rapporte 1 finding BLOCKER.
+            if claude_calls["count"] == 1:
+                return _fake_result(stdout=_fake_claude_json(
+                    verdict="FINDINGS", findings=[{"severity": "MINOR", "summary": "style"}],
+                ))
+            return _fake_result(stdout=_fake_claude_json(
+                verdict="FINDINGS", findings=[{"severity": "BLOCKER", "summary": "bug réel"}],
+            ))
+        return _fake_result()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    supervisor = cli_module._build_real_supervisor()
+    mission = Mission(id="M1", title="x", status="PLANNED", prompt_file="m1.md")
+
+    result = supervisor._reviewer_fn(mission)
+
+    assert result["success"] is True
+    assert claude_calls["count"] == 2  # deux lots, deux appels Reviewer distincts
+    assert len(result["blocking_findings"]) == 1
+    assert result["blocking_findings"][0]["severity"] == "BLOCKER"
+    assert set(result["reviewed_files"]) == {"big_file_a.py", "big_file_b.py"}
+
+
+def test_real_reviewer_fn_fails_when_a_changed_file_is_never_actually_covered(monkeypatch):
+    """Mission finalisation V1.1 §2.B : "vérifier explicitement la couverture complète" — si un
+    fichier annoncé comme modifié n'a jamais pu être diffusé (cas limite), la review doit échouer
+    plutôt que de se déclarer silencieusement complète."""
+    import scripts.autopilot.cli as cli_module
+    from scripts.autopilot.mission_queue import Mission
+
+    def fake_run(argv, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")
+        if argv == ["git", "status", "--porcelain"]:
+            return _fake_result(stdout=" M covered.py\n M never_diffed.py\n")
+        if argv[:3] == ["git", "ls-files", "--error-unmatch"]:
+            return _fake_result(returncode=0)
+        if argv == ["git", "diff", "HEAD", "--", "covered.py"]:
+            return _fake_result(stdout="+un vrai diff\n")
+        if argv == ["git", "diff", "HEAD", "--", "never_diffed.py"]:
+            return _fake_result(stdout="")  # rien produit -> jamais couvert
+        if argv[0] == "claude":
+            return _fake_result(stdout=_fake_claude_json())
+        return _fake_result()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    supervisor = cli_module._build_real_supervisor()
+    mission = Mission(id="M1", title="x", status="PLANNED", prompt_file="m1.md")
+
+    result = supervisor._reviewer_fn(mission)
+
+    assert result["success"] is False
+    assert "never_diffed.py" in result["raw_output"]
+
+
 def test_real_tester_fn_invokes_sys_executable_not_a_hardcoded_relative_venv_path(monkeypatch):
     """Régression — trouvé RÉELLEMENT cassé par le canary V1.1 (mission §9) : un chemin relatif
     codé en dur (".venv/Scripts/python.exe") échoue (`FileNotFoundError`/`WinError 2`) dans tout

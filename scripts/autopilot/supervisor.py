@@ -499,6 +499,9 @@ class AutopilotSupervisor:
         return self._transition(
             AutopilotState.PRE_COMMIT_CHECK, review_status=result.get("summary", "clean"),
             next_action="contrôles pré-commit", reviewer_session_id=result.get("session_id"),
+            # Finalisation V1.1 (§2.B) : lie la preuve de review au contenu exact — vérifié à
+            # `_handle_pre_commit_check()` avant de committer quoi que ce soit.
+            reviewed_files=tuple(result.get("reviewed_files", ())),
         )
 
     def _handle_correcting(self) -> AutopilotState:
@@ -527,6 +530,22 @@ class AutopilotSupervisor:
         disk_reason = git_safety.check_disk_space()
         if disk_reason:
             return self._transition(AutopilotState.BLOCKED_SAFETY, stop_reason=disk_reason)
+        # Finalisation V1.1 (§2.B) : "lier les preuves de tests et de review au contenu EXACT
+        # finalement committé" — si le Reviewer a rapporté quels fichiers il a réellement couverts
+        # (`reviewed_files`), tout fichier sur le point d'être committé mais jamais couvert par
+        # cette review est un décalage réel entre ce qui a été approuvé et ce qui va être commité,
+        # jamais silencieusement ignoré. Une doublure de test qui ne renseigne pas
+        # `reviewed_files` (`()` par défaut) désactive ce contrôle — n'affecte pas les tests
+        # existants qui ne modélisent pas cet aspect.
+        if record.reviewed_files and not set(record.artifacts) <= set(record.reviewed_files):
+            unreviewed = sorted(set(record.artifacts) - set(record.reviewed_files))
+            return self._transition(
+                AutopilotState.BLOCKED_SAFETY,
+                stop_reason=(
+                    f"fichier(s) sur le point d'être committé(s) jamais couvert(s) par la review "
+                    f"indépendante : {unreviewed} (mission finalisation V1.1 §2.B)."
+                ),
+            )
         return self._transition(AutopilotState.COMMITTING, next_action="commit atomique")
 
     def _handle_committing(self) -> AutopilotState:

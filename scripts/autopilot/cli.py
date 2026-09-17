@@ -266,6 +266,59 @@ class RealGitOps:
         return head_sha
 
 
+# Finalisation V1.1 (§2.B) : budget de caractères par LOT de review, jamais une troncature
+# silencieuse du diff total. Marge sous ~20000 pour laisser de la place au reste du prompt.
+REVIEW_CHUNK_CHAR_BUDGET = 15000
+
+
+def _list_changed_files_for_review(repo_dir: Path = REPO_ROOT) -> List[str]:
+    """Liste COMPLÈTE des chemins à revoir : fichiers suivis modifiés, NOUVEAUX fichiers non
+    suivis, suppressions et renommages (mission finalisation V1.1 §2.B — "le Reviewer doit
+    couvrir tous les changements proposés au commit"). Pour un renommage ("R  old -> new"), seul
+    le chemin NEW est retenu (c'est lui qui porte le contenu final à revoir)."""
+    status = _run_readonly_git(["git", "status", "--porcelain"], repo_dir).stdout
+    files: List[str] = []
+    for line in status.splitlines():
+        if not line.strip():
+            continue
+        path_part = line[3:]
+        if " -> " in path_part:
+            _old, new = path_part.split(" -> ", 1)
+            files.append(new.strip().strip('"'))
+        else:
+            files.append(path_part.strip().strip('"'))
+    return files
+
+
+def _stage_intent_to_add(paths: List[str], repo_dir: Path = REPO_ROOT) -> None:
+    """`git add --intent-to-add`, scopé aux chemins fournis — jamais un `add -A` global. Rend un
+    NOUVEAU fichier non suivi visible à `git diff HEAD` comme un ajout complet, sans en committer
+    le contenu (mission finalisation V1.1 §2.B — bug réel confirmé : `git diff HEAD` seul
+    n'affiche RIEN pour un fichier jamais suivi, le rendant invisible au Reviewer)."""
+    # `git status --porcelain` (source de `paths`) ne rapporte un chemin en `??` que s'il existe
+    # réellement dans l'arbre de travail — un contrôle `exists()` séparé serait redondant et
+    # casserait la testabilité (aucune raison de toucher le disque réel ici).
+    untracked = []
+    for f in paths:
+        tracked = _run_readonly_git(["git", "ls-files", "--error-unmatch", "--", f], repo_dir)
+        if tracked.returncode != 0:
+            untracked.append(f)
+    if not untracked:
+        return
+    argv = ["git", "add", "--intent-to-add", "--", *untracked]
+    reason = git_safety.check_git_command(argv)
+    if reason:
+        raise ForbiddenGitCommandError(reason)
+    subprocess.run(
+        argv, cwd=repo_dir, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=GIT_TIMEOUT_SECONDS,
+    )
+
+
+def _diff_for_file(path: str, repo_dir: Path = REPO_ROOT) -> str:
+    return _run_readonly_git(["git", "diff", "HEAD", "--", path], repo_dir).stdout
+
+
 def _porcelain_paths(repo_dir: Path) -> List[str]:
     """Fichiers actuellement modifiés/non suivis dans l'arbre de travail (`git status --porcelain`)
     — utilisé pour déterminer RÉELLEMENT les `changed_files` d'un Developer réel (mission §3.2),
@@ -444,59 +497,119 @@ def _build_real_supervisor(push_remote_ref: Optional[str] = None) -> AutopilotSu
         combined = (result.stdout + result.stderr)[-2000:]
         return {"success": result.returncode == 0, "summary": combined}
 
-    def real_reviewer_fn(mission):
-        # V1.1 (mission §3.3) : instance ClaudeInvoker FRAÎCHE — jamais `--resume` la session du
-        # développeur — avec sortie structurée validée par schéma. `permission_mode="plan"` :
-        # le reviewer ne doit JAMAIS pouvoir éditer de fichiers lui-même.
-        diff_result = _run_readonly_git(["git", "diff", "HEAD"])
-        diff_text = diff_result.stdout[:20000]
-        contracts = ", ".join(mission.scientific_contracts) if mission and mission.scientific_contracts else "(aucun déclaré)"
+    def _review_one_batch(batch_text, contracts, mission):
         prompt = (
             "Tu es un réviseur de code INDÉPENDANT pour l'Autopilot AlphaForge. Tu n'as PAS accès "
             "à l'historique de justification du développeur qui a produit ce diff — évalue "
-            "uniquement ce qui suit, objectivement, sévèrement si nécessaire.\n\n"
+            "uniquement ce qui suit, objectivement, sévèrement si nécessaire. Ce lot peut ne "
+            "représenter qu'UNE PARTIE d'un changement plus large réparti sur plusieurs lots.\n\n"
             f"Mission : {mission.title if mission else '(inconnue)'}\n"
             f"Contrats scientifiques concernés : {contracts}\n\n"
-            f"Diff réel à réviser (git diff HEAD) :\n{diff_text}\n\n"
+            f"Diff réel à réviser (ce lot) :\n{batch_text}\n\n"
             "Réponds STRICTEMENT selon le schéma JSON fourni : verdict CLEAN ou FINDINGS, la "
             "liste des findings (sévérité BLOCKER/MAJOR/MINOR/SUGGESTION, fichier, justification, "
             "correction attendue), et un contrôle explicite scientifique/reproductibilité/"
             "sécurité/architecture."
         )
-        reviewer_invoker = ClaudeInvoker()  # NOUVELLE instance à chaque appel, jamais partagée
-        result = reviewer_invoker.run(
+        reviewer_invoker = ClaudeInvoker()  # NOUVELLE instance à CHAQUE lot, jamais partagée
+        return reviewer_invoker.run(
             prompt, permission_mode="plan", max_budget_usd=_mission_budget(mission),
             json_schema=REVIEW_JSON_SCHEMA,
         )
-        if not result.functionally_succeeded:
+
+    def real_reviewer_fn(mission):
+        # Finalisation V1.1 (§2.B) : couverture COMPLÈTE du changement proposé — fichiers suivis,
+        # NOUVEAUX fichiers (rendus visibles via intent-to-add), suppressions et renommages —
+        # jamais la seule troncature silencieuse à 20000 caractères d'avant (un gros diff aurait
+        # pu être partiellement invisible au Reviewer sans qu'il ni personne ne le sache). Le diff
+        # est découpé en LOTS bornés par fichier, chacun revu séparément si nécessaire ; la
+        # couverture réelle (fichiers effectivement inclus dans au moins un lot) est vérifiée
+        # explicitement contre la liste attendue — jamais une review partielle silencieuse.
+        changed_files = _list_changed_files_for_review()
+        if not changed_files:
+            return {
+                "success": False, "raw_output": "aucun changement détecté pour la review",
+                "summary": "review indépendante en échec technique (rien à revoir)",
+            }
+        _stage_intent_to_add(changed_files)
+
+        batches: List[tuple] = []
+        current_files: List[str] = []
+        current_text = ""
+        covered_files: List[str] = []
+        for f in changed_files:
+            file_diff = _diff_for_file(f)
+            if not file_diff:
+                continue  # rien à diffuser pour ce chemin (rare : ex. suppression déjà vidée)
+            entry = f"\n--- {f} ---\n{file_diff}"
+            if current_text and len(current_text) + len(entry) > REVIEW_CHUNK_CHAR_BUDGET:
+                batches.append((current_files, current_text))
+                current_files, current_text = [], ""
+            current_files.append(f)
+            current_text += entry
+            covered_files.append(f)
+        if current_text:
+            batches.append((current_files, current_text))
+
+        if not batches:
+            return {
+                "success": False, "raw_output": "aucun diff exploitable pour la review",
+                "summary": "review indépendante en échec technique (diffs vides)",
+            }
+
+        contracts = ", ".join(mission.scientific_contracts) if mission and mission.scientific_contracts else "(aucun déclaré)"
+        all_findings: List[dict] = []
+        session_ids: List[str] = []
+        for _batch_files, batch_text in batches:
+            result = _review_one_batch(batch_text, contracts, mission)
+            if not result.functionally_succeeded:
+                return {
+                    "success": False, "raw_output": result.stderr or result.stdout,
+                    "summary": "review indépendante en échec technique (lot en erreur)",
+                }
+            body = result.result_structured
+            # V1.1 : un échec de PARSING de la sortie structurée ne doit JAMAIS ressembler à une
+            # review propre — trouvé réellement silencieux lors du canary de cette mission (`body`
+            # retombait sur `{}`, "0 finding(s) — verdict=?" étant indiscernable d'un vrai verdict
+            # CLEAN). `verdict` ET `findings` sont REQUIS par `REVIEW_JSON_SCHEMA` — leur absence
+            # est elle-même la preuve que la sortie structurée n'a pas été correctement obtenue,
+            # traitée comme un échec TECHNIQUE de la review (jamais un commit/push sur cette base).
+            if not isinstance(body, dict) or "verdict" not in body or "findings" not in body:
+                return {
+                    "success": False,
+                    "raw_output": (
+                        f"sortie structurée du reviewer non exploitable (verdict/findings absents) "
+                        f"pour un lot : {result.stdout[:500]}"
+                    ),
+                    "summary": "review indépendante en échec technique (sortie structurée invalide)",
+                }
+            all_findings.extend(f for f in body.get("findings", []) if isinstance(f, dict))
+            if result.session_id:
+                session_ids.append(result.session_id)
+
+        # Vérification EXPLICITE de couverture (mission finalisation V1.1 §2.B : "vérifier
+        # explicitement la couverture complète") — jamais une review considérée complète sans
+        # cette preuve, même si tous les lots individuels ont techniquement réussi.
+        expected = set(changed_files)
+        covered = set(covered_files)
+        if covered != expected:
+            missing = sorted(expected - covered)
             return {
                 "success": False,
-                "raw_output": result.stderr or result.stdout,
-                "summary": "review indépendante en échec technique",
+                "raw_output": f"couverture de review incomplète — fichiers jamais revus : {missing}",
+                "summary": "review indépendante en échec technique (couverture incomplète)",
             }
-        body = result.result_structured
-        # V1.1 : un échec de PARSING de la sortie structurée ne doit JAMAIS ressembler à une
-        # review propre — trouvé réellement silencieux lors du canary de cette mission (`body`
-        # retombait sur `{}`, "0 finding(s) — verdict=?" étant indiscernable d'un vrai verdict
-        # CLEAN). `verdict` ET `findings` sont REQUIS par `REVIEW_JSON_SCHEMA` — leur absence est
-        # elle-même la preuve que la sortie structurée n'a pas été correctement obtenue, traitée
-        # comme un échec TECHNIQUE de la review (jamais un commit/push sur cette base).
-        if not isinstance(body, dict) or "verdict" not in body or "findings" not in body:
-            return {
-                "success": False,
-                "raw_output": (
-                    f"sortie structurée du reviewer non exploitable (verdict/findings absents) : "
-                    f"{result.stdout[:500]}"
-                ),
-                "summary": "review indépendante en échec technique (sortie structurée invalide)",
-            }
-        findings = body.get("findings", [])
-        blocking = [f for f in findings if isinstance(f, dict) and f.get("severity") in ("BLOCKER", "MAJOR")]
+
+        blocking = [f for f in all_findings if f.get("severity") in ("BLOCKER", "MAJOR")]
         return {
             "success": True,
             "blocking_findings": blocking,
-            "summary": f"{len(findings)} finding(s) — verdict={body.get('verdict')}",
-            "session_id": result.session_id,
+            "reviewed_files": sorted(covered),
+            "summary": (
+                f"{len(all_findings)} finding(s) sur {len(batches)} lot(s), "
+                f"{len(covered)} fichier(s) couverts"
+            ),
+            "session_id": session_ids[0] if session_ids else None,
         }
 
     def real_diagnostic_fn(mission, failure_signature):

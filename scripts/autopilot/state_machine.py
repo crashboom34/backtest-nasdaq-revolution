@@ -152,6 +152,8 @@ class AutopilotStateRecord:
     last_commit_sha: Optional[str] = None
     last_push_sha: Optional[str] = None
     diagnostic_attempted: bool = False
+    # -- Finalisation V1.1 §2.B : lie la preuve de review au contenu EXACT finalement committé --
+    reviewed_files: Tuple[str, ...] = ()
 
 
 def build_state_record(
@@ -176,6 +178,7 @@ def build_state_record(
     last_commit_sha: Optional[str] = None,
     last_push_sha: Optional[str] = None,
     diagnostic_attempted: bool = False,
+    reviewed_files: Tuple[str, ...] = (),
 ) -> AutopilotStateRecord:
     """Construit un `AutopilotStateRecord`. `timestamp_utc` auto-rempli (UTC, offset explicite)
     si non fourni — même discipline que `research_run.py`/`validation_run.py`."""
@@ -200,6 +203,7 @@ def build_state_record(
         last_commit_sha=last_commit_sha,
         last_push_sha=last_push_sha,
         diagnostic_attempted=diagnostic_attempted,
+        reviewed_files=tuple(reviewed_files),
         artifacts=tuple(artifacts),
     )
 

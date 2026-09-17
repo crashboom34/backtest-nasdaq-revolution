@@ -895,6 +895,41 @@ def test_reviewer_technical_failure_is_classified_not_treated_as_clean(tmp_path)
     assert git_ops.committed is False  # jamais commité sur la base d'une review qui n'a pas eu lieu
 
 
+def test_pre_commit_check_blocks_when_a_file_to_commit_was_never_reviewed(tmp_path):
+    """Régression — mission finalisation V1.1 §2.B : "lier les preuves de tests et de review au
+    contenu exact finalement committé" — un fichier sur le point d'être committé mais absent des
+    `reviewed_files` rapportés par le Reviewer doit bloquer, jamais être committé silencieusement."""
+    def developer_with_extra_file(mission, attempt, findings=None):
+        return {"success": True, "changed_files": ["reviewed.py", "sneaked_in.py"], "raw_output": "ok"}
+
+    def reviewer_covering_only_one_file(mission):
+        return {"success": True, "blocking_findings": [], "summary": "clean", "reviewed_files": ["reviewed.py"]}
+
+    supervisor, git_ops, state_store = _make_supervisor(
+        tmp_path, developer_fn=developer_with_extra_file, reviewer_fn=reviewer_covering_only_one_file,
+    )
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until({AutopilotState.BLOCKED_SAFETY, AutopilotState.NEXT_MISSION})
+
+    assert final_state == AutopilotState.BLOCKED_SAFETY
+    assert "sneaked_in.py" in state_store.load().stop_reason
+    assert git_ops.committed is False
+
+
+def test_pre_commit_check_proceeds_when_reviewed_files_is_not_reported(tmp_path):
+    """Une doublure de test qui ne renseigne pas `reviewed_files` (comportement historique) ne
+    doit JAMAIS être bloquée par ce nouveau contrôle — désactivé par défaut, actif seulement
+    quand l'information de couverture est réellement disponible."""
+    supervisor, git_ops, state_store = _make_supervisor(tmp_path)  # _ok_reviewer ne renseigne rien
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until({AutopilotState.NEXT_MISSION})
+
+    assert final_state == AutopilotState.NEXT_MISSION
+    assert git_ops.committed is True
+
+
 def test_mission_queue_emptied_between_ready_and_planning_reaches_completed(tmp_path):
     """Régression — revue safety/architecture du Bootstrap : `ALLOWED_TRANSITIONS[PLANNING]`
     n'incluait pas `COMPLETED`, alors que `_handle_planning()` transitionne vers `COMPLETED` si la
