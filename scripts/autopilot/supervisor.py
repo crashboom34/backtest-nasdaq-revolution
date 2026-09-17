@@ -393,9 +393,35 @@ class AutopilotSupervisor:
             diagnostic_attempted=False, pending_findings=(), last_commit_sha=None, last_push_sha=None,
         )
 
+    def _resolve_mission_or_block(self, record: AutopilotStateRecord):
+        """Résout la mission courante depuis son id persisté. `record.mission_id` renseigné mais
+        introuvable (file corrompue/modifiée pendant l'exécution) est une ANOMALIE distincte d'une
+        mission jamais choisie — routée immédiatement vers `BLOCKED_SAFETY`, jamais dégradée
+        silencieusement en invoquant un `developer_fn`/`reviewer_fn` réel (donc facturé) avec un
+        contexte quasi vide (trouvé par la revue reproductibilité/scope de cette mission : sans ce
+        garde, un appel Claude réel aurait été payé sur un prompt sans contenu avant que la
+        corruption ne soit enfin détectée à `COMMITTING`). Retourne `(mission, None)` normalement,
+        ou `(None, blocked_state)` si le routage vers `BLOCKED_SAFETY` a déjà eu lieu."""
+        if record.mission_id is None:
+            return None, None
+        mission = self._mission_by_id(record.mission_id)
+        if mission is None:
+            blocked = self._transition(
+                AutopilotState.BLOCKED_SAFETY,
+                stop_reason=(
+                    f"mission {record.mission_id!r} introuvable dans la file (fichier corrompu/"
+                    "modifié pendant l'exécution) — jamais dégradé silencieusement vers un appel "
+                    "réel sans contexte (mission Autopilot V1.1 §4)."
+                ),
+            )
+            return None, blocked
+        return mission, None
+
     def _handle_developing(self) -> AutopilotState:
         record = self._current_record()
-        mission = self._mission_by_id(record.mission_id)
+        mission, blocked = self._resolve_mission_or_block(record)
+        if blocked is not None:
+            return blocked
         attempt = record.attempt_count + 1
         result = self._developer_fn(mission, attempt, findings=None)
         if not result.get("success", False):
@@ -409,7 +435,9 @@ class AutopilotSupervisor:
 
     def _handle_testing(self) -> AutopilotState:
         record = self._current_record()
-        mission = self._mission_by_id(record.mission_id)
+        mission, blocked = self._resolve_mission_or_block(record)
+        if blocked is not None:
+            return blocked
         result = self._tester_fn(mission)
         if not result.get("success", False):
             attempt = record.attempt_count + 1
@@ -421,7 +449,9 @@ class AutopilotSupervisor:
 
     def _handle_reviewing(self) -> AutopilotState:
         record = self._current_record()
-        mission = self._mission_by_id(record.mission_id)
+        mission, blocked = self._resolve_mission_or_block(record)
+        if blocked is not None:
+            return blocked
         result = self._reviewer_fn(mission)
         if not result.get("success", True):
             attempt = record.attempt_count + 1
@@ -443,7 +473,9 @@ class AutopilotSupervisor:
         # V1.1 (mission §3.4) : le Developer reçoit RÉELLEMENT les findings de review et modifie
         # le code — jamais un simple passage direct vers TESTING sans nouvelle tentative réelle.
         record = self._current_record()
-        mission = self._mission_by_id(record.mission_id)
+        mission, blocked = self._resolve_mission_or_block(record)
+        if blocked is not None:
+            return blocked
         attempt = record.attempt_count + 1
         result = self._developer_fn(mission, attempt, findings=list(record.pending_findings))
         if not result.get("success", False):

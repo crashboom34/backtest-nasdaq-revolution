@@ -204,6 +204,144 @@ def test_real_git_ops_push_refuses_on_real_divergence_never_forcing(tmp_path, mo
         git_ops.push()
 
 
+def test_real_tester_fn_runs_the_full_suite_when_mission_is_none(monkeypatch):
+    """Régression — trouvé non testé par la revue reproductibilité/scope V1.1 : les 4 branches de
+    `real_tester_fn` (mission absente, targeted_tests vide, targeted en échec, targeted en succès
+    + risque élevé) n'avaient aucune couverture dédiée alors que cette fonction décide si la
+    régression complète tourne avant un commit/push réel."""
+    import scripts.autopilot.cli as cli_module
+
+    calls = []
+
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
+        calls.append(argv)
+        return _fake_result(stdout="1 passed", returncode=0)
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    supervisor = cli_module._build_real_supervisor()
+
+    result = supervisor._tester_fn(None)
+
+    assert result["success"] is True
+    assert len(calls) == 1  # une seule commande : la suite complète, aucun ciblage possible
+
+
+def test_real_tester_fn_runs_the_full_suite_when_targeted_tests_is_empty(monkeypatch):
+    import scripts.autopilot.cli as cli_module
+    from scripts.autopilot.mission_queue import Mission
+
+    calls = []
+
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
+        calls.append(argv)
+        return _fake_result(stdout="1 passed", returncode=0)
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    supervisor = cli_module._build_real_supervisor()
+    mission = Mission(id="M1", title="x", status="PLANNED", prompt_file="m1.md", targeted_tests=())
+
+    result = supervisor._tester_fn(mission)
+
+    assert result["success"] is True
+    assert len(calls) == 1
+
+
+def test_real_tester_fn_stops_immediately_when_targeted_tests_fail(monkeypatch):
+    """Échec rapide (mission §5) : jamais de suite complète lancée après un échec ciblé."""
+    import scripts.autopilot.cli as cli_module
+    from scripts.autopilot.mission_queue import Mission
+
+    calls = []
+
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
+        calls.append(argv)
+        return _fake_result(stdout="1 failed", returncode=1)
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    supervisor = cli_module._build_real_supervisor()
+    mission = Mission(
+        id="M1", title="x", status="PLANNED", prompt_file="m1.md",
+        targeted_tests=("tests/test_x.py",), risk_level="low",
+    )
+
+    result = supervisor._tester_fn(mission)
+
+    assert result["success"] is False
+    assert len(calls) == 1  # jamais la suite complète après un échec ciblé
+
+
+def test_real_tester_fn_reruns_full_suite_for_high_risk_missions_even_after_targeted_pass(monkeypatch):
+    """Mission §5 : régression complète imposée pour une mission à risque élevé, même si les
+    tests ciblés passent déjà."""
+    import scripts.autopilot.cli as cli_module
+    from scripts.autopilot.mission_queue import Mission
+
+    calls = []
+
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
+        calls.append(argv)
+        return _fake_result(stdout="1 passed", returncode=0)
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    supervisor = cli_module._build_real_supervisor()
+    mission = Mission(
+        id="M1", title="x", status="PLANNED", prompt_file="m1.md",
+        targeted_tests=("tests/test_x.py",), risk_level="high",
+    )
+
+    result = supervisor._tester_fn(mission)
+
+    assert result["success"] is True
+    assert len(calls) == 2  # ciblé d'abord, PUIS la suite complète imposée par le risque élevé
+
+
+def test_real_tester_fn_reruns_full_suite_when_scientific_contracts_declared(monkeypatch):
+    import scripts.autopilot.cli as cli_module
+    from scripts.autopilot.mission_queue import Mission
+
+    calls = []
+
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
+        calls.append(argv)
+        return _fake_result(stdout="1 passed", returncode=0)
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    supervisor = cli_module._build_real_supervisor()
+    mission = Mission(
+        id="M1", title="x", status="PLANNED", prompt_file="m1.md",
+        targeted_tests=("tests/test_x.py",), risk_level="low",
+        scientific_contracts=("ADR-0021",),
+    )
+
+    result = supervisor._tester_fn(mission)
+
+    assert result["success"] is True
+    assert len(calls) == 2
+
+
+def test_real_tester_fn_skips_full_suite_for_low_risk_mission_with_no_scientific_contracts(monkeypatch):
+    import scripts.autopilot.cli as cli_module
+    from scripts.autopilot.mission_queue import Mission
+
+    calls = []
+
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
+        calls.append(argv)
+        return _fake_result(stdout="1 passed", returncode=0)
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    supervisor = cli_module._build_real_supervisor()
+    mission = Mission(
+        id="M1", title="x", status="PLANNED", prompt_file="m1.md",
+        targeted_tests=("tests/test_x.py",), risk_level="low",
+    )
+
+    result = supervisor._tester_fn(mission)
+
+    assert result["success"] is True
+    assert len(calls) == 1  # ciblé suffit, jamais la suite complète pour ce cas
+
+
 def test_real_tester_fn_invokes_sys_executable_not_a_hardcoded_relative_venv_path(monkeypatch):
     """Régression — trouvé RÉELLEMENT cassé par le canary V1.1 (mission §9) : un chemin relatif
     codé en dur (".venv/Scripts/python.exe") échoue (`FileNotFoundError`/`WinError 2`) dans tout

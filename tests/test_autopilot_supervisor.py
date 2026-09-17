@@ -76,6 +76,40 @@ def test_happy_path_reaches_checkpointed_then_next_mission(tmp_path):
     assert git_ops.forced_push_attempted is False
 
 
+def test_mission_disappearing_mid_flight_blocks_before_invoking_the_developer(tmp_path):
+    """Régression — trouvé par la revue reproductibilité/scope V1.1 : si `missions.json` devient
+    corrompu/modifié PENDANT DEVELOPING/TESTING/REVIEWING/CORRECTING (une fois la mission déjà
+    sélectionnée), `_mission_by_id()` retournait silencieusement `None` et le Developer réel était
+    quand même invoqué (donc FACTURÉ) sur un contexte quasi vide, la corruption n'étant détectée
+    qu'à COMMITTING. Doit désormais bloquer immédiatement, AVANT tout appel `developer_fn`."""
+    develop_calls = {"count": 0}
+
+    def counting_developer(mission, attempt, findings=None):
+        develop_calls["count"] += 1
+        return _ok_developer(mission, attempt, findings=findings)
+
+    missions_path = _one_mission_queue(tmp_path)
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=counting_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    supervisor.acquire_lock()
+    supervisor.run_one_step()  # BOOTSTRAPPING -> READY
+    supervisor.run_one_step()  # READY -> PLANNING
+    supervisor.run_one_step()  # PLANNING -> DEVELOPING (mission_id="M1" persisted)
+    # La file de missions "disparaît"/devient illisible pendant que DEVELOPING est en cours.
+    missions_path.unlink()
+
+    final_state = supervisor.run_one_step()  # DEVELOPING doit bloquer AVANT d'appeler developer_fn
+
+    assert final_state == AutopilotState.BLOCKED_SAFETY
+    assert develop_calls["count"] == 0
+    assert "introuvable" in state_store.load().stop_reason.lower()
+
+
 def test_requires_clean_worktree_blocks_planning_on_a_dirty_worktree(tmp_path):
     """Régression — trouvé par la revue indépendante V1.1 : `Mission.requires_clean_worktree`
     (True par défaut) était déclaré dans le schéma mais jamais réellement vérifié nulle part —

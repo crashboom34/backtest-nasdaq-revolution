@@ -190,10 +190,17 @@ def test_result_structured_prefers_the_real_structured_output_field(tmp_path):
     `--json-schema` réussi) : `structured_output` est un dict natif déjà validé, prioritaire sur
     `result` (qui peut porter du texte parasite autour du JSON, ce qui a fait réellement échouer
     le parsing de `result` lors du canary — un Reviewer dont l'échec de parsing ressemblait
-    silencieusement à "review propre, 0 finding")."""
+    silencieusement à "review propre, 0 finding"). `result`/`structured_output` DIFFÈRENT
+    délibérément ici (pas seulement la même valeur dupliquée) — preuve que c'est bien
+    `structured_output` qui est lu, pas `result` de manière incidemment correcte (finding trouvé
+    par la revue reproductibilité/scope V1.1 : le test précédent ne pouvait pas distinguer les
+    deux, `result` étant réparable par coïncidence dans cette forme-là)."""
     real_shape = (
         '{"is_error":false,"session_id":"23c726cd-d4a8-425f-bd6b-c9256dfafcee",'
-        '"result":"{\\"verdict\\":\\"CLEAN\\",\\"findings\\":[]}",'
+        # `result` volontairement NON parseable tel quel (texte parasite autour du JSON, la forme
+        # réelle qui a fait échouer le parsing lors du canary) — si `result_structured` lisait
+        # encore `result` en priorité, ce test échouerait.
+        '"result":"Voici la réponse : {\\"verdict\\":\\"FINDINGS\\",\\"findings\\":[{}]}",'
         '"structured_output":{"verdict":"CLEAN","findings":[]}}'
     )
 
