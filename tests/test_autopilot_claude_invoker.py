@@ -37,6 +37,48 @@ def test_real_run_converts_a_subprocess_timeout_into_a_graceful_failure(monkeypa
     assert "timeout" in stderr.lower()
 
 
+def test_claude_invoker_passes_an_explicit_cwd_through_to_real_run(monkeypatch):
+    """Finalisation V1.1 §3 : le répertoire de travail d'un appel `claude -p` réel doit être
+    EXPLICITE, jamais hérité implicitement du process Autopilot lui-même — un worktree dédié
+    invoqué depuis un mauvais répertoire de travail modifierait/lirait le mauvais dépôt."""
+    import subprocess
+
+    import scripts.autopilot.claude_invoker as invoker_module
+
+    seen_kwargs = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        seen_kwargs.update(kwargs)
+        return _FakeCompleted()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    invoker = invoker_module.ClaudeInvoker(cwd="C:/some/dedicated/worktree")
+
+    invoker.run("x")
+
+    assert seen_kwargs.get("cwd") == "C:/some/dedicated/worktree"
+
+
+def test_claude_invoker_without_cwd_preserves_the_historical_calling_convention():
+    """Sans `cwd` (défaut `None`), le comportement historique est préservé à l'identique — jamais
+    de régression pour un `run_fn` de test existant qui n'accepte pas ce paramètre."""
+    seen = {}
+
+    def fake_run(argv):  # pas de **kwargs — doit rester appelable ainsi sans cwd
+        seen["argv"] = argv
+        return 0, "{}", ""
+
+    invoker = ClaudeInvoker(run_fn=fake_run)
+    invoker.run("x")
+
+    assert seen["argv"][-1] == "x"
+
+
 def test_real_run_uses_explicit_utf8_encoding_never_the_windows_default(monkeypatch):
     """Régression — trouvé RÉELLEMENT cassé pendant le canary V1.1 (mission §9) : un
     `UnicodeDecodeError` dans un thread lecteur de `subprocess` (`'charmap' codec can't decode

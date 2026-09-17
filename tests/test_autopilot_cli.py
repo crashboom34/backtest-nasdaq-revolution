@@ -618,6 +618,39 @@ def test_real_tester_fn_invokes_sys_executable_not_a_hardcoded_relative_venv_pat
     assert ".venv/Scripts/python.exe" not in seen_argv[0]
 
 
+def test_git_common_dir_resolves_to_the_same_absolute_path_from_a_linked_worktree(tmp_path):
+    """Régression — bug réel confirmé (mission finalisation V1.1 §3) : `LOCK_PATH`/
+    `STOP_SIGNAL_PATH` dérivaient de `.autopilot/state/`, propre à CHAQUE worktree (gitignoré) —
+    deux superviseurs lancés depuis deux worktrees différents avaient chacun leur propre fichier
+    de verrou, invisibles l'un à l'autre. `_git_common_dir()` doit résoudre vers le MÊME chemin
+    absolu qu'on l'appelle depuis le dépôt principal ou depuis un worktree lié — testé avec un
+    VRAI dépôt Git et un VRAI worktree, pas une simulation."""
+    import subprocess
+
+    import scripts.autopilot.cli as cli_module
+
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=main_repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=main_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=main_repo, check=True)
+    (main_repo / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=main_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=main_repo, check=True)
+
+    linked_worktree = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "other-branch", str(linked_worktree)],
+        cwd=main_repo, check=True, capture_output=True, text=True,
+    )
+
+    from_main = cli_module._git_common_dir(main_repo)
+    from_linked = cli_module._git_common_dir(linked_worktree)
+
+    assert from_main == from_linked
+    assert from_main == (main_repo / ".git").resolve()
+
+
 def test_real_git_ops_is_worktree_clean_reflects_git_status_porcelain(tmp_path, monkeypatch):
     """Régression — mission Autopilot V1.1 §4 : `mission.requires_clean_worktree` était déclaré
     dans le schéma mais jamais réellement câblé à une vérification Git réelle avant cette mission."""

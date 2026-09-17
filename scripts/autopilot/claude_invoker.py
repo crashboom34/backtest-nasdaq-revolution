@@ -136,17 +136,19 @@ class ClaudeInvocationResult:
 CLAUDE_SUBPROCESS_TIMEOUT_SECONDS = 1800
 
 
-def _real_run(argv: List[str]) -> Tuple[int, str, str]:
+def _real_run(argv: List[str], cwd: Optional[str] = None) -> Tuple[int, str, str]:
     import subprocess
 
     # `encoding="utf-8", errors="replace"` explicite — jamais le défaut de locale Windows
     # (cp1252), qui a réellement fait planter un thread lecteur de `subprocess` (crash silencieux,
     # non fatal pour le process appelant mais une sortie potentiellement tronquée) lors du canary
     # V1.1 : les réponses JSON de `claude -p` peuvent porter des caractères accentués (dépôt en
-    # français), tout comme le diff/les messages Git.
+    # français), tout comme le diff/les messages Git. `cwd` explicite (finalisation V1.1 §3) —
+    # jamais hérité implicitement du répertoire de travail du process appelant : un `claude -p`
+    # lancé depuis un mauvais répertoire modifierait/lirait le mauvais dépôt.
     try:
         completed = subprocess.run(
-            argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=CLAUDE_SUBPROCESS_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
@@ -159,14 +161,24 @@ def _real_run(argv: List[str]) -> Tuple[int, str, str]:
 
 class ClaudeInvoker:
     """`run_fn` par défaut lance réellement `claude` via `subprocess.run()` — injectable pour les
-    tests (jamais de sous-processus réel dans la suite Autopilot elle-même)."""
+    tests (jamais de sous-processus réel dans la suite Autopilot elle-même).
 
-    def __init__(self, run_fn: RunFn = _real_run):
+    `cwd` (finalisation V1.1 §3) : répertoire de travail EXPLICITE pour chaque invocation —
+    jamais hérité implicitement du répertoire de travail du process Autopilot lui-même (qui
+    pourrait différer selon comment/depuis où `autopilot start` a été invoqué). `None` (défaut)
+    préserve le comportement historique (hérite du process appelant) pour ne jamais casser un
+    `run_fn` de test existant qui n'accepte pas ce paramètre."""
+
+    def __init__(self, run_fn: RunFn = _real_run, cwd: Optional[str] = None):
         self._run_fn = run_fn
+        self._cwd = cwd
 
     def run(self, prompt: str, **kwargs) -> ClaudeInvocationResult:
         argv = build_claude_argv(prompt, **kwargs)
-        exit_code, stdout, stderr = self._run_fn(argv)
+        if self._cwd is not None:
+            exit_code, stdout, stderr = self._run_fn(argv, cwd=self._cwd)
+        else:
+            exit_code, stdout, stderr = self._run_fn(argv)
         category = classify_failure(stderr or stdout) if exit_code != 0 else None
         parsed: Optional[dict] = None
         if stdout:

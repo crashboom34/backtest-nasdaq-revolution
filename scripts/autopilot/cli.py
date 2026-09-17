@@ -33,9 +33,39 @@ from scripts.autopilot.supervisor import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AUTOPILOT_DIR = REPO_ROOT / ".autopilot"
 STATE_PATH = AUTOPILOT_DIR / "state" / "current_state.json"
-LOCK_PATH = AUTOPILOT_DIR / "state" / "autopilot.lock"
-STOP_SIGNAL_PATH = AUTOPILOT_DIR / "state" / "stop.signal"
 MISSIONS_PATH = AUTOPILOT_DIR / "missions.json"
+
+
+def _git_common_dir(repo_dir: Path = REPO_ROOT) -> Path:
+    """Répertoire `.git` RÉELLEMENT partagé entre TOUS les worktrees d'un même dépôt (via
+    `git rev-parse --git-common-dir`) — jamais le `.git` local à un worktree lié, qui n'est qu'un
+    FICHIER pointant vers un sous-répertoire PROPRE à ce worktree (`.git/worktrees/<nom>`), pas
+    partagé. Bug réel trouvé (finalisation V1.1 §3, "un verrou empêchant plusieurs superviseurs
+    de traiter la même file, y compris depuis deux worktrees") : `LOCK_PATH`/`STOP_SIGNAL_PATH`
+    dérivaient de `AUTOPILOT_DIR` (`.autopilot/state/`, propre à CHAQUE worktree puisque
+    gitignoré) — deux superviseurs lancés depuis deux worktrees différents avaient chacun leur
+    PROPRE fichier de verrou, invisibles l'un à l'autre, pouvant tourner concurremment sans être
+    jamais détectés. Repli sur `<repo_dir>/.git` si la commande échoue (jamais une exception au
+    chargement du module)."""
+    import subprocess as _subprocess
+
+    result = _subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"], cwd=repo_dir, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=30,
+    )
+    if result.returncode != 0:
+        return repo_dir / ".git"
+    common_dir = Path(result.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = (repo_dir / common_dir).resolve()
+    return common_dir
+
+
+# Verrou et signal d'arrêt VRAIMENT globaux au dépôt (partagés entre tous les worktrees) —
+# `STATE_PATH`/`MISSIONS_PATH` restent volontairement PROPRES à chaque worktree/branche (chacun
+# poursuit son propre travail sur sa propre branche), seule l'exclusion mutuelle doit être globale.
+LOCK_PATH = _git_common_dir() / "autopilot" / "autopilot.lock"
+STOP_SIGNAL_PATH = _git_common_dir() / "autopilot" / "stop.signal"
 
 # Plafond de coût par défaut pour un appel `claude -p` réel déclenché par l'Autopilot (mission §9 :
 # jamais de contournement de sécurité pour aller plus vite ; mission §6 : budgéter réellement).
@@ -415,7 +445,7 @@ def _build_real_supervisor(push_remote_ref: Optional[str] = None) -> AutopilotSu
     jamais supposée identique par défaut à "master". `None` pousse vers une référence distante du
     MÊME NOM que la branche locale (comportement sûr par défaut, jamais "master" implicitement)."""
     current_branch = _detect_current_branch()
-    developer_invoker = ClaudeInvoker()
+    developer_invoker = ClaudeInvoker(cwd=str(REPO_ROOT))
 
     def real_developer_fn(mission, attempt, findings=None):
         sections = [
@@ -511,7 +541,7 @@ def _build_real_supervisor(push_remote_ref: Optional[str] = None) -> AutopilotSu
             "correction attendue), et un contrôle explicite scientifique/reproductibilité/"
             "sécurité/architecture."
         )
-        reviewer_invoker = ClaudeInvoker()  # NOUVELLE instance à CHAQUE lot, jamais partagée
+        reviewer_invoker = ClaudeInvoker(cwd=str(REPO_ROOT))  # NOUVELLE instance à CHAQUE lot, jamais partagée
         return reviewer_invoker.run(
             prompt, permission_mode="plan", max_budget_usd=_mission_budget(mission),
             json_schema=REVIEW_JSON_SCHEMA,
@@ -623,7 +653,7 @@ def _build_real_supervisor(push_remote_ref: Optional[str] = None) -> AutopilotSu
             "Analyse la cause probable et propose UNE approche différente et sûre à tenter, en "
             "2-3 phrases maximum."
         )
-        diagnostic_invoker = ClaudeInvoker()
+        diagnostic_invoker = ClaudeInvoker(cwd=str(REPO_ROOT))
         result = diagnostic_invoker.run(
             prompt, permission_mode="plan", max_budget_usd=min(1.0, _mission_budget(mission)),
             model=DIAGNOSTIC_MODEL,
