@@ -393,6 +393,41 @@ def test_a_diagnostic_is_attempted_once_before_escalating_to_human_gate(tmp_path
     assert state_store.load().diagnostic_attempted is True
 
 
+def test_mission_max_attempts_escalates_even_when_failure_signatures_all_differ(tmp_path):
+    """Régression — trouvé non câblé en préparant le lancement réel d'AF-V-02 Slice 2 :
+    `Mission.max_attempts` existait dans le schéma mais n'était jamais appliqué — seule
+    l'escalade par SIGNATURE IDENTIQUE répétée (`should_escalate`) bornait les tentatives. Une
+    vraie mission scientifique dont chaque tentative échoue pour une raison DIFFÉRENTE ne
+    déclenchait jamais cette escalade et pouvait retenter indéfiniment."""
+    calls = {"count": 0}
+
+    def always_different_failure(mission, attempt, findings=None):
+        calls["count"] += 1
+        return {"success": False, "raw_output": f"AssertionError: échec distinct numéro {calls['count']}"}
+
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(id="M1", title="x", status="PLANNED", prompt_file="m1.md", max_attempts=2),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=always_different_failure,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+        failure_limit=10,  # jamais atteint par signature — seul max_attempts doit borner ici
+    )
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until(
+        {AutopilotState.WAITING_FOR_CLAUDE, AutopilotState.HUMAN_GATE_REQUIRED}, max_steps=200,
+    )
+
+    assert final_state == AutopilotState.HUMAN_GATE_REQUIRED
+    assert calls["count"] == 2  # jamais retenté au-delà de max_attempts
+    assert "max_attempts=2" in state_store.load().stop_reason
+
+
 def test_resume_after_simulated_crash_does_not_redo_completed_steps(tmp_path):
     """Mission §18 : "une reprise après arrêt simulé fonctionne", idempotence."""
     develop_calls = {"count": 0}

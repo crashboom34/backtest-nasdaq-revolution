@@ -435,7 +435,7 @@ class AutopilotSupervisor:
         attempt = record.attempt_count + 1
         result = self._developer_fn(mission, attempt, findings=None)
         if not result.get("success", False):
-            return self._handle_failure(result, attempt)
+            return self._handle_failure(result, attempt, mission)
         return self._transition(
             AutopilotState.TESTING, attempt_count=attempt,
             artifacts=tuple(result.get("changed_files", ())),
@@ -451,7 +451,7 @@ class AutopilotSupervisor:
         result = self._tester_fn(mission)
         if not result.get("success", False):
             attempt = record.attempt_count + 1
-            return self._handle_failure(result, attempt)
+            return self._handle_failure(result, attempt, mission)
         return self._transition(
             AutopilotState.REVIEWING, tests_status=result.get("summary", "passed"),
             next_action="lancer la review indépendante", stop_reason=None,
@@ -465,7 +465,7 @@ class AutopilotSupervisor:
         result = self._reviewer_fn(mission)
         if not result.get("success", True):
             attempt = record.attempt_count + 1
-            return self._handle_failure(result, attempt)
+            return self._handle_failure(result, attempt, mission)
         blocking = result.get("blocking_findings", [])
         if blocking:
             return self._transition(
@@ -489,7 +489,7 @@ class AutopilotSupervisor:
         attempt = record.attempt_count + 1
         result = self._developer_fn(mission, attempt, findings=list(record.pending_findings))
         if not result.get("success", False):
-            return self._handle_failure(result, attempt)
+            return self._handle_failure(result, attempt, mission)
         return self._transition(
             AutopilotState.TESTING, attempt_count=attempt,
             artifacts=tuple(result.get("changed_files", record.artifacts)),
@@ -620,7 +620,7 @@ class AutopilotSupervisor:
 
     # ── Échecs / diagnostic / escalade (mission §7/§8/§13) ───────────────────────────────────
 
-    def _handle_failure(self, result: dict, attempt: int) -> AutopilotState:
+    def _handle_failure(self, result: dict, attempt: int, mission: Optional[Mission] = None) -> AutopilotState:
         # `developer_fn` renvoie `raw_output` ; `tester_fn`/`reviewer_fn` ne renvoient que
         # `summary` (contrat documenté en tête de module) — sans repli, une classification sur ""
         # masquait TOUJOURS NETWORK/QUOTA_LIMIT pour ces échecs (trouvé par la revue safety/
@@ -645,14 +645,25 @@ class AutopilotSupervisor:
 
         already_seen = list(self._failure_signatures)
         self._failure_signatures.append(signature)
-        if not git_safety.should_escalate(already_seen, signature, limit=self._failure_limit):
+        # V1.1 : `mission.max_attempts` est désormais RÉELLEMENT appliqué, pas seulement déclaré
+        # dans le schéma (trouvé non câblé en préparant le lancement réel d'AF-V-02 Slice 2 — une
+        # vraie mission scientifique, aux causes d'échec potentiellement toutes DIFFÉRENTES d'une
+        # tentative à l'autre, jamais bornée par le seul mécanisme de signature identique répétée).
+        max_attempts = mission.max_attempts if mission is not None else self._failure_limit
+        attempts_exhausted = attempt >= max_attempts
+        signature_repeated = git_safety.should_escalate(already_seen, signature, limit=self._failure_limit)
+        if not signature_repeated and not attempts_exhausted:
             return self._retry_in_place(
                 attempt_count=attempt, stop_reason=f"tentative {attempt} échouée : {signature}",
             )
 
         # Mission §8 : "avant le Human Gate, lancer un diagnostic indépendant, tenter une autre
         # approche sûre, documenter les tentatives" — UNE seule fois par mission
-        # (`diagnostic_attempted`), jamais une boucle supplémentaire non bornée.
+        # (`diagnostic_attempted`), jamais une boucle supplémentaire non bornée. Universel, jamais
+        # conditionné à `attempts_exhausted` : qu'on escalade par signature répétée ou par
+        # `max_attempts` atteint, le diagnostic reste la même unique tentative "changer d'approche"
+        # avant Human Gate — au prix d'UNE tentative de développeur de plus que `max_attempts` au
+        # pire cas, un dépassement borné et assumé, jamais une boucle non bornée.
         record = self._current_record()
         if self._diagnostic_fn is not None and not record.diagnostic_attempted:
             diagnosis = self._diagnostic_fn(self._mission_by_id(record.mission_id), signature)
@@ -665,9 +676,14 @@ class AutopilotSupervisor:
                 ),
             )
 
+        reason = (
+            f"{attempt} tentative(s) — plafond `max_attempts={max_attempts}` de la mission atteint : {signature}"
+            if attempts_exhausted else
+            f"Échec identique {self._failure_limit} fois de suite : {signature}"
+        )
         report = HumanGateReport(
             decision="Un même échec se répète — poursuivre nécessite un changement d'approche.",
-            reason=f"Échec identique {self._failure_limit} fois de suite : {signature}",
+            reason=reason,
             recommendation="Escalader vers une revue humaine plutôt que de retenter la même approche.",
             options=[
                 HumanGateOption(
