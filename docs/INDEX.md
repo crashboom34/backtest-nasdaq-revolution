@@ -23,6 +23,13 @@ sessions de développement), `CONTEXT.md` (glossaire métier confirmé), `AGENTS
 | [`DOMAIN_MODEL.md`](architecture/DOMAIN_MODEL.md) | Modèle de domaine cible (complète `CONTEXT.md` sans le dupliquer — concepts futurs, pas encore confirmés) |
 | [`LINUX_PORTABILITY_REPORT.md`](architecture/LINUX_PORTABILITY_REPORT.md) | Audit de portabilité Linux (PH0-OCI-01) : compatibilité par catégorie, tests exécutés, corrections proposées, décision Go/No-Go |
 
+## Produit (`docs/product/`) et UX (`docs/ux/`)
+
+| Document | Contenu |
+|---|---|
+| [`PRODUCT_VISION_V2.md`](product/PRODUCT_VISION_V2.md) | Vision produit « Strategy Factory » (mission de synchronisation 2026-09-16) — chaque capacité future rattachée à un track/gate existant de `MASTER_ROADMAP.md`, statut explicite, aucune implémentation |
+| [`UX_UI_PRODUCT_DIRECTION.md`](ux/UX_UI_PRODUCT_DIRECTION.md) | Direction produit/pédagogique UX (langue française, mode guidé/expert, niveau de preuve, design system) — complète `architecture/UI_UX_ARCHITECTURE.md` sans le dupliquer |
+
 ## Roadmap (`docs/roadmap/`)
 
 | Document | Contenu |

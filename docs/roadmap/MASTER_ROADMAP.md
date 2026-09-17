@@ -379,6 +379,27 @@ document.
 
 ---
 
+## 9. Vision produit étendue (Strategy Factory) — référence externe (2026-09-16)
+
+`docs/product/PRODUCT_VISION_V2.md` détaille, sous chacun des tracks déjà posés ci-dessus (`F`,
+`D`, `S`, `P`, `O`, `E-PRECISION`), un ensemble de sous-fonctionnalités produit acceptées comme
+direction (Feature Registry massif, génération automatique de stratégies, Pareto/multi-objectifs,
+Genealogy, détection de similarité, Portfolio Engine, export ProRealTime/ProOrder, Paper/Forward
+testing, Strategy Health...) — voir ce document pour le détail complet, statut par capacité, et
+rattachement track par track. `docs/ux/UX_UI_PRODUCT_DIRECTION.md` fait de même pour la direction
+produit/pédagogique UX (complète, sans le dupliquer, `architecture/UI_UX_ARCHITECTURE.md`).
+
+**Ce §9 n'ajoute, ne modifie ni ne supprime aucun track, aucune gate, aucune arête du graphe de
+dépendances défini ci-dessus (§2-§3)** — les deux documents référencés restent strictement en
+dessous du niveau de granularité de cette roadmap, et confirment explicitement que
+`GATE V`/`GATE D`/`GATE CHAMPION`/`GATE PORTFOLIO` (§4) gouvernent toujours l'ordre dans lequel ces
+sous-fonctionnalités deviennent réalisables. Deux concepts de domaine nouveaux y sont identifiés
+sans être définis (`Strategy Genealogy`, `Rejected Strategy History`) — une future session
+`/domain-modeling` devra les intégrer formellement à `DOMAIN_MODEL.md` avant toute conception
+détaillée les concernant.
+
+---
+
 ## Prochaine action unique recommandée
 
 > **`DATA-FOUNDATION` est TERMINÉE — `GATE DATA = PASS` (2026-08-15, `AF-DATA-01`→`AF-DATA-04A`,
