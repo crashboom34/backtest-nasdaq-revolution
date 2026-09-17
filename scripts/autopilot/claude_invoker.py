@@ -118,7 +118,14 @@ class ClaudeInvocationResult:
 def _real_run(argv: List[str]) -> Tuple[int, str, str]:
     import subprocess
 
-    completed = subprocess.run(argv, capture_output=True, text=True)
+    # `encoding="utf-8", errors="replace"` explicite — jamais le défaut de locale Windows
+    # (cp1252), qui a réellement fait planter un thread lecteur de `subprocess` (crash silencieux,
+    # non fatal pour le process appelant mais une sortie potentiellement tronquée) lors du canary
+    # V1.1 : les réponses JSON de `claude -p` peuvent porter des caractères accentués (dépôt en
+    # français), tout comme le diff/les messages Git.
+    completed = subprocess.run(
+        argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
     return completed.returncode, completed.stdout, completed.stderr
 
 

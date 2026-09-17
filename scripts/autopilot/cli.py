@@ -93,7 +93,7 @@ class RealGitOps:
         reason = git_safety.check_git_command(argv)
         if reason:
             raise ForbiddenGitCommandError(reason)
-        result = subprocess.run(argv, cwd=self._repo_dir, capture_output=True, text=True)
+        result = subprocess.run(argv, cwd=self._repo_dir, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode != 0:
             raise RuntimeError(f"Commande Git échouée ({' '.join(argv)}) : {result.stderr}")
         return result.stdout
@@ -178,7 +178,7 @@ class RealGitOps:
         if origin_sha and origin_sha != head_sha:
             is_ancestor = subprocess.run(
                 ["git", "merge-base", "--is-ancestor", origin_sha, "HEAD"],
-                cwd=self._repo_dir, capture_output=True, text=True,
+                cwd=self._repo_dir, capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             if is_ancestor.returncode != 0:
                 raise RuntimeError(
@@ -197,7 +197,7 @@ def _porcelain_paths(repo_dir: Path) -> List[str]:
     — utilisé pour déterminer RÉELLEMENT les `changed_files` d'un Developer réel (mission §3.2),
     jamais inventés par le modèle lui-même."""
     result = subprocess.run(
-        ["git", "status", "--porcelain"], cwd=repo_dir, capture_output=True, text=True,
+        ["git", "status", "--porcelain"], cwd=repo_dir, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     paths: List[str] = []
     for line in result.stdout.splitlines():
@@ -311,7 +311,7 @@ def _build_real_supervisor() -> AutopilotSupervisor:
         # réutilisant délibérément l'environnement virtuel du dépôt principal comme interpréteur —
         # `sys.executable` est toujours le bon interpréteur, quel que soit le répertoire de travail.
         argv = [sys.executable, "-m", "pytest", "-q", *extra_args]
-        return subprocess.run(argv, cwd=REPO_ROOT, capture_output=True, text=True)
+        return subprocess.run(argv, cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
     def real_tester_fn(mission):
         # Mission §5 (V1.1) : tests CIBLÉS d'abord quand la mission les déclare (échec rapide,
@@ -339,7 +339,7 @@ def _build_real_supervisor() -> AutopilotSupervisor:
         # développeur — avec sortie structurée validée par schéma. `permission_mode="plan"` :
         # le reviewer ne doit JAMAIS pouvoir éditer de fichiers lui-même.
         diff_result = subprocess.run(
-            ["git", "diff", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True,
+            ["git", "diff", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         diff_text = diff_result.stdout[:20000]
         contracts = ", ".join(mission.scientific_contracts) if mission and mission.scientific_contracts else "(aucun déclaré)"
@@ -417,6 +417,25 @@ _WAITING_STATES: Set[AutopilotState] = {
 }
 
 
+def _record_real_git_context(store: AutopilotStateStore) -> None:
+    """Renseigne `head`/`origin_master` (mission §6, champs d'audit requis) sur l'état COURANT à
+    partir du dépôt réel — sans transition de phase (`update()`, jamais `transition_to()`).
+    Tolérant : un dépôt sans remote/commit ne doit jamais faire échouer l'appelant."""
+    if store.load() is None:
+        return
+    try:
+        git_ops = RealGitOps()
+        head = git_ops.current_head_sha()
+        origin = subprocess.run(
+            ["git", "rev-parse", "origin/master"], cwd=REPO_ROOT, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        origin_master = origin.stdout.strip() if origin.returncode == 0 else None
+        store.update(head=head, origin_master=origin_master)
+    except Exception:
+        pass  # audit best-effort — jamais bloquant pour la boucle elle-même
+
+
 def _run_real_loop(max_steps: int) -> int:
     """Exécute RÉELLEMENT la boucle Autopilot (mission §3.1 : "start doit réellement lancer la
     boucle ; il ne doit jamais annoncer RUNNING si aucun superviseur ne tourne"). S'arrête à un
@@ -432,8 +451,10 @@ def _run_real_loop(max_steps: int) -> int:
         final_state = supervisor.run_until(_WAITING_STATES, max_steps=max_steps)
     finally:
         supervisor.release_lock()
+    store = AutopilotStateStore(STATE_PATH)
+    _record_real_git_context(store)
     print(f"Autopilot : arrêté à l'état {final_state.value}.")
-    print(build_status_summary(AutopilotStateStore(STATE_PATH)))
+    print(build_status_summary(store))
     if final_state == AutopilotState.HUMAN_GATE_REQUIRED:
         return 2
     if final_state == AutopilotState.BLOCKED_SAFETY:
@@ -457,7 +478,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
     real_head = None
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True,
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         if result.returncode == 0:
             real_head = result.stdout.strip()

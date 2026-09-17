@@ -449,6 +449,23 @@ class AutopilotSupervisor:
         record = self._current_record()
         mission = self._mission_by_id(record.mission_id)
         intended_message = f"autopilot: {mission.title if mission else record.mission_id}"
+        # V1.1 : marquer la mission DONE fait partie du MÊME commit que son propre travail — jamais
+        # un flip d'état laissé non committé. Trouvé RÉELLEMENT cassé par le canary : l'ancien
+        # `_handle_next_mission()` mettait `missions.json` à jour APRÈS le push (donc jamais
+        # inclus dans le commit ni poussé) — un fresh checkout/pull aurait revu la mission comme
+        # "PLANNED" et aurait pu la re-sélectionner/la ré-exécuter. Idempotent : réexécuter ce
+        # flip lors d'une reprise après crash est un no-op (`mark_mission_status` sur un statut
+        # déjà `DONE`, `save_missions()` réécrit un contenu identique).
+        scope = list(record.artifacts)
+        if record.mission_id:
+            missions = self._load_missions_or_block()
+            if missions is None:
+                return self._current_phase()
+            missions = mark_mission_status(missions, record.mission_id, "DONE")
+            missions_path_str = str(self._missions_path)
+            if missions_path_str not in scope:
+                scope.append(missions_path_str)
+            save_missions(self._missions_path, missions)
         try:
             # Idempotence (mission §3.8) : si un commit avec ce message exact est déjà HEAD (crash
             # entre un `git commit` réel réussi et l'enregistrement de la transition), ne JAMAIS
@@ -460,7 +477,7 @@ class AutopilotSupervisor:
                     AutopilotState.PUSHING, next_action="push origin master (commit déjà effectué)",
                     last_commit_sha=sha,
                 )
-            self._git_ops.add(list(record.artifacts))
+            self._git_ops.add(scope)
             sha = self._git_ops.commit(intended_message)
         except ForbiddenGitCommandError as exc:
             return self._transition(AutopilotState.BLOCKED_SAFETY, stop_reason=str(exc))
@@ -504,13 +521,12 @@ class AutopilotSupervisor:
         return self._transition(AutopilotState.NEXT_MISSION)
 
     def _handle_next_mission(self) -> AutopilotState:
-        record = self._current_record()
+        # Le flip DONE de la mission qui vient de se terminer a déjà eu lieu dans
+        # `_handle_committing()` (V1.1 — même commit que son propre travail, jamais un flip d'état
+        # séparé et non committé) — cette relecture ne fait plus que choisir la mission suivante.
         missions = self._load_missions_or_block()
         if missions is None:
             return self._current_phase()
-        if record.mission_id:
-            missions = mark_mission_status(missions, record.mission_id, "DONE")
-            save_missions(self._missions_path, missions)
         if select_next_mission(missions) is None:
             return self._transition(AutopilotState.COMPLETED)
         return self._transition(AutopilotState.PLANNING)

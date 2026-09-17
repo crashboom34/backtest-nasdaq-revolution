@@ -76,6 +76,35 @@ def test_happy_path_reaches_checkpointed_then_next_mission(tmp_path):
     assert git_ops.forced_push_attempted is False
 
 
+def test_mission_done_status_is_committed_together_with_its_own_work(tmp_path):
+    """Régression — trouvé RÉELLEMENT cassé par le canary V1.1 : l'ancien `_handle_next_mission()`
+    marquait la mission `DONE` dans `missions.json` APRÈS le push, donc ce changement n'était
+    JAMAIS committé ni poussé — un fresh checkout/pull aurait revu la mission comme "PLANNED" et
+    aurait pu la re-sélectionner/la ré-exécuter. Le flip doit désormais faire partie du MÊME
+    commit que le travail de la mission elle-même."""
+    from scripts.autopilot.mission_queue import load_missions
+
+    missions_path = _one_mission_queue(tmp_path)
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    supervisor.acquire_lock()
+
+    supervisor.run_until({AutopilotState.NEXT_MISSION})
+
+    # Le fichier de missions sur disque (ce que "committer" représente ici, FakeGitOps n'écrivant
+    # jamais réellement dans Git) doit déjà porter DONE avant même que NEXT_MISSION ne s'exécute —
+    # preuve que le flip a eu lieu pendant COMMITTING, pas après PUSHING/CHECKPOINTED.
+    reloaded = load_missions(missions_path)
+    assert reloaded[0].status == "DONE"
+    # Et ce chemin doit avoir fait partie de ce qui a été "ajouté" au commit.
+    assert str(missions_path) in git_ops.added
+
+
 def test_no_more_missions_reaches_completed(tmp_path):
     state_store = AutopilotStateStore(tmp_path / "state.json")
     missions_path = tmp_path / "missions.json"

@@ -96,7 +96,7 @@ def test_real_git_ops_commit_rejects_a_protected_path_already_staged_outside_add
     relire l'index réel (`git diff --cached --name-only`) et le revalider avant de committer."""
     import scripts.autopilot.cli as cli_module
 
-    def fake_run(argv, cwd, capture_output, text):
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
         if argv == ["git", "diff", "--cached", "--name-only"]:
             return _fake_result(stdout="app_corrupted_backup.py\n")
         return _fake_result()
@@ -113,7 +113,7 @@ def test_real_git_ops_commit_rejects_a_secret_found_in_the_staged_diff(tmp_path,
     D'EXÉCUTION RÉEL du commit, pas seulement via les fonctions pures isolées de `git_safety.py`."""
     import scripts.autopilot.cli as cli_module
 
-    def fake_run(argv, cwd, capture_output, text):
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
         if argv == ["git", "diff", "--cached", "--name-only"]:
             return _fake_result(stdout="config.py\n")
         if argv == ["git", "diff", "--cached"]:
@@ -132,7 +132,7 @@ def test_real_git_ops_commit_succeeds_when_staged_index_is_in_scope(tmp_path, mo
 
     calls = []
 
-    def fake_run(argv, cwd, capture_output, text):
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
         calls.append(argv)
         if argv == ["git", "diff", "--cached", "--name-only"]:
             return _fake_result(stdout="scripts/autopilot/cli.py\n")
@@ -160,7 +160,7 @@ def test_real_git_ops_push_fetches_and_proceeds_when_origin_is_an_ancestor_of_he
 
     calls = []
 
-    def fake_run(argv, cwd, capture_output, text):
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
         calls.append(argv)
         if argv == ["git", "rev-parse", "origin/master"]:
             return _fake_result(stdout="oldsha\n")
@@ -186,7 +186,7 @@ def test_real_git_ops_push_refuses_on_real_divergence_never_forcing(tmp_path, mo
     JAMAIS automatiquement forcé (mission §8 : "ne jamais forcer, diagnostiquer la divergence")."""
     import scripts.autopilot.cli as cli_module
 
-    def fake_run(argv, cwd, capture_output, text):
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
         if argv == ["git", "rev-parse", "origin/master"]:
             return _fake_result(stdout="othersha\n")
         if argv == ["git", "rev-parse", "HEAD"]:
@@ -214,7 +214,7 @@ def test_real_tester_fn_invokes_sys_executable_not_a_hardcoded_relative_venv_pat
 
     seen_argv = []
 
-    def fake_run(argv, cwd, capture_output, text):
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
         seen_argv.append(argv)
         return _fake_result(stdout="1 passed", returncode=0)
 
@@ -226,6 +226,39 @@ def test_real_tester_fn_invokes_sys_executable_not_a_hardcoded_relative_venv_pat
     assert seen_argv, "aucun subprocess.run() n'a été appelé"
     assert seen_argv[0][0] == cli_module.sys.executable
     assert ".venv/Scripts/python.exe" not in seen_argv[0]
+
+
+def test_record_real_git_context_fills_head_and_origin_master(tmp_path, monkeypatch):
+    """Régression — mission §6 : `head`/`origin_master` sont des champs d'audit requis, mais
+    restaient toujours `(inconnu)` (`None`) tout au long du canary V1.1 réel — jamais renseignés
+    nulle part sur le chemin réel avant ce correctif."""
+    import scripts.autopilot.cli as cli_module
+
+    def fake_run(argv, cwd=None, capture_output=None, text=None, **kwargs):
+        if argv == ["git", "rev-parse", "HEAD"]:
+            return _fake_result(stdout="realhead123\n")
+        if argv == ["git", "rev-parse", "origin/master"]:
+            return _fake_result(stdout="realorigin456\n")
+        return _fake_result()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    store = AutopilotStateStore(tmp_path / "state.json")
+    store.save(build_state_record(phase=AutopilotState.READY, mission_id=None, branch="master"))
+
+    cli_module._record_real_git_context(store)
+
+    record = store.load()
+    assert record.head == "realhead123"
+    assert record.origin_master == "realorigin456"
+
+
+def test_record_real_git_context_never_raises_when_no_state_exists(tmp_path):
+    import scripts.autopilot.cli as cli_module
+
+    store = AutopilotStateStore(tmp_path / "state.json")
+    cli_module._record_real_git_context(store)  # ne doit jamais lever, même sans état existant
+
+    assert store.load() is None
 
 
 def test_main_status_command_returns_zero(tmp_path, monkeypatch, capsys):

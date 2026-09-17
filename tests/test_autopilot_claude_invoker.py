@@ -16,6 +16,37 @@ from scripts.autopilot.claude_invoker import ClaudeInvoker, build_claude_argv
 from scripts.autopilot.quota_detector import FailureCategory
 
 
+def test_real_run_uses_explicit_utf8_encoding_never_the_windows_default(monkeypatch):
+    """Régression — trouvé RÉELLEMENT cassé pendant le canary V1.1 (mission §9) : un
+    `UnicodeDecodeError` dans un thread lecteur de `subprocess` (`'charmap' codec can't decode
+    byte...`) s'est produit en confiant à `subprocess.run(text=True)` le codec de LOCALE Windows
+    (cp1252) pour décoder une sortie `claude -p` contenant des caractères accentués (dépôt en
+    français). `encoding="utf-8", errors="replace"` doit être explicite, jamais implicite."""
+    import subprocess
+
+    import scripts.autopilot.claude_invoker as invoker_module
+
+    seen_kwargs = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        seen_kwargs.update(kwargs)
+        return _FakeCompleted()
+
+    # `_real_run()` fait `import subprocess` localement (dans son corps) — patcher le module
+    # global `subprocess.run` directement, seul point que ce import local pourra résoudre.
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    invoker_module._real_run(["claude", "-p", "x"])
+
+    assert seen_kwargs.get("encoding") == "utf-8"
+    assert seen_kwargs.get("errors") == "replace"
+
+
 def test_build_claude_argv_uses_print_and_json_output():
     argv = build_claude_argv("do the thing")
     assert argv[0] == "claude"
