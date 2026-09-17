@@ -82,3 +82,96 @@ def test_invoker_passes_the_built_argv_to_run_fn():
     invoker.run("hello world", permission_mode="acceptEdits")
     assert "hello world" in seen["argv"]
     assert "acceptEdits" in seen["argv"]
+
+
+def test_build_claude_argv_includes_json_schema_when_given():
+    argv = build_claude_argv("x", json_schema='{"type":"object"}')
+    assert "--json-schema" in argv
+    assert '{"type":"object"}' in argv
+
+
+def test_invoker_extracts_session_id_and_cost_from_real_json_shape(tmp_path):
+    """Forme réellement observée lors de la mission Autopilot V1.1 (§2/§6) : objet PLAT avec
+    `session_id`/`total_cost_usd`/`is_error` au premier niveau, jamais imbriqués."""
+    real_shape = (
+        '{"is_error":true,"session_id":"19cb61e4-5da0-47be-be4d-77c9978dd589",'
+        '"total_cost_usd":0.321516,"type":"result","subtype":"error_max_budget_usd"}'
+    )
+
+    def fake_run(argv):
+        return 1, real_shape, ""
+
+    invoker = ClaudeInvoker(run_fn=fake_run)
+    result = invoker.run("x")
+
+    assert result.session_id == "19cb61e4-5da0-47be-be4d-77c9978dd589"
+    assert result.cost_usd == 0.321516
+    assert result.parsed["subtype"] == "error_max_budget_usd"
+
+
+def test_functionally_succeeded_is_false_when_is_error_true_even_with_zero_exit_code():
+    """Mission §6 : "ne pas considérer exit_code==0 comme preuve suffisante" — `is_error` du JSON
+    structuré doit primer quand il est présent."""
+    def fake_run(argv):
+        return 0, '{"is_error": true, "result": "partial"}', ""
+
+    invoker = ClaudeInvoker(run_fn=fake_run)
+    result = invoker.run("x")
+
+    assert result.exit_code == 0
+    assert result.functionally_succeeded is False
+
+
+def test_functionally_succeeded_is_true_when_is_error_false_and_exit_code_zero():
+    def fake_run(argv):
+        return 0, '{"is_error": false, "result": "done"}', ""
+
+    invoker = ClaudeInvoker(run_fn=fake_run)
+    result = invoker.run("x")
+
+    assert result.functionally_succeeded is True
+    assert result.result_text == "done"
+
+
+def test_functionally_succeeded_falls_back_to_exit_code_when_json_has_no_is_error_field():
+    def fake_run(argv):
+        return 0, "not json at all", ""
+
+    invoker = ClaudeInvoker(run_fn=fake_run)
+    result = invoker.run("x")
+
+    assert result.parsed is None
+    assert result.functionally_succeeded is True
+
+
+def test_result_structured_parses_a_json_encoded_result_string():
+    def fake_run(argv):
+        return 0, '{"is_error": false, "result": "{\\"verdict\\": \\"CLEAN\\"}"}', ""
+
+    invoker = ClaudeInvoker(run_fn=fake_run)
+    result = invoker.run("x")
+
+    assert result.result_structured == {"verdict": "CLEAN"}
+
+
+def test_result_structured_handles_result_already_being_a_nested_object():
+    """Deuxième forme plausible de sortie `--json-schema`, non confirmée empiriquement (le sondage
+    réel a épuisé son budget avant réponse) — `result_structured` doit gérer les deux sans
+    supposer laquelle Claude Code produit réellement."""
+    def fake_run(argv):
+        return 0, '{"is_error": false, "result": {"verdict": "FINDINGS", "findings": []}}', ""
+
+    invoker = ClaudeInvoker(run_fn=fake_run)
+    result = invoker.run("x")
+
+    assert result.result_structured == {"verdict": "FINDINGS", "findings": []}
+
+
+def test_result_structured_is_none_when_result_is_not_json():
+    def fake_run(argv):
+        return 0, '{"is_error": false, "result": "plain text answer"}', ""
+
+    invoker = ClaudeInvoker(run_fn=fake_run)
+    result = invoker.run("x")
+
+    assert result.result_structured is None

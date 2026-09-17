@@ -52,7 +52,10 @@ ALL_STATES: Tuple[AutopilotState, ...] = tuple(AutopilotState)
 # absente de la table est refusée (IllegalTransitionError), jamais acceptée par défaut.
 ALLOWED_TRANSITIONS: dict = {
     AutopilotState.BOOTSTRAPPING: (AutopilotState.READY, AutopilotState.BLOCKED_SAFETY),
-    AutopilotState.READY: (AutopilotState.PLANNING, AutopilotState.STOPPED, AutopilotState.COMPLETED),
+    AutopilotState.READY: (
+        AutopilotState.PLANNING, AutopilotState.STOPPED, AutopilotState.COMPLETED,
+        AutopilotState.BLOCKED_SAFETY,
+    ),
     AutopilotState.PLANNING: (
         AutopilotState.DEVELOPING, AutopilotState.HUMAN_GATE_REQUIRED,
         AutopilotState.WAITING_FOR_EXTERNAL_RESOURCE, AutopilotState.BLOCKED_SAFETY,
@@ -70,10 +73,15 @@ ALLOWED_TRANSITIONS: dict = {
     ),
     AutopilotState.REVIEWING: (
         AutopilotState.PRE_COMMIT_CHECK, AutopilotState.CORRECTING, AutopilotState.WAITING_FOR_CLAUDE,
-        AutopilotState.BLOCKED_SAFETY,
+        AutopilotState.WAITING_FOR_EXTERNAL_RESOURCE, AutopilotState.BLOCKED_SAFETY,
     ),
+    # V1.1 : CORRECTING invoque désormais réellement le Developer avec les findings (mission
+    # Autopilot V1.1 §3.4) — peut donc échouer exactement comme DEVELOPING (WAITING_FOR_CLAUDE/
+    # WAITING_FOR_EXTERNAL_RESOURCE/HUMAN_GATE_REQUIRED), jamais seulement retomber sur TESTING.
     AutopilotState.CORRECTING: (
-        AutopilotState.TESTING, AutopilotState.HUMAN_GATE_REQUIRED, AutopilotState.BLOCKED_SAFETY,
+        AutopilotState.TESTING, AutopilotState.WAITING_FOR_CLAUDE,
+        AutopilotState.WAITING_FOR_EXTERNAL_RESOURCE, AutopilotState.HUMAN_GATE_REQUIRED,
+        AutopilotState.BLOCKED_SAFETY,
     ),
     AutopilotState.PRE_COMMIT_CHECK: (
         AutopilotState.COMMITTING, AutopilotState.CORRECTING, AutopilotState.BLOCKED_SAFETY,
@@ -86,13 +94,18 @@ ALLOWED_TRANSITIONS: dict = {
     AutopilotState.CHECKPOINTED: (AutopilotState.NEXT_MISSION,),
     AutopilotState.NEXT_MISSION: (
         AutopilotState.PLANNING, AutopilotState.COMPLETED, AutopilotState.STOPPED,
+        AutopilotState.BLOCKED_SAFETY,
     ),
+    # V1.1 : "resume" doit réellement reprendre la phase interrompue (`resume_to_phase`), pas
+    # seulement PLANNING — voir `_resume_to_recorded_phase()` dans supervisor.py (mission §3.5).
     AutopilotState.WAITING_FOR_CLAUDE: (
         AutopilotState.DEVELOPING, AutopilotState.TESTING, AutopilotState.REVIEWING,
-        AutopilotState.STOPPED,
+        AutopilotState.CORRECTING, AutopilotState.STOPPED,
     ),
     AutopilotState.WAITING_FOR_EXTERNAL_RESOURCE: (
-        AutopilotState.PLANNING, AutopilotState.PUSHING, AutopilotState.STOPPED,
+        AutopilotState.DEVELOPING, AutopilotState.TESTING, AutopilotState.REVIEWING,
+        AutopilotState.CORRECTING, AutopilotState.PLANNING, AutopilotState.PUSHING,
+        AutopilotState.STOPPED,
     ),
     AutopilotState.HUMAN_GATE_REQUIRED: (AutopilotState.STOPPED, AutopilotState.PLANNING),
     AutopilotState.BLOCKED_SAFETY: (AutopilotState.STOPPED,),
@@ -125,6 +138,15 @@ class AutopilotStateRecord:
     stop_reason: Optional[str] = None
     claude_session_id: Optional[str] = None
     artifacts: Tuple[str, ...] = ()
+    # -- V1.1 : reprise réelle, idempotence Git, correction pilotée par les findings (mission
+    # Autopilot V1.1 §3.2/§3.3/§3.4/§3.5/§3.8) --
+    developer_session_id: Optional[str] = None
+    reviewer_session_id: Optional[str] = None
+    resume_to_phase: Optional[str] = None
+    pending_findings: Tuple[str, ...] = ()
+    last_commit_sha: Optional[str] = None
+    last_push_sha: Optional[str] = None
+    diagnostic_attempted: bool = False
 
 
 def build_state_record(
@@ -142,6 +164,13 @@ def build_state_record(
     claude_session_id: Optional[str] = None,
     artifacts: Tuple[str, ...] = (),
     timestamp_utc: Optional[str] = None,
+    developer_session_id: Optional[str] = None,
+    reviewer_session_id: Optional[str] = None,
+    resume_to_phase: Optional[str] = None,
+    pending_findings: Tuple[str, ...] = (),
+    last_commit_sha: Optional[str] = None,
+    last_push_sha: Optional[str] = None,
+    diagnostic_attempted: bool = False,
 ) -> AutopilotStateRecord:
     """Construit un `AutopilotStateRecord`. `timestamp_utc` auto-rempli (UTC, offset explicite)
     si non fourni — même discipline que `research_run.py`/`validation_run.py`."""
@@ -159,6 +188,13 @@ def build_state_record(
         review_status=review_status,
         stop_reason=stop_reason,
         claude_session_id=claude_session_id,
+        developer_session_id=developer_session_id,
+        reviewer_session_id=reviewer_session_id,
+        resume_to_phase=resume_to_phase,
+        pending_findings=tuple(pending_findings),
+        last_commit_sha=last_commit_sha,
+        last_push_sha=last_push_sha,
+        diagnostic_attempted=diagnostic_attempted,
         artifacts=tuple(artifacts),
     )
 

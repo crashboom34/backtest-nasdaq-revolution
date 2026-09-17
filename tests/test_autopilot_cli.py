@@ -1,9 +1,10 @@
 """
-tests/test_autopilot_cli.py — Bootstrap Autopilot V1 (2026-09-17), mission §14/§20.
+tests/test_autopilot_cli.py — Autopilot V1.1 (2026-09-17), mission §3.1/§3.5/§3.6/§3.7/§14/§20.
 
 Teste uniquement la logique pure (formatage du statut, dispatch de commande, garde
 `RealGitOps`) — n'invoque jamais un vrai sous-processus `claude`/`git` ni ne démarre une vraie
-boucle Autopilot (mission Phase D : dry-run sûr uniquement)."""
+boucle Autopilot contre le dépôt réel (les tests de boucle réelle utilisent des doublures pour
+`subprocess.run`, jamais un accès réseau/disque réel)."""
 
 from __future__ import annotations
 
@@ -17,6 +18,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.autopilot.cli import RealGitOps, build_status_summary, main
 from scripts.autopilot.state_machine import AutopilotState, AutopilotStateStore, build_state_record
 from scripts.autopilot.supervisor import ForbiddenGitCommandError
+
+
+def _fake_result(stdout="", returncode=0, stderr=""):
+    class _Result:
+        pass
+
+    r = _Result()
+    r.stdout = stdout
+    r.returncode = returncode
+    r.stderr = stderr
+    return r
 
 
 def test_status_summary_with_no_state_says_never_started(tmp_path):
@@ -85,11 +97,28 @@ def test_real_git_ops_commit_rejects_a_protected_path_already_staged_outside_add
     import scripts.autopilot.cli as cli_module
 
     def fake_run(argv, cwd, capture_output, text):
-        class _Result:
-            returncode = 0
-            stderr = ""
-            stdout = "app_corrupted_backup.py\n" if argv[:3] == ["git", "diff", "--cached"] else ""
-        return _Result()
+        if argv == ["git", "diff", "--cached", "--name-only"]:
+            return _fake_result(stdout="app_corrupted_backup.py\n")
+        return _fake_result()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    git_ops = RealGitOps(repo_dir=tmp_path)
+
+    with pytest.raises(ForbiddenGitCommandError):
+        git_ops.commit("autopilot: test")
+
+
+def test_real_git_ops_commit_rejects_a_secret_found_in_the_staged_diff(tmp_path, monkeypatch):
+    """Mission Autopilot V1.1 §3.7 : secrets/gros fichiers doivent être contrôlés sur le CHEMIN
+    D'EXÉCUTION RÉEL du commit, pas seulement via les fonctions pures isolées de `git_safety.py`."""
+    import scripts.autopilot.cli as cli_module
+
+    def fake_run(argv, cwd, capture_output, text):
+        if argv == ["git", "diff", "--cached", "--name-only"]:
+            return _fake_result(stdout="config.py\n")
+        if argv == ["git", "diff", "--cached"]:
+            return _fake_result(stdout='api_key = "AKIAABCDEFGHIJKLMNOP"\n')
+        return _fake_result()
 
     monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
     git_ops = RealGitOps(repo_dir=tmp_path)
@@ -105,19 +134,98 @@ def test_real_git_ops_commit_succeeds_when_staged_index_is_in_scope(tmp_path, mo
 
     def fake_run(argv, cwd, capture_output, text):
         calls.append(argv)
-
-        class _Result:
-            returncode = 0
-            stderr = ""
-            stdout = "scripts/autopilot/cli.py\n" if argv[:3] == ["git", "diff", "--cached"] else ""
-        return _Result()
+        if argv == ["git", "diff", "--cached", "--name-only"]:
+            return _fake_result(stdout="scripts/autopilot/cli.py\n")
+        if argv == ["git", "diff", "--cached"]:
+            return _fake_result(stdout="+ trivial change\n")
+        if argv == ["git", "diff", "--cached", "--numstat"]:
+            return _fake_result(stdout="")
+        if argv == ["git", "rev-parse", "HEAD"]:
+            return _fake_result(stdout="deadbeefcafe\n")
+        return _fake_result()
 
     monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
     git_ops = RealGitOps(repo_dir=tmp_path)
 
-    git_ops.commit("autopilot: test")
+    sha = git_ops.commit("autopilot: test")
 
-    assert calls[-1][:2] == ["git", "commit"]
+    assert any(c[:2] == ["git", "commit"] for c in calls)
+    assert sha == "deadbeefcafe"
+
+
+def test_real_git_ops_push_fetches_and_proceeds_when_origin_is_an_ancestor_of_head(tmp_path, monkeypatch):
+    """Mission Autopilot V1.1 §3.7/§8 : `git fetch origin` doit avoir lieu avant tout push réel ;
+    quand `origin/master` est un ancêtre de HEAD (avance normale, fast-forward), le push procède."""
+    import scripts.autopilot.cli as cli_module
+
+    calls = []
+
+    def fake_run(argv, cwd, capture_output, text):
+        calls.append(argv)
+        if argv == ["git", "rev-parse", "origin/master"]:
+            return _fake_result(stdout="oldsha\n")
+        if argv == ["git", "rev-parse", "HEAD"]:
+            return _fake_result(stdout="newsha\n")
+        if argv == ["git", "merge-base", "--is-ancestor", "oldsha", "HEAD"]:
+            return _fake_result(returncode=0)  # oldsha EST un ancêtre -> avance normale
+        return _fake_result()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    git_ops = RealGitOps(repo_dir=tmp_path)
+
+    pushed_sha = git_ops.push()
+
+    assert ["git", "fetch", "origin"] in calls
+    assert any(c[:2] == ["git", "push"] for c in calls)
+    assert pushed_sha == "newsha"
+
+
+def test_real_git_ops_push_refuses_on_real_divergence_never_forcing(tmp_path, monkeypatch):
+    """Quand `origin/master` N'EST PAS un ancêtre de HEAD (divergence réelle — quelqu'un/quelque
+    chose d'autre a poussé), le push doit être refusé (levée d'exception, jamais silencieux) et
+    JAMAIS automatiquement forcé (mission §8 : "ne jamais forcer, diagnostiquer la divergence")."""
+    import scripts.autopilot.cli as cli_module
+
+    def fake_run(argv, cwd, capture_output, text):
+        if argv == ["git", "rev-parse", "origin/master"]:
+            return _fake_result(stdout="othersha\n")
+        if argv == ["git", "rev-parse", "HEAD"]:
+            return _fake_result(stdout="mysha\n")
+        if argv == ["git", "merge-base", "--is-ancestor", "othersha", "HEAD"]:
+            return _fake_result(returncode=1)  # PAS un ancêtre -> vraie divergence
+        if argv[:2] == ["git", "push"]:
+            raise AssertionError("git push ne doit jamais être tenté en cas de divergence non comprise")
+        return _fake_result()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    git_ops = RealGitOps(repo_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match="divergence"):
+        git_ops.push()
+
+
+def test_real_tester_fn_invokes_sys_executable_not_a_hardcoded_relative_venv_path(monkeypatch):
+    """Régression — trouvé RÉELLEMENT cassé par le canary V1.1 (mission §9) : un chemin relatif
+    codé en dur (".venv/Scripts/python.exe") échoue (`FileNotFoundError`/`WinError 2`) dans tout
+    déploiement qui n'a pas son PROPRE `.venv/` local sous `REPO_ROOT` — ex. le worktree isolé
+    `autopilot/v1-1-operational` de cette mission, qui réutilise délibérément l'interpréteur du
+    dépôt principal. `sys.executable` doit être utilisé à la place, toujours correct."""
+    import scripts.autopilot.cli as cli_module
+
+    seen_argv = []
+
+    def fake_run(argv, cwd, capture_output, text):
+        seen_argv.append(argv)
+        return _fake_result(stdout="1 passed", returncode=0)
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    supervisor = cli_module._build_real_supervisor()
+
+    supervisor._tester_fn(None)
+
+    assert seen_argv, "aucun subprocess.run() n'a été appelé"
+    assert seen_argv[0][0] == cli_module.sys.executable
+    assert ".venv/Scripts/python.exe" not in seen_argv[0]
 
 
 def test_main_status_command_returns_zero(tmp_path, monkeypatch, capsys):
@@ -135,11 +243,13 @@ def test_main_stop_command_releases_the_lock_and_returns_zero(tmp_path, monkeypa
 
     monkeypatch.setattr(cli_module, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(cli_module, "LOCK_PATH", tmp_path / "autopilot.lock")
+    monkeypatch.setattr(cli_module, "STOP_SIGNAL_PATH", tmp_path / "stop.signal")
     (tmp_path / "autopilot.lock").write_text("locked", encoding="utf-8")
 
     exit_code = main(["stop"])
     assert exit_code == 0
     assert not (tmp_path / "autopilot.lock").exists()
+    assert (tmp_path / "stop.signal").exists()  # signal coopératif déposé (mission §3.6)
 
 
 def test_main_rejects_an_unknown_command():
