@@ -13,12 +13,18 @@ le mode non interactif fonctionne sans ce contournement.
 PARSÉ, `session_id` et `total_cost_usd` sont extraits, et `exit_code == 0` n'est plus considéré
 comme une preuve suffisante de réussite fonctionnelle — `functionally_succeeded` s'appuie sur le
 champ `is_error` du JSON structuré quand il est présent. Forme du JSON réel confirmée
-empiriquement lors de cette mission (un appel `-p --output-format json` réel, cas d'échec par
-dépassement de budget) : objet PLAT portant au minimum `type`, `subtype`, `is_error`,
-`session_id`, `total_cost_usd`, `duration_ms`, `usage` — `result` (texte de réponse) n'apparaît
-que sur un tour réussi, non observé directement lors de ce sondage (budget épuisé avant réponse).
-Coût réel observé pour un tour trivial : ~0,32 $ (dominé par la création de cache du contexte
-projet/CLAUDE.md, ~53k tokens) — jamais négligeable, à budgéter en conséquence."""
+empiriquement lors de cette mission par DEUX sondages réels distincts : (1) un tour échoué par
+dépassement de budget — objet PLAT `type`/`subtype`/`is_error`/`session_id`/`total_cost_usd`/
+`duration_ms`/`usage`, jamais de `result` (aucune réponse produite) ; (2) un tour réussi avec
+`--json-schema` — porte EN PLUS un champ `structured_output` (l'objet validé par le schéma,
+DÉJÀ un dict natif, jamais une chaîne à re-parser) ET, séparément, un `result` qui est la MÊME
+donnée réencodée en chaîne JSON. `structured_output` est la source AUTORITATIVE de
+`result_structured` — trouvé nécessaire après que le canary réel de cette mission a silencieusement
+traité un Reviewer dont le parsing de `result` avait échoué comme "review propre, 0 finding" (le
+verdict affiché restait `?`, jamais authentiquement `CLEAN`) : `result` peut porter du texte
+supplémentaire autour du JSON (markdown, préambule) que `structured_output` n'a jamais. Coût réel
+observé pour un tour trivial : ~0,32-0,41 $ (dominé par la création de cache du contexte
+projet/CLAUDE.md, ~53-57k tokens) — jamais négligeable, à budgéter en conséquence."""
 
 from __future__ import annotations
 
@@ -95,14 +101,20 @@ class ClaudeInvocationResult:
 
     @property
     def result_structured(self) -> Optional[dict]:
-        """La réponse structurée d'un appel `--json-schema` — forme exacte non confirmée
-        empiriquement par cette mission (le sondage réel a épuisé son budget avant réponse) : gère
-        les deux formes plausibles sans supposer laquelle Claude Code produit — `result` déjà un
-        objet (retourné tel quel), ou `result` une chaîne JSON-encodée (désérialisée). Retourne
-        `None` pour toute autre forme — jamais une exception propagée pour une sortie inattendue
-        d'un processus externe."""
+        """La réponse structurée d'un appel `--json-schema` — confirmé empiriquement (sondage réel
+        de cette mission) : `structured_output` est un dict NATIF déjà validé par le schéma, la
+        source AUTORITATIVE, préférée en premier. Repli sur `result` (dict déjà, ou chaîne
+        JSON-encodée à désérialiser) seulement si `structured_output` est absent — ex. version de
+        Claude Code différente, ou aucun `--json-schema` fourni. Retourne `None` si rien n'est
+        exploitable — jamais une exception propagée pour une sortie inattendue d'un processus
+        externe, et jamais un dict vide qui se ferait passer pour "aucun finding" (voir
+        `cli.py:real_reviewer_fn`, qui doit traiter ce `None` comme un échec technique, pas comme
+        une review propre — trouvé réellement silencieux lors du canary de cette mission)."""
         if self.parsed is None:
             return None
+        structured = self.parsed.get("structured_output")
+        if isinstance(structured, dict):
+            return structured
         raw = self.parsed.get("result")
         if isinstance(raw, dict):
             return raw

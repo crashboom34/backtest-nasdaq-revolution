@@ -185,6 +185,37 @@ def test_result_structured_parses_a_json_encoded_result_string():
     assert result.result_structured == {"verdict": "CLEAN"}
 
 
+def test_result_structured_prefers_the_real_structured_output_field(tmp_path):
+    """Forme RÉELLEMENT confirmée par un second sondage empirique de cette mission (un appel
+    `--json-schema` réussi) : `structured_output` est un dict natif déjà validé, prioritaire sur
+    `result` (qui peut porter du texte parasite autour du JSON, ce qui a fait réellement échouer
+    le parsing de `result` lors du canary — un Reviewer dont l'échec de parsing ressemblait
+    silencieusement à "review propre, 0 finding")."""
+    real_shape = (
+        '{"is_error":false,"session_id":"23c726cd-d4a8-425f-bd6b-c9256dfafcee",'
+        '"result":"{\\"verdict\\":\\"CLEAN\\",\\"findings\\":[]}",'
+        '"structured_output":{"verdict":"CLEAN","findings":[]}}'
+    )
+
+    def fake_run(argv):
+        return 0, real_shape, ""
+
+    invoker = ClaudeInvoker(run_fn=fake_run)
+    result = invoker.run("x")
+
+    assert result.result_structured == {"verdict": "CLEAN", "findings": []}
+
+
+def test_result_structured_falls_back_to_result_when_structured_output_absent():
+    def fake_run(argv):
+        return 0, '{"is_error": false, "result": "{\\"verdict\\": \\"CLEAN\\"}"}', ""
+
+    invoker = ClaudeInvoker(run_fn=fake_run)
+    result = invoker.run("x")
+
+    assert result.result_structured == {"verdict": "CLEAN"}
+
+
 def test_result_structured_handles_result_already_being_a_nested_object():
     """Deuxième forme plausible de sortie `--json-schema`, non confirmée empiriquement (le sondage
     réel a épuisé son budget avant réponse) — `result_structured` doit gérer les deux sans

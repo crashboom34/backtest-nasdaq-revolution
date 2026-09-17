@@ -375,13 +375,28 @@ def _build_real_supervisor() -> AutopilotSupervisor:
                 "raw_output": result.stderr or result.stdout,
                 "summary": "review indépendante en échec technique",
             }
-        body = result.result_structured or {}
-        findings = body.get("findings", []) if isinstance(body, dict) else []
+        body = result.result_structured
+        # V1.1 : un échec de PARSING de la sortie structurée ne doit JAMAIS ressembler à une
+        # review propre — trouvé réellement silencieux lors du canary de cette mission (`body`
+        # retombait sur `{}`, "0 finding(s) — verdict=?" étant indiscernable d'un vrai verdict
+        # CLEAN). `verdict` ET `findings` sont REQUIS par `REVIEW_JSON_SCHEMA` — leur absence est
+        # elle-même la preuve que la sortie structurée n'a pas été correctement obtenue, traitée
+        # comme un échec TECHNIQUE de la review (jamais un commit/push sur cette base).
+        if not isinstance(body, dict) or "verdict" not in body or "findings" not in body:
+            return {
+                "success": False,
+                "raw_output": (
+                    f"sortie structurée du reviewer non exploitable (verdict/findings absents) : "
+                    f"{result.stdout[:500]}"
+                ),
+                "summary": "review indépendante en échec technique (sortie structurée invalide)",
+            }
+        findings = body.get("findings", [])
         blocking = [f for f in findings if isinstance(f, dict) and f.get("severity") in ("BLOCKER", "MAJOR")]
         return {
             "success": True,
             "blocking_findings": blocking,
-            "summary": f"{len(findings)} finding(s) — verdict={body.get('verdict', '?') if isinstance(body, dict) else '?'}",
+            "summary": f"{len(findings)} finding(s) — verdict={body.get('verdict')}",
             "session_id": result.session_id,
         }
 
