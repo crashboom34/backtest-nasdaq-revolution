@@ -1831,11 +1831,58 @@ Une note MINOR reste documentée sans bloquer l'activation : le préfixe textuel
 finding original d'une note de constat d'échec pourrait théoriquement entrer en collision avec un
 finding réel commençant par cette même phrase exacte — jugé négligeable en pratique.
 
-**Tests** : 201 tests Autopilot dédiés (52 dans `test_autopilot_supervisor.py`, 35 dans
+**Tests** : 206 tests Autopilot dédiés (52 dans `test_autopilot_supervisor.py`, 39 dans
 `test_autopilot_cli.py`, plus les tests `claude_invoker`), tous verts. Suite complète du projet :
-1243/1243, y compris le travail scientifique de Slice 2 laissé intact et non commité dans ce
+1261/1261, y compris le travail scientifique de Slice 2 laissé intact et non commité dans ce
 worktree pendant toute cette mission.
 
 **Publication** : commit `1ddb832` (les 4 fichiers de correction, isolé du travail scientifique de
-Slice 2) poussé vers `origin/autopilot/permanent` (branche neuve, aucune divergence, jamais
-`master`) — SHA local et distant vérifiés identiques après push.
+Slice 2) puis `3378d36` (documentation) poussés vers `origin/autopilot/permanent` (branche neuve,
+aucune divergence, jamais `master`) — SHA local et distant vérifiés identiques après chaque push.
+
+### Reprise réelle de Slice 2 — 2 bugs opérationnels réels supplémentaires trouvés et corrigés
+
+La reprise effective (`autopilot resume`) depuis l'état `TESTING` sauvegardé a réellement exécuté
+la suite de tests ciblée (1257 passed), puis une review indépendante réelle a trouvé 3 findings
+bloquants sur le code Walk-Forward, corrigés par un vrai cycle Developer, puis une seconde review
+réelle en a trouvé 3 autres — dont un **BLOCKER scientifique réel** : `run_fold_test()` ramène
+silencieusement `score_test` à `0.0` dès qu'une exécution TEST authentique (trades réels,
+métriques saines) échoue un filtre d'éligibilité pensé pour TRAIN (`FilterConfig.min_trades`
+notamment), masquant exactement le signal de sur-apprentissage que le Walk-Forward existe pour
+révéler — reproduit empiriquement par le Reviewer indépendant, jamais injecté. Plus 2 MAJOR :
+`fold_seed` n'alimente jamais le RNG du mode de recherche `general`/échantillonnage stratifié
+(reproductibilité non garantie) ; aucun test ne verrouille `end_boundary="inclusive"` côté TRAIN
+(régression silencieuse non détectée par la suite actuelle, vérifié empiriquement par mutation).
+
+Deux tentatives de review suivantes ont ensuite CRASHÉ de façon répétée (`exception non gérée dans
+reviewer_fn`), épuisant `max_attempts=3` (5 tentatives avec diagnostic) et escaladant vers
+`HUMAN_GATE_REQUIRED` — la cause réelle, retrouvée en lisant `stdout`/`stderr` du process :
+`FileNotFoundError: [WinError 206] Nom de fichier ou extension trop long`. Deux bugs opérationnels
+réels, corrigés avec un test de régression chacun (commit `47af120`) :
+
+1. **Le prompt `claude -p` était un ÉLÉMENT DE LA LIGNE DE COMMANDE** (`build_claude_argv()`
+   l'ajoutait en dernier argument) — un lot de diff de review volumineux (walk_forward.py/ses
+   tests, après deux cycles de correction) a dépassé la limite de longueur de ligne de commande de
+   `CreateProcess` sous Windows (~32k caractères). Confirmé empiriquement
+   (`echo "..." | claude -p --output-format json` répond correctement) : `claude -p` lit le
+   prompt depuis STDIN en l'absence d'argument positionnel. `ClaudeInvoker`/`_real_run()`
+   transmettent désormais TOUJOURS le prompt via `subprocess.run(..., input=prompt)`, jamais
+   `argv` — plus aucune limite de longueur pratique de ce type.
+2. **Le dernier `print()` du CLI plantait sur un `stop_reason` contenant un emoji** (le rapport
+   Human Gate en inclut un) — la console Windows par défaut encode en `cp1252`, incapable de le
+   représenter, masquant le VRAI code de sortie (`HUMAN_GATE_REQUIRED`) derrière un code de sortie
+   1 générique de crash Python, alors que tout le travail réel (verrou libéré, état persisté)
+   s'était déjà terminé correctement. Nouveau `_ensure_utf8_stdio()` (appelé en tête de `main()`)
+   reconfigure `stdout`/`stderr` en UTF-8 avant tout affichage.
+
+**État réel actuel de Slice 2 (non résolu, décision humaine requise)** : `HUMAN_GATE_REQUIRED`.
+Le worktree permanent porte toujours le vrai code écrit (`optimizer.py`, `walk_forward.py`,
+`tests/test_optimizer.py`, `tests/test_walk_forward.py`, non commité, intact). `pending_findings`
+a été vidé par les cycles de correction déjà appliqués (les 3 premiers findings et probablement une
+partie des 3 seconds) — le contenu exact des findings ci-dessus a été retrouvé dans
+`.autopilot/state/current_state.json.history.json` (historique borné des transitions), jamais
+perdu. Aucune transition automatique n'existe depuis `HUMAN_GATE_REQUIRED` (`ALLOWED_TRANSITIONS`
+ne permet que `STOPPED`/`PLANNING`, et `PLANNING` rebloquerait immédiatement sur
+`requires_clean_worktree` contre le propre travail non commité de Slice 2) — jamais contourné ni
+forcé par cette mission, conformément à l'exigence explicite qu'un Human Gate reste une décision
+humaine.

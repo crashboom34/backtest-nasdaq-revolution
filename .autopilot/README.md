@@ -62,7 +62,7 @@ opérationnel et validé en conditions réelles lors de la mission « Autopilot 
 - Des **commandes CLI** (`scripts/autopilot/cli.py`) : `status`, `stop` (signal + verrou),
   `start`/`resume` (boucle réelle).
 
-201 tests Autopilot dédiés, tous verts. Suite complète du projet également verte (1243/1243).
+206 tests Autopilot dédiés, tous verts. Suite complète du projet également verte (1261/1261).
 
 ## Preuve réelle — canary V1.1 (2026-09-17)
 
