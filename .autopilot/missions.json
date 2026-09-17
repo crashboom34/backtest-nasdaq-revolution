@@ -8,6 +8,24 @@
       "depends_on": []
     },
     {
+      "id": "CANARY-FINALIZATION",
+      "title": "Canary finalisation V1.1 — validation intégrée réelle (aucune valeur produit)",
+      "status": "PLANNED",
+      "prompt_file": "prompts/canary-finalization.md",
+      "depends_on": [],
+      "allowed_paths": ["scripts/autopilot/canary_fixture.py", ".autopilot/canary/"],
+      "forbidden_paths": ["strategies/", "results/", "docs/adr/", "engine.py", "optimizer.py", "walk_forward.py", "app.py", "nasdaq_3m.csv", "app_corrupted_backup.py"],
+      "targeted_tests": ["tests/test_canary_finalization.py"],
+      "regression_tests": [],
+      "risk_level": "low",
+      "max_attempts": 2,
+      "max_budget_usd": 3.0,
+      "requires_clean_worktree": true,
+      "scientific_contracts": [],
+      "human_gate_conditions": [],
+      "completion_evidence": [".autopilot/canary/finalization_marker.md existe", "tests/test_canary_finalization.py passe intégralement"]
+    },
+    {
       "id": "AF-V-02-SLICE-2",
       "title": "AF-V-02 Slice 2 — Optimizer TRAIN-only + sélection Top-1 + exécution TEST par fold",
       "status": "PLANNED",
