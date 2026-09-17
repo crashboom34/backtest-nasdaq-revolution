@@ -6,24 +6,6 @@
       "status": "BLOCKED",
       "prompt_file": "prompts/example.md",
       "depends_on": []
-    },
-    {
-      "id": "CANARY-V1-1",
-      "title": "Canary V1.1 — validation intégrée réelle (aucune valeur produit)",
-      "status": "PLANNED",
-      "prompt_file": "prompts/canary-v1-1.md",
-      "depends_on": [],
-      "allowed_paths": [".autopilot/canary/"],
-      "forbidden_paths": ["strategies/", "results/", "docs/adr/", "engine.py", "optimizer.py", "app.py", "nasdaq_3m.csv", "app_corrupted_backup.py"],
-      "targeted_tests": ["tests/test_atomic_json_store.py"],
-      "regression_tests": [],
-      "risk_level": "low",
-      "max_attempts": 2,
-      "max_budget_usd": 2.0,
-      "requires_clean_worktree": true,
-      "scientific_contracts": [],
-      "human_gate_conditions": [],
-      "completion_evidence": [".autopilot/canary/CANARY_MARKER.md existe et contient l'horodatage"]
     }
   ]
 }
