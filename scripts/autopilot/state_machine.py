@@ -73,7 +73,8 @@ ALLOWED_TRANSITIONS: dict = {
     ),
     AutopilotState.REVIEWING: (
         AutopilotState.PRE_COMMIT_CHECK, AutopilotState.CORRECTING, AutopilotState.WAITING_FOR_CLAUDE,
-        AutopilotState.WAITING_FOR_EXTERNAL_RESOURCE, AutopilotState.BLOCKED_SAFETY,
+        AutopilotState.WAITING_FOR_EXTERNAL_RESOURCE, AutopilotState.HUMAN_GATE_REQUIRED,
+        AutopilotState.BLOCKED_SAFETY,
     ),
     # V1.1 : CORRECTING invoque désormais réellement le Developer avec les findings (mission
     # Autopilot V1.1 §3.4) — peut donc échouer exactement comme DEVELOPING (WAITING_FOR_CLAUDE/
@@ -98,9 +99,13 @@ ALLOWED_TRANSITIONS: dict = {
     ),
     # V1.1 : "resume" doit réellement reprendre la phase interrompue (`resume_to_phase`), pas
     # seulement PLANNING — voir `_resume_to_recorded_phase()` dans supervisor.py (mission §3.5).
+    # PLANNING reste un repli LÉGAL ici (symétrique à WAITING_FOR_EXTERNAL_RESOURCE) : un fichier
+    # d'état pré-V1.1 (champ `resume_to_phase` absent, `None` par défaut) ou toute valeur
+    # invalide/plus autorisée doit pouvoir se rétablir en repartant d'une sélection de mission,
+    # jamais planter — trouvé réellement reproductible par la revue safety/architecture V1.1.
     AutopilotState.WAITING_FOR_CLAUDE: (
         AutopilotState.DEVELOPING, AutopilotState.TESTING, AutopilotState.REVIEWING,
-        AutopilotState.CORRECTING, AutopilotState.STOPPED,
+        AutopilotState.CORRECTING, AutopilotState.PLANNING, AutopilotState.STOPPED,
     ),
     AutopilotState.WAITING_FOR_EXTERNAL_RESOURCE: (
         AutopilotState.DEVELOPING, AutopilotState.TESTING, AutopilotState.REVIEWING,

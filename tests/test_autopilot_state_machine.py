@@ -68,6 +68,18 @@ def test_transition_table_covers_every_target_the_supervisor_actually_uses():
     assert AutopilotState.WAITING_FOR_EXTERNAL_RESOURCE in ALLOWED_TRANSITIONS[AutopilotState.TESTING]
 
 
+def test_transition_table_covers_v1_1_escalation_and_resume_targets():
+    """Régression — revue safety/architecture V1.1, 2 BLOCKERs empiriquement reproduits :
+    (1) `REVIEWING` n'autorisait pas `HUMAN_GATE_REQUIRED`, alors que `_handle_reviewing()` route
+    un échec technique de review à travers `_handle_failure()` — qui peut escalader vers ce même
+    état — crashant sur un échec de review pourtant ordinaire et répété. (2) le repli de
+    `_resume_to_recorded_phase()` (`PLANNING`) n'était pas autorisé depuis `WAITING_FOR_CLAUDE`,
+    crashant toute reprise d'un fichier d'état pré-V1.1 (`resume_to_phase` absent/`None` par
+    défaut) ou d'un état corrompu/invalide."""
+    assert AutopilotState.HUMAN_GATE_REQUIRED in ALLOWED_TRANSITIONS[AutopilotState.REVIEWING]
+    assert AutopilotState.PLANNING in ALLOWED_TRANSITIONS[AutopilotState.WAITING_FOR_CLAUDE]
+
+
 def test_illegal_transition_is_rejected(tmp_path):
     """READY -> PUSHING n'a aucun sens (aucune mission planifiée/développée/testée entre les
     deux) — doit être rejetée, jamais silencieusement acceptée."""

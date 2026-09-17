@@ -204,6 +204,60 @@ def test_real_git_ops_push_refuses_on_real_divergence_never_forcing(tmp_path, mo
         git_ops.push()
 
 
+def test_run_readonly_git_routes_through_git_safety_before_any_subprocess(monkeypatch):
+    """Régression — revue safety/architecture V1.1 : plusieurs commandes Git en lecture seule
+    (`git status`, `git diff HEAD`, `git rev-parse`, `git merge-base --is-ancestor`) contournaient
+    encore `git_safety.check_git_command()`, malgré la promesse documentée du module. Aucune
+    n'est aujourd'hui sur liste noire, mais toute commande Git doit passer par ce garde sans
+    exception — testé ici avec un argv volontairement interdit pour le prouver."""
+    import scripts.autopilot.cli as cli_module
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("subprocess.run() ne doit jamais être appelé pour une commande interdite")
+
+    monkeypatch.setattr(cli_module.subprocess, "run", _boom)
+
+    with pytest.raises(cli_module.ForbiddenGitCommandError):
+        cli_module._run_readonly_git(["git", "reset", "--hard"])
+
+
+def test_run_readonly_git_passes_a_timeout_to_subprocess(monkeypatch):
+    import scripts.autopilot.cli as cli_module
+
+    seen_kwargs = {}
+
+    def fake_run(argv, **kwargs):
+        seen_kwargs.update(kwargs)
+        return _fake_result(stdout="")
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+
+    cli_module._run_readonly_git(["git", "status", "--porcelain"])
+
+    assert seen_kwargs.get("timeout") == cli_module.GIT_TIMEOUT_SECONDS
+
+
+def test_real_tester_fn_pytest_timeout_never_raises_and_is_classified_as_a_failure(monkeypatch):
+    """Régression — revue safety/architecture V1.1 : un `pytest` bloqué devait être borné et ne
+    jamais laisser `subprocess.TimeoutExpired` s'échapper hors de `real_tester_fn` (contrat :
+    toujours un dict, jamais une exception non rattrapée hors de `run_one_step()`)."""
+    import subprocess
+
+    import scripts.autopilot.cli as cli_module
+
+    def fake_run(argv, **kwargs):
+        assert kwargs.get("timeout") == cli_module.PYTEST_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    supervisor = cli_module._build_real_supervisor()
+
+    result = supervisor._tester_fn(None)
+
+    assert result["success"] is False
+    assert "timeout" in result["summary"].lower()
+
+
 def test_real_tester_fn_runs_the_full_suite_when_mission_is_none(monkeypatch):
     """Régression — trouvé non testé par la revue reproductibilité/scope V1.1 : les 4 branches de
     `real_tester_fn` (mission absente, targeted_tests vide, targeted en échec, targeted en succès

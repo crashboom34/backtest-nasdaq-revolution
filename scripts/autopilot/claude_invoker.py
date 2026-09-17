@@ -127,6 +127,15 @@ class ClaudeInvocationResult:
         return None
 
 
+# Filet de sécurité final (mission §9/§3.6) — trouvé absent par la revue safety/architecture V1.1 :
+# sans cela, un `claude -p` bloqué (réseau, CLI qui hang malgré `--output-format json`) rendait le
+# signal d'arrêt coopératif (`StopSignal`, vérifié seulement ENTRE deux étapes de la boucle) sans
+# effet pratique — un hang à l'intérieur d'UNE étape restait bloqué indéfiniment. Généreux (30 min)
+# — un vrai travail de développement légitime peut prendre du temps ; ce n'est pas un plafond de
+# coût (`--max-budget-usd` s'en charge), seulement une garantie de terminaison éventuelle.
+CLAUDE_SUBPROCESS_TIMEOUT_SECONDS = 1800
+
+
 def _real_run(argv: List[str]) -> Tuple[int, str, str]:
     import subprocess
 
@@ -135,9 +144,16 @@ def _real_run(argv: List[str]) -> Tuple[int, str, str]:
     # non fatal pour le process appelant mais une sortie potentiellement tronquée) lors du canary
     # V1.1 : les réponses JSON de `claude -p` peuvent porter des caractères accentués (dépôt en
     # français), tout comme le diff/les messages Git.
-    completed = subprocess.run(
-        argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+    try:
+        completed = subprocess.run(
+            argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=CLAUDE_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Jamais une exception non rattrapée hors de `ClaudeInvoker.run()` (contrat : toujours un
+        # `ClaudeInvocationResult`, jamais levée) — convertie en échec classifiable normalement.
+        stderr = (exc.stderr or "") + f"\n[timeout après {CLAUDE_SUBPROCESS_TIMEOUT_SECONDS}s]"
+        return 1, exc.stdout or "", stderr
     return completed.returncode, completed.stdout, completed.stderr
 
 

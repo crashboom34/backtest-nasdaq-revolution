@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.autopilot.mission_queue import Mission, save_missions
 from scripts.autopilot.quota_detector import FailureCategory
-from scripts.autopilot.state_machine import AutopilotState, AutopilotStateStore
+from scripts.autopilot.state_machine import AutopilotState, AutopilotStateRecord, AutopilotStateStore
 from scripts.autopilot.supervisor import AutopilotSupervisor, FakeGitOps, SingleInstanceLock, StopSignal
 
 
@@ -483,6 +483,51 @@ def test_a_lock_held_by_the_current_live_process_is_never_reclaimed(tmp_path):
     assert stranger.acquire() is False  # jamais volé tant que le détenteur est vivant
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only : OpenProcess/GetLastError")
+def test_pid_is_alive_windows_never_treats_access_denied_as_dead(monkeypatch):
+    """Régression — revue safety/architecture V1.1, BLOCKER empiriquement reproduit :
+    `OpenProcess` renvoie NULL aussi bien pour un PID qui n'existe pas QUE pour un PID bien
+    vivant mais inaccessible (contexte de sécurité différent, process protégé, EDR/AV) — confondre
+    les deux permettait de voler un verrou activement détenu par un process vivant. Seul
+    `ERROR_INVALID_PARAMETER` (87) doit être traité comme "mort" ; tout le reste (dont
+    `ERROR_ACCESS_DENIED`, 5) doit rester "vivant", conformément au contrat documenté de la
+    fonction ("en cas de doute... jamais voler un verrou par erreur")."""
+    import ctypes
+
+    from scripts.autopilot.supervisor import _pid_is_alive
+
+    class _FakeKernel32:
+        def OpenProcess(self, access, inherit, pid):
+            return 0  # échec — simule OpenProcess refusant la poignée
+
+        def CloseHandle(self, handle):
+            return True
+
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, use_last_error=False: _FakeKernel32(), raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)  # ERROR_ACCESS_DENIED
+
+    assert _pid_is_alive(1234) is True  # accès refusé -> toujours considéré vivant, jamais volé
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only : OpenProcess/GetLastError")
+def test_pid_is_alive_windows_treats_invalid_parameter_as_dead(monkeypatch):
+    import ctypes
+
+    from scripts.autopilot.supervisor import _pid_is_alive
+
+    class _FakeKernel32:
+        def OpenProcess(self, access, inherit, pid):
+            return 0
+
+        def CloseHandle(self, handle):
+            return True
+
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, use_last_error=False: _FakeKernel32(), raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 87, raising=False)  # ERROR_INVALID_PARAMETER
+
+    assert _pid_is_alive(1234) is False  # PID structurellement inexistant -> mort, récupérable
+
+
 def test_force_release_clears_a_lock_held_by_a_different_process_instance(tmp_path):
     """cmd_stop (cli.py) s'exécute dans une invocation séparée de celle qui a démarré la boucle —
     sa propre instance de SingleInstanceLock n'a donc jamais `_held=True`. `release()` seul ne
@@ -567,6 +612,51 @@ def test_repeated_identical_test_failure_escalates_to_human_gate_from_testing(tm
     assert final_state == AutopilotState.HUMAN_GATE_REQUIRED
     record = state_store.load()
     assert "assertionerror" in record.stop_reason.lower()
+
+
+def test_repeated_identical_review_failure_escalates_to_human_gate_from_reviewing(tmp_path):
+    """Régression — revue safety/architecture V1.1, BLOCKER empiriquement reproduit :
+    `ALLOWED_TRANSITIONS[REVIEWING]` n'incluait pas `HUMAN_GATE_REQUIRED`, alors qu'un échec
+    TECHNIQUE de review répété (`reviewer_fn` renvoyant `success: False` — exactement ce que
+    `real_reviewer_fn` renvoie sur un Reviewer qui échoue à produire une sortie exploitable, voir
+    le correctif "sortie structurée mal interprétée") route à travers `_handle_failure()`, qui
+    peut cibler `HUMAN_GATE_REQUIRED` — un `IllegalTransitionError` non rattrapé crashait alors
+    tout le process `autopilot start`/`resume`, et comme l'exception survient AVANT la
+    persistance de l'état, une reprise ultérieure retombait sur le même crash indéfiniment."""
+    def always_broken_reviewer(mission):
+        return {"success": False, "raw_output": "AssertionError: reviewer crashed"}
+
+    supervisor, git_ops, state_store = _make_supervisor(
+        tmp_path, reviewer_fn=always_broken_reviewer, failure_limit=2,
+    )
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until(
+        {AutopilotState.WAITING_FOR_CLAUDE, AutopilotState.WAITING_FOR_EXTERNAL_RESOURCE,
+         AutopilotState.HUMAN_GATE_REQUIRED}, max_steps=200,
+    )
+
+    assert final_state == AutopilotState.HUMAN_GATE_REQUIRED
+    assert git_ops.committed is False  # jamais commité sur la base d'une review qui a échoué
+
+
+def test_resume_from_waiting_for_claude_with_no_recorded_resume_phase_falls_back_to_planning(tmp_path):
+    """Régression — revue safety/architecture V1.1, BLOCKER empiriquement reproduit : un fichier
+    d'état pré-V1.1 (`resume_to_phase` absent du dataclass à l'époque, donc `None` par défaut au
+    chargement) ou tout état corrompu/manuel laissé en `WAITING_FOR_CLAUDE` sans `resume_to_phase`
+    valide faisait planter `_resume_to_recorded_phase()` avec `IllegalTransitionError` — le repli
+    `PLANNING` n'étant pas une transition autorisée depuis `WAITING_FOR_CLAUDE` à l'époque."""
+    supervisor, git_ops, state_store = _make_supervisor(tmp_path)
+    supervisor.acquire_lock()
+    # Simule un fichier d'état où WAITING_FOR_CLAUDE a été atteint SANS resume_to_phase renseigné
+    # (comportement du Bootstrap V1, avant l'introduction de ce champ en V1.1).
+    state_store.save(AutopilotStateRecord(
+        phase=AutopilotState.WAITING_FOR_CLAUDE.value, mission_id="M1", resume_to_phase=None,
+    ))
+
+    final_state = supervisor.run_one_step()
+
+    assert final_state == AutopilotState.PLANNING
 
 
 def test_network_failure_during_testing_moves_to_waiting_for_external_resource(tmp_path):

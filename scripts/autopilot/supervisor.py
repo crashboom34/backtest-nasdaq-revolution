@@ -63,6 +63,15 @@ from scripts.autopilot.state_machine import (
 )
 
 
+_ERROR_INVALID_PARAMETER = 87  # Windows : code renvoyé par OpenProcess pour un PID qui n'existe
+# structurellement pas (jamais existé/déjà réutilisé par le OS pour un tout autre process) —
+# DISTINCT de ERROR_ACCESS_DENIED (5, le process existe mais est protégé/contexte de sécurité
+# différent). Confondre les deux a permis un vol de verrou actif, reproduit empiriquement par la
+# revue safety/architecture V1.1 : `OpenProcess` échoue aussi pour un process bien vivant mais
+# inaccessible (élévation différente, EDR/AV, process protégé) — seul `ERROR_INVALID_PARAMETER`
+# est une preuve fiable que le PID n'existe pas.
+
+
 def _pid_is_alive(pid: Optional[int]) -> bool:
     """Vérifie prudemment si `pid` correspond à un processus vivant. En cas de doute (erreur
     d'API, PID absent), retourne `True` — mission §3.6 : ne JAMAIS voler un verrou par erreur ;
@@ -71,10 +80,11 @@ def _pid_is_alive(pid: Optional[int]) -> bool:
         return True
     if os.name == "nt":
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
         if not handle:
-            return False
-        ctypes.windll.kernel32.CloseHandle(handle)
+            return ctypes.get_last_error() != _ERROR_INVALID_PARAMETER
+        kernel32.CloseHandle(handle)
         return True
     try:
         os.kill(int(pid), 0)

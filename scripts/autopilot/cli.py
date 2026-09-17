@@ -48,6 +48,33 @@ DEFAULT_MAX_BUDGET_USD = 3.0
 # d'échec, suggestion d'approche), jamais d'édition de fichiers : un modèle moins coûteux suffit.
 DIAGNOSTIC_MODEL = "claude-haiku-4-5-20251001"
 
+# V1.1 : bornes de temps explicites sur CHAQUE sous-processus réel (mission §9/§3.6) — trouvé
+# absent partout par la revue safety/architecture V1.1 : sans cela, un `git fetch`/`claude -p`/
+# `pytest` bloqué rendait le signal d'arrêt coopératif (`StopSignal`) sans effet pratique (vérifié
+# seulement ENTRE deux étapes, jamais pendant) — un hang restait bloqué indéfiniment, jamais
+# détecté ni récupérable autrement qu'en tuant le process manuellement. Des valeurs généreuses
+# (jamais des plafonds serrés qui casseraient un travail réel légitime), un filet de sécurité
+# final, pas un mécanisme d'arrêt réactif.
+GIT_TIMEOUT_SECONDS = 120
+PYTEST_TIMEOUT_SECONDS = 900
+CLAUDE_TIMEOUT_SECONDS = 1800
+
+
+def _run_readonly_git(argv: List[str], cwd: Path = REPO_ROOT):
+    """Exécute une commande Git réputée sans effet de bord (status/diff/rev-parse/merge-base),
+    toujours à travers `git_safety.check_git_command()` d'abord — trouvé par la revue safety/
+    architecture V1.1 : plusieurs de ces appels contournaient encore la garde malgré la promesse
+    documentée de `RealGitOps` ("chaque méthode passe par git_safety AVANT tout subprocess.run()
+    réel"). Aucune de ces commandes n'est aujourd'hui sur la liste noire, mais router tout appel
+    Git par ce garde, sans exception, évite qu'une future règle de sécurité ne les oublie."""
+    reason = git_safety.check_git_command(argv)
+    if reason:
+        raise ForbiddenGitCommandError(reason)
+    return subprocess.run(
+        argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=GIT_TIMEOUT_SECONDS,
+    )
+
 REVIEW_JSON_SCHEMA = json.dumps({
     "type": "object",
     "properties": {
@@ -93,7 +120,10 @@ class RealGitOps:
         reason = git_safety.check_git_command(argv)
         if reason:
             raise ForbiddenGitCommandError(reason)
-        result = subprocess.run(argv, cwd=self._repo_dir, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        result = subprocess.run(
+            argv, cwd=self._repo_dir, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=GIT_TIMEOUT_SECONDS,
+        )
         if result.returncode != 0:
             raise RuntimeError(f"Commande Git échouée ({' '.join(argv)}) : {result.stderr}")
         return result.stdout
@@ -185,14 +215,22 @@ class RealGitOps:
             origin_sha = None
         head_sha = (self.current_head_sha() or "").strip()
         if origin_sha and origin_sha != head_sha:
-            is_ancestor = subprocess.run(
-                ["git", "merge-base", "--is-ancestor", origin_sha, "HEAD"],
-                cwd=self._repo_dir, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            )
-            if is_ancestor.returncode != 0:
+            # `git merge-base --is-ancestor` : code 0 = ancêtre (avance normale) ; code 1 = PAS un
+            # ancêtre (vraie divergence) ; code >1 = erreur Git (réf invalide...), à distinguer
+            # d'une divergence réelle plutôt que de tout confondre sous le même message (précision
+            # relevée par la revue safety/architecture V1.1 — les deux cas refusent le push, mais
+            # avec un diagnostic honnête).
+            is_ancestor = _run_readonly_git(["git", "merge-base", "--is-ancestor", origin_sha, "HEAD"], self._repo_dir)
+            if is_ancestor.returncode == 1:
                 raise RuntimeError(
                     f"divergence distante détectée (origin/master={origin_sha} n'est pas un "
                     f"ancêtre de HEAD={head_sha}) — jamais forcé, jamais poussé aveuglément."
+                )
+            if is_ancestor.returncode != 0:
+                raise RuntimeError(
+                    f"impossible de vérifier la divergence (git merge-base a échoué, code "
+                    f"{is_ancestor.returncode} : {is_ancestor.stderr.strip()}) — jamais poussé "
+                    "sans preuve de non-divergence."
                 )
         argv = ["git", "push", "origin", "master"]
         if force:
@@ -205,9 +243,7 @@ def _porcelain_paths(repo_dir: Path) -> List[str]:
     """Fichiers actuellement modifiés/non suivis dans l'arbre de travail (`git status --porcelain`)
     — utilisé pour déterminer RÉELLEMENT les `changed_files` d'un Developer réel (mission §3.2),
     jamais inventés par le modèle lui-même."""
-    result = subprocess.run(
-        ["git", "status", "--porcelain"], cwd=repo_dir, capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+    result = _run_readonly_git(["git", "status", "--porcelain"], repo_dir)
     paths: List[str] = []
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -320,7 +356,18 @@ def _build_real_supervisor() -> AutopilotSupervisor:
         # réutilisant délibérément l'environnement virtuel du dépôt principal comme interpréteur —
         # `sys.executable` est toujours le bon interpréteur, quel que soit le répertoire de travail.
         argv = [sys.executable, "-m", "pytest", "-q", *extra_args]
-        return subprocess.run(argv, cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        try:
+            return subprocess.run(
+                argv, cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=PYTEST_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Jamais une exception non rattrapée hors de `real_tester_fn()` (contrat : toujours un
+            # dict, jamais levée) — convertie en échec ordinaire, classifiable normalement.
+            return subprocess.CompletedProcess(
+                argv, returncode=1, stdout=exc.stdout or "",
+                stderr=(exc.stderr or "") + f"\n[timeout après {PYTEST_TIMEOUT_SECONDS}s]",
+            )
 
     def real_tester_fn(mission):
         # Mission §5 (V1.1) : tests CIBLÉS d'abord quand la mission les déclare (échec rapide,
@@ -347,9 +394,7 @@ def _build_real_supervisor() -> AutopilotSupervisor:
         # V1.1 (mission §3.3) : instance ClaudeInvoker FRAÎCHE — jamais `--resume` la session du
         # développeur — avec sortie structurée validée par schéma. `permission_mode="plan"` :
         # le reviewer ne doit JAMAIS pouvoir éditer de fichiers lui-même.
-        diff_result = subprocess.run(
-            ["git", "diff", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
+        diff_result = _run_readonly_git(["git", "diff", "HEAD"])
         diff_text = diff_result.stdout[:20000]
         contracts = ", ".join(mission.scientific_contracts) if mission and mission.scientific_contracts else "(aucun déclaré)"
         prompt = (
@@ -450,10 +495,7 @@ def _record_real_git_context(store: AutopilotStateStore) -> None:
     try:
         git_ops = RealGitOps()
         head = git_ops.current_head_sha()
-        origin = subprocess.run(
-            ["git", "rev-parse", "origin/master"], cwd=REPO_ROOT, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-        )
+        origin = _run_readonly_git(["git", "rev-parse", "origin/master"])
         origin_master = origin.stdout.strip() if origin.returncode == 0 else None
         store.update(head=head, origin_master=origin_master)
     except Exception:
@@ -501,12 +543,10 @@ def cmd_resume(args: argparse.Namespace) -> int:
         return 1
     real_head = None
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
+        result = _run_readonly_git(["git", "rev-parse", "HEAD"])
         if result.returncode == 0:
             real_head = result.stdout.strip()
-    except OSError:
+    except (OSError, ForbiddenGitCommandError, subprocess.TimeoutExpired):
         real_head = None
     if record.head and real_head and record.head != real_head:
         print(

@@ -16,6 +16,27 @@ from scripts.autopilot.claude_invoker import ClaudeInvoker, build_claude_argv
 from scripts.autopilot.quota_detector import FailureCategory
 
 
+def test_real_run_converts_a_subprocess_timeout_into_a_graceful_failure(monkeypatch):
+    """Régression — revue safety/architecture V1.1 : aucun sous-processus réel n'avait de
+    `timeout=`, rendant le signal d'arrêt coopératif sans effet pratique pendant un `claude -p`
+    bloqué. `_real_run()` doit désormais borner l'appel ET ne jamais laisser
+    `subprocess.TimeoutExpired` s'échapper (contrat : toujours un tuple, jamais une exception)."""
+    import subprocess
+
+    import scripts.autopilot.claude_invoker as invoker_module
+
+    def fake_run(argv, **kwargs):
+        assert kwargs.get("timeout") == invoker_module.CLAUDE_SUBPROCESS_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs["timeout"], output="partial", stderr="partial-err")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    exit_code, stdout, stderr = invoker_module._real_run(["claude", "-p", "x"])
+
+    assert exit_code == 1
+    assert "timeout" in stderr.lower()
+
+
 def test_real_run_uses_explicit_utf8_encoding_never_the_windows_default(monkeypatch):
     """Régression — trouvé RÉELLEMENT cassé pendant le canary V1.1 (mission §9) : un
     `UnicodeDecodeError` dans un thread lecteur de `subprocess` (`'charmap' codec can't decode
