@@ -46,7 +46,10 @@ def _ok_tester(mission):
 
 
 def _ok_reviewer(mission):
-    return {"success": True, "blocking_findings": [], "summary": "clean"}
+    # Finalisation sécurité (point 4.4) : la couverture de review est désormais OBLIGATOIRE dès
+    # qu'il existe des `artifacts` — "dummy.py" reflète ce que `_ok_developer` déclare réellement
+    # avoir modifié, jamais une couverture inventée sans rapport avec le changement réel.
+    return {"success": True, "blocking_findings": [], "summary": "clean", "reviewed_files": ["dummy.py"]}
 
 
 def _make_supervisor(
@@ -310,7 +313,7 @@ def test_blocking_review_finding_triggers_correcting_then_retests(tmp_path):
         calls["review_count"] += 1
         if calls["review_count"] == 1:
             return {"success": True, "blocking_findings": ["nom de variable trompeur"], "summary": "1 blocage"}
-        return {"success": True, "blocking_findings": [], "summary": "clean"}
+        return {"success": True, "blocking_findings": [], "summary": "clean", "reviewed_files": ["dummy.py"]}
 
     supervisor, git_ops, state_store = _make_supervisor(tmp_path, reviewer_fn=flaky_reviewer)
     supervisor.acquire_lock()
@@ -338,7 +341,7 @@ def test_correcting_really_invokes_the_developer_with_the_review_findings(tmp_pa
         review_calls["count"] += 1
         if review_calls["count"] == 1:
             return {"success": True, "blocking_findings": ["fix X"], "summary": "1 blocage"}
-        return {"success": True, "blocking_findings": [], "summary": "clean"}
+        return {"success": True, "blocking_findings": [], "summary": "clean", "reviewed_files": ["dummy.py"]}
 
     supervisor, git_ops, state_store = _make_supervisor(
         tmp_path, developer_fn=recording_developer, reviewer_fn=flaky_reviewer,
@@ -978,17 +981,239 @@ def test_pre_commit_check_blocks_when_a_file_to_commit_was_never_reviewed(tmp_pa
     assert git_ops.committed is False
 
 
-def test_pre_commit_check_proceeds_when_reviewed_files_is_not_reported(tmp_path):
-    """Une doublure de test qui ne renseigne pas `reviewed_files` (comportement historique) ne
-    doit JAMAIS être bloquée par ce nouveau contrôle — désactivé par défaut, actif seulement
-    quand l'information de couverture est réellement disponible."""
-    supervisor, git_ops, state_store = _make_supervisor(tmp_path)  # _ok_reviewer ne renseigne rien
+def test_pre_commit_check_blocks_when_reviewed_files_is_empty_but_artifacts_exist(tmp_path):
+    """Finalisation sécurité (point 4.4) : remplace l'ancien test qui exigeait le comportement
+    INVERSE (opt-in — une couverture absente/vide laissait passer silencieusement). Trouvé réel :
+    la couverture de review est désormais une garde OBLIGATOIRE, jamais un contrôle désactivé par
+    défaut — une liste `reviewed_files` absente ou vide alors qu'il existe réellement des
+    `artifacts` à committer ne doit JAMAIS permettre un commit/push, exactement comme si un
+    Reviewer avait été contourné entièrement."""
+    def reviewer_reporting_nothing(mission):
+        return {"success": True, "blocking_findings": [], "summary": "clean"}  # reviewed_files absent
+
+    supervisor, git_ops, state_store = _make_supervisor(tmp_path, reviewer_fn=reviewer_reporting_nothing)
     supervisor.acquire_lock()
 
-    final_state = supervisor.run_until({AutopilotState.NEXT_MISSION})
+    final_state = supervisor.run_until({AutopilotState.BLOCKED_SAFETY, AutopilotState.NEXT_MISSION})
+
+    assert final_state == AutopilotState.BLOCKED_SAFETY
+    assert state_store.load().blocked_reason_category == "unreviewed_files"
+    assert git_ops.committed is False
+
+
+def test_pre_commit_check_proceeds_when_there_are_no_artifacts_to_commit(tmp_path):
+    """Cas vacuité légitime : rien à committer (`artifacts=()`) ne doit jamais être bloqué par la
+    garde de couverture — il n'y a alors rien qui aurait pu échapper à la review."""
+    def developer_with_no_files(mission, attempt, findings=None):
+        return {"success": True, "changed_files": [], "raw_output": "rien à changer"}
+
+    def reviewer_reporting_nothing(mission):
+        return {"success": True, "blocking_findings": [], "summary": "clean"}
+
+    supervisor, git_ops, state_store = _make_supervisor(
+        tmp_path, developer_fn=developer_with_no_files, reviewer_fn=reviewer_reporting_nothing,
+    )
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until({AutopilotState.BLOCKED_SAFETY, AutopilotState.NEXT_MISSION})
 
     assert final_state == AutopilotState.NEXT_MISSION
     assert git_ops.committed is True
+
+
+def test_a_transient_correcting_failure_preserves_the_original_findings_to_fix(tmp_path):
+    """Finalisation sécurité (point 4.1) : bug réel confirmé — une retentative en place sur un
+    échec SANS RAPPORT survenant PENDANT CORRECTING (ex. `developer_fn` en erreur technique
+    transitoire) écrasait `pending_findings` avec une description du NOUVEL échec, perdant les
+    findings de review ORIGINAUX que CORRECTING existe pour résoudre. Doit désormais conserver ces
+    findings d'origine à travers un tel échec transitoire."""
+    develop_calls = []
+
+    def flaky_correcting_developer(mission, attempt, findings=None):
+        develop_calls.append(list(findings) if findings else None)
+        if len(develop_calls) == 2:
+            # 2e appel = 1re invocation de CORRECTING (après la review bloquante) : échoue pour
+            # une raison purement technique et TRANSITOIRE, sans rapport avec le finding lui-même —
+            # volontairement une catégorie ni QUOTA_LIMIT ni NETWORK (ces deux-là empruntent un
+            # chemin distinct qui ne touche déjà jamais `pending_findings`) pour cibler précisément
+            # la branche générique de retentative non-escaladante.
+            return {"success": False, "raw_output": "InternalToolError: échec technique isolé de l'outil"}
+        return {"success": True, "changed_files": ["dummy.py"], "raw_output": "ok"}
+
+    review_calls = {"count": 0}
+
+    def flaky_reviewer(mission):
+        review_calls["count"] += 1
+        if review_calls["count"] == 1:
+            return {"success": True, "blocking_findings": ["corriger le calcul de expectancy"], "summary": "1 blocage"}
+        return {"success": True, "blocking_findings": [], "summary": "clean", "reviewed_files": ["dummy.py"]}
+
+    supervisor, git_ops, state_store = _make_supervisor(
+        tmp_path, developer_fn=flaky_correcting_developer, reviewer_fn=flaky_reviewer,
+    )
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until({AutopilotState.NEXT_MISSION, AutopilotState.HUMAN_GATE_REQUIRED})
+
+    assert final_state == AutopilotState.NEXT_MISSION
+    # 1er appel (DEVELOPING) : None. 2e appel (CORRECTING, échoue) : ["corriger le calcul..."].
+    # 3e appel (CORRECTING retenté) : DOIT ENCORE porter le finding original, jamais seulement la
+    # description de l'échec transitoire du 2e appel.
+    assert len(develop_calls) == 3
+    assert develop_calls[1] == ["corriger le calcul de expectancy"]
+    assert any("corriger le calcul de expectancy" in f for f in develop_calls[2])
+
+
+def test_new_mission_never_inherits_the_previous_missions_test_and_review_evidence(tmp_path):
+    """Finalisation sécurité (point 5) : bug réel confirmé sur le canary réel de cette mission —
+    `current_state.json` affichait encore `tests_status`/`review_status`/`reviewed_files` de la
+    mission PRÉCÉDENTE une fois la mission suivante sélectionnée (ces champs ne sont réécrits
+    qu'une fois TESTING/REVIEWING réellement exécutés POUR la nouvelle mission). Les preuves de
+    tests/review d'une mission ne doivent jamais pouvoir être lues comme valant pour une autre."""
+    # `session_id` renseigné explicitement (contrairement à `_ok_developer`/`_ok_reviewer`) —
+    # sinon la réinitialisation de `developer_session_id`/`reviewer_session_id` serait indiscernable
+    # d'une simple absence de valeur (trouvé par la revue reproductibilité/scope de cette mission :
+    # le test précédent ne prouvait rien sur ces deux champs faute de valeur réelle à réinitialiser).
+    def developer_with_session(mission, attempt, findings=None):
+        return {"success": True, "changed_files": ["dummy.py"], "raw_output": "ok", "session_id": "dev-session-m1"}
+
+    def reviewer_with_session(mission):
+        return {
+            "success": True, "blocking_findings": [], "summary": "clean",
+            "reviewed_files": ["dummy.py"], "session_id": "rev-session-m1",
+        }
+
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(id="M1", title="Premiere", status="PLANNED", prompt_file="m1.md"),
+        Mission(id="M2", title="Seconde", status="PLANNED", prompt_file="m2.md"),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=developer_with_session,
+        tester_fn=_ok_tester, reviewer_fn=reviewer_with_session, git_ops=git_ops, lock=lock, branch="master",
+    )
+    supervisor.acquire_lock()
+
+    # M1 termine intégralement — pose des preuves de tests/review bien réelles dans l'état.
+    supervisor.run_until({AutopilotState.NEXT_MISSION})
+    record_after_m1 = state_store.load()
+    assert record_after_m1.mission_id == "M1"
+    assert record_after_m1.tests_status is not None
+    assert record_after_m1.review_status is not None
+    assert record_after_m1.reviewed_files != ()
+    assert record_after_m1.artifacts != ()
+    assert record_after_m1.developer_session_id == "dev-session-m1"
+    assert record_after_m1.reviewer_session_id == "rev-session-m1"
+    # Simule un `stop_reason` résiduel légitimement posé par M1 en cours de route (ex. résolution
+    # d'un BLOCKED_SAFETY — le seul cas réel où `stop_reason` se pose sans être ensuite nettoyé par
+    # aucune étape de succès ultérieure : PRE_COMMIT_CHECK/COMMITTING/PUSHING/CHECKPOINTED/
+    # NEXT_MISSION ne touchent jamais `stop_reason` sur leur chemin de succès, empiriquement
+    # confirmé par la revue reproductibilité/scope de cette mission).
+    state_store.update(stop_reason="BLOCKED_SAFETY résolu (cause 'disk_space' revérifiée) — reprise contrôlée.")
+
+    # NEXT_MISSION -> PLANNING -> DEVELOPING sélectionne et démarre M2 — ses preuves doivent déjà
+    # être réinitialisées à CE point, avant même que M2 ne développe/teste/revoie quoi que ce soit.
+    final_state = supervisor.run_until({AutopilotState.DEVELOPING})
+    assert final_state == AutopilotState.DEVELOPING
+    record_after_m2_selected = state_store.load()
+    assert record_after_m2_selected.mission_id == "M2"
+    assert record_after_m2_selected.tests_status is None
+    assert record_after_m2_selected.review_status is None
+    assert not record_after_m2_selected.reviewed_files
+    assert not record_after_m2_selected.artifacts
+    assert record_after_m2_selected.developer_session_id is None
+    assert record_after_m2_selected.reviewer_session_id is None
+    assert record_after_m2_selected.stop_reason is None
+
+
+def test_an_uncaught_developer_exception_never_crashes_the_supervisor(tmp_path):
+    """Finalisation sécurité (point 4.2) : une exception NON GÉRÉE levée par `developer_fn` lui-même
+    (bug interne, appel Git inattendu...) ne doit jamais se propager hors de `run_one_step()` —
+    convertie en échec ordinaire, classifiée et retentée exactement comme un `success: False` réel,
+    jamais un crash ni un succès implicite."""
+    def exploding_developer(mission, attempt, findings=None):
+        raise RuntimeError("bug interne inattendu du developer_fn")
+
+    supervisor, git_ops, state_store = _make_supervisor(tmp_path, developer_fn=exploding_developer)
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_one_step()  # BOOTSTRAPPING -> READY
+    final_state = supervisor.run_one_step()  # READY -> PLANNING
+    final_state = supervisor.run_one_step()  # PLANNING -> DEVELOPING
+    final_state = supervisor.run_one_step()  # DEVELOPING : ne doit JAMAIS lever
+
+    assert final_state in (AutopilotState.DEVELOPING, AutopilotState.WAITING_FOR_CLAUDE)
+    record = state_store.load()
+    assert record.stop_reason is not None
+    assert "bug interne inattendu" in record.stop_reason
+    assert git_ops.committed is False
+
+
+def test_an_uncaught_reviewer_exception_never_crashes_the_supervisor_nor_reads_as_clean(tmp_path):
+    """Symétrique pour `reviewer_fn` — bug réel confirmé (mission finalisation sécurité point
+    4.2) : `real_reviewer_fn` peut lever `ForbiddenGitCommandError` (ou toute autre exception) hors
+    de `_handle_committing`/`_handle_pushing`, les seuls handlers jusqu'ici protégés — jamais lue
+    comme une review propre, jamais un commit sur cette base."""
+    def exploding_reviewer(mission):
+        raise ValueError("git_safety a refusé une commande inattendue pendant la review")
+
+    supervisor, git_ops, state_store = _make_supervisor(tmp_path, reviewer_fn=exploding_reviewer)
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until({
+        AutopilotState.WAITING_FOR_CLAUDE, AutopilotState.HUMAN_GATE_REQUIRED, AutopilotState.NEXT_MISSION,
+    })
+
+    assert final_state != AutopilotState.NEXT_MISSION
+    assert git_ops.committed is False
+    record = state_store.load()
+    assert "git_safety a refusé" in (record.stop_reason or "")
+
+
+def test_diagnostic_after_a_testing_failure_still_routes_through_correcting(tmp_path):
+    """Finalisation sécurité (point 4.6) : bug réel confirmé — le cycle diagnostic (juste avant le
+    Human Gate) ignorait `retry_target`, retombant toujours sur une retentative EN PLACE. Pour une
+    escalade originant de TESTING (`retry_target=CORRECTING`), ceci laissait la phase à TESTING et
+    le prochain `run_one_step()` rappelait `tester_fn()` directement, SANS repasser par le
+    Developer — réintroduisant exactement l'anti-pattern éliminé par le correctif §2.C, pour ce
+    seul cycle. Le diagnostic doit désormais transiter vers CORRECTING (Developer réellement
+    rappelé) avant d'atteindre le Human Gate."""
+    # Événements horodatés dans l'ORDRE réel d'exécution — seule une assertion sur l'ORDRE relatif
+    # ("developer" après "diagnostic") distingue vraiment le correctif : compter les appels seuls
+    # ne suffit pas, un premier passage CORRECTING légitime (avant même le diagnostic, déjà
+    # fonctionnel) produit déjà >=2 appels indépendamment de ce bug précis.
+    events = []
+
+    def counting_developer(mission, attempt, findings=None):
+        events.append("developer")
+        return {"success": True, "changed_files": ["dummy.py"], "raw_output": "ok"}
+
+    def always_same_test_failure(mission):
+        return {"success": False, "summary": "AssertionError: test_foo a échoué identiquement"}
+
+    def diagnostic_fn(mission, signature):
+        events.append("diagnostic")
+        return {"approach_notes": "essayer une autre stratégie"}
+
+    supervisor, git_ops, state_store = _make_supervisor(
+        tmp_path, developer_fn=counting_developer, tester_fn=always_same_test_failure,
+        failure_limit=2, diagnostic_fn=diagnostic_fn,
+    )
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until(
+        {AutopilotState.WAITING_FOR_CLAUDE, AutopilotState.HUMAN_GATE_REQUIRED}, max_steps=200,
+    )
+
+    assert final_state == AutopilotState.HUMAN_GATE_REQUIRED
+    assert events.count("diagnostic") == 1
+    diagnostic_index = events.index("diagnostic")
+    # Le Developer doit être RÉELLEMENT rappelé APRÈS le diagnostic — jamais un retour direct sur
+    # TESTING seul (bug réel confirmé : l'ancien code ignorait `retry_target` ici).
+    assert "developer" in events[diagnostic_index + 1:]
 
 
 def test_mission_queue_emptied_between_ready_and_planning_reaches_completed(tmp_path):

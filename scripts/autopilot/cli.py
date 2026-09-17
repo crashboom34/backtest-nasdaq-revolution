@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import List, Optional, Set
 
@@ -36,6 +39,44 @@ STATE_PATH = AUTOPILOT_DIR / "state" / "current_state.json"
 MISSIONS_PATH = AUTOPILOT_DIR / "missions.json"
 
 
+def _resolve_git_common_dir_from_filesystem(repo_dir: Path) -> Optional[Path]:
+    """Repli SANS subprocess (finalisation sécurité point 4.3) : relit directement `.git` pour
+    retrouver le VRAI répertoire commun, avec le MÊME résultat que `git rev-parse
+    --git-common-dir` aurait produit. Jamais `repo_dir / ".git"` brut comme repli aveugle — dans
+    un worktree LIÉ, `.git` n'est qu'un FICHIER de redirection ("gitdir: <chemin>"), pas le
+    répertoire commun ; l'utiliser tel quel produirait un verrou DIFFÉRENT par worktree (bug réel
+    confirmé : un tel repli romprait exactement l'exclusion mutuelle inter-worktree que ce verrou
+    existe pour garantir — deux superviseurs, chacun avec son propre repli, ne se verraient plus).
+    Retourne `None` si la structure `.git` est illisible/inattendue — jamais une supposition
+    risquée qui diverge silencieusement d'un worktree à l'autre."""
+    git_entry = repo_dir / ".git"
+    try:
+        if git_entry.is_dir():
+            # Checkout principal (non lié) : `.git` EST déjà (normalement) le répertoire commun,
+            # sauf configuration rare avec son propre `commondir` — suivre la même indirection
+            # qu'un worktree lié dans ce cas pour rester correct.
+            common_file = git_entry / "commondir"
+            if common_file.is_file():
+                target = Path(common_file.read_text(encoding="utf-8").strip())
+                return (git_entry / target).resolve() if not target.is_absolute() else target
+            return git_entry.resolve()
+        if git_entry.is_file():
+            content = git_entry.read_text(encoding="utf-8").strip()
+            if not content.startswith("gitdir:"):
+                return None
+            gitdir = Path(content[len("gitdir:"):].strip())
+            if not gitdir.is_absolute():
+                gitdir = (repo_dir / gitdir).resolve()
+            common_file = gitdir / "commondir"
+            if not common_file.is_file():
+                return None
+            target = Path(common_file.read_text(encoding="utf-8").strip())
+            return (gitdir / target).resolve() if not target.is_absolute() else target
+    except OSError:
+        return None
+    return None
+
+
 def _git_common_dir(repo_dir: Path = REPO_ROOT) -> Path:
     """Répertoire `.git` RÉELLEMENT partagé entre TOUS les worktrees d'un même dépôt (via
     `git rev-parse --git-common-dir`) — jamais le `.git` local à un worktree lié, qui n'est qu'un
@@ -45,20 +86,35 @@ def _git_common_dir(repo_dir: Path = REPO_ROOT) -> Path:
     dérivaient de `AUTOPILOT_DIR` (`.autopilot/state/`, propre à CHAQUE worktree puisque
     gitignoré) — deux superviseurs lancés depuis deux worktrees différents avaient chacun leur
     PROPRE fichier de verrou, invisibles l'un à l'autre, pouvant tourner concurremment sans être
-    jamais détectés. Repli sur `<repo_dir>/.git` si la commande échoue (jamais une exception au
-    chargement du module)."""
+    jamais détectés.
+
+    Finalisation sécurité (point 4.3) : ni un `returncode != 0` NI une exception du subprocess
+    lui-même (`git` absent du PATH, permission refusée...) ne doivent lever — `LOCK_PATH`/
+    `STOP_SIGNAL_PATH` sont calculés à l'IMPORT du module, une exception ici rendrait même
+    `autopilot stop` inutilisable. Le repli résout la MÊME cible qu'un `git` fonctionnel aurait
+    donnée (lecture directe de la structure `.git`, jamais un chemin différent par worktree)."""
     import subprocess as _subprocess
 
-    result = _subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"], cwd=repo_dir, capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=30,
-    )
-    if result.returncode != 0:
-        return repo_dir / ".git"
-    common_dir = Path(result.stdout.strip())
-    if not common_dir.is_absolute():
-        common_dir = (repo_dir / common_dir).resolve()
-    return common_dir
+    result = None
+    try:
+        result = _subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"], cwd=repo_dir, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30,
+        )
+    except (OSError, _subprocess.SubprocessError):
+        result = None
+    if result is not None and result.returncode == 0:
+        common_dir = Path(result.stdout.strip())
+        if not common_dir.is_absolute():
+            common_dir = (repo_dir / common_dir).resolve()
+        return common_dir
+    resolved = _resolve_git_common_dir_from_filesystem(repo_dir)
+    if resolved is not None:
+        return resolved
+    # Dernier recours (structure `.git` elle-même illisible/inattendue) : jamais une exception au
+    # chargement du module, mais ce repli n'est plus garanti partagé entre worktrees dans ce cas
+    # limite documenté (`.autopilot/README.md`).
+    return repo_dir / ".git"
 
 
 # Verrou et signal d'arrêt VRAIMENT globaux au dépôt (partagés entre tous les worktrees) —
@@ -320,11 +376,23 @@ def _list_changed_files_for_review(repo_dir: Path = REPO_ROOT) -> List[str]:
     return files
 
 
-def _stage_intent_to_add(paths: List[str], repo_dir: Path = REPO_ROOT) -> None:
-    """`git add --intent-to-add`, scopé aux chemins fournis — jamais un `add -A` global. Rend un
-    NOUVEAU fichier non suivi visible à `git diff HEAD` comme un ajout complet, sans en committer
-    le contenu (mission finalisation V1.1 §2.B — bug réel confirmé : `git diff HEAD` seul
-    n'affiche RIEN pour un fichier jamais suivi, le rendant invisible au Reviewer)."""
+def _stage_intent_to_add_in_temp_index(paths: List[str], repo_dir: Path = REPO_ROOT) -> Optional[Path]:
+    """Rend les NOUVEAUX fichiers non suivis visibles à `git diff HEAD` comme un ajout complet,
+    sans en committer le contenu (mission finalisation V1.1 §2.B — bug réel confirmé : `git diff
+    HEAD` seul n'affiche RIEN pour un fichier jamais suivi, le rendant invisible au Reviewer).
+
+    Finalisation sécurité (point 4.5) : opère sur un INDEX TEMPORAIRE (`GIT_INDEX_FILE`), JAMAIS
+    l'index réel (`.git/index`) — bug réel confirmé de la version précédente : un `git add
+    --intent-to-add` posé sur l'index réel n'avait AUCUN mécanisme de nettoyage ; une mission qui
+    n'atteint jamais COMMITTING (ex. escalade Human Gate) laissait ces entrées en place
+    indéfiniment, pouvant rendre `dirty_worktree` non résoluble pour toujours. Jamais non plus un
+    `git reset` aveugle sur l'index réel en fin de review (qui pourrait défaire un staging
+    légitime posé par ailleurs) — l'index temporaire est simplement jeté (répertoire supprimé),
+    sans jamais avoir touché l'état réel.
+
+    Retourne le chemin du fichier d'index temporaire (l'appelant est responsable de supprimer son
+    répertoire parent une fois la review terminée), ou `None` si rien n'est réellement non suivi
+    (aucun index temporaire créé dans ce cas)."""
     # `git status --porcelain` (source de `paths`) ne rapporte un chemin en `??` que s'il existe
     # réellement dans l'arbre de travail — un contrôle `exists()` séparé serait redondant et
     # casserait la testabilité (aucune raison de toucher le disque réel ici).
@@ -334,19 +402,60 @@ def _stage_intent_to_add(paths: List[str], repo_dir: Path = REPO_ROOT) -> None:
         if tracked.returncode != 0:
             untracked.append(f)
     if not untracked:
-        return
-    argv = ["git", "add", "--intent-to-add", "--", *untracked]
+        return None
+    tmp_dir = Path(tempfile.mkdtemp(prefix="autopilot-review-index-"))
+    try:
+        tmp_index = tmp_dir / "index"
+        env = {**os.environ, "GIT_INDEX_FILE": str(tmp_index)}
+        read_tree_argv = ["git", "read-tree", "HEAD"]
+        reason = git_safety.check_git_command(read_tree_argv)
+        if reason:
+            raise ForbiddenGitCommandError(reason)
+        result = subprocess.run(
+            read_tree_argv, cwd=repo_dir, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=GIT_TIMEOUT_SECONDS, env=env,
+        )
+        if result.returncode != 0:
+            # Finalisation sécurité — bug réel confirmé par la revue indépendante : un code de
+            # retour ignoré ici laissait l'index temporaire silencieusement SOUS-SEEDÉ (jamais
+            # peuplé depuis HEAD) — un fichier déjà suivi et modifié apparaissait alors au diff
+            # comme une SUPPRESSION COMPLÈTE plutôt que sa vraie modification, une review fondée
+            # sur un diff fabriqué. Jamais un index partiellement initialisé retourné comme si de
+            # rien n'était.
+            raise RuntimeError(
+                "échec de `git read-tree HEAD` sur l'index temporaire de review — jamais un index "
+                f"partiellement initialisé retourné : {result.stderr.strip()}"
+            )
+        add_argv = ["git", "add", "--intent-to-add", "--", *untracked]
+        reason = git_safety.check_git_command(add_argv)
+        if reason:
+            raise ForbiddenGitCommandError(reason)
+        subprocess.run(
+            add_argv, cwd=repo_dir, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=GIT_TIMEOUT_SECONDS, env=env,
+        )
+        return tmp_index
+    except Exception:
+        # Finalisation sécurité — bug réel confirmé par la revue indépendante : si l'initialisation
+        # échoue APRÈS la création du répertoire temporaire (ex. `git add` lève), l'appelant ne
+        # peut jamais nettoyer un répertoire dont il n'a jamais reçu le chemin — cette fonction
+        # nettoie donc SON PROPRE répertoire avant de relever, jamais un répertoire abandonné sur
+        # disque à chaque échec.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+
+def _diff_for_file(path: str, repo_dir: Path = REPO_ROOT, index_file: Optional[Path] = None) -> str:
+    argv = ["git", "diff", "HEAD", "--", path]
     reason = git_safety.check_git_command(argv)
     if reason:
         raise ForbiddenGitCommandError(reason)
-    subprocess.run(
+    env = {**os.environ, "GIT_INDEX_FILE": str(index_file)} if index_file is not None else None
+    result = subprocess.run(
         argv, cwd=repo_dir, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=GIT_TIMEOUT_SECONDS,
+        timeout=GIT_TIMEOUT_SECONDS, env=env,
     )
-
-
-def _diff_for_file(path: str, repo_dir: Path = REPO_ROOT) -> str:
-    return _run_readonly_git(["git", "diff", "HEAD", "--", path], repo_dir).stdout
+    return result.stdout
 
 
 def _porcelain_paths(repo_dir: Path) -> List[str]:
@@ -561,86 +670,92 @@ def _build_real_supervisor(push_remote_ref: Optional[str] = None) -> AutopilotSu
                 "success": False, "raw_output": "aucun changement détecté pour la review",
                 "summary": "review indépendante en échec technique (rien à revoir)",
             }
-        _stage_intent_to_add(changed_files)
-
-        batches: List[tuple] = []
-        current_files: List[str] = []
-        current_text = ""
-        covered_files: List[str] = []
-        for f in changed_files:
-            file_diff = _diff_for_file(f)
-            if not file_diff:
-                continue  # rien à diffuser pour ce chemin (rare : ex. suppression déjà vidée)
-            entry = f"\n--- {f} ---\n{file_diff}"
-            if current_text and len(current_text) + len(entry) > REVIEW_CHUNK_CHAR_BUDGET:
+        # Finalisation sécurité (point 4.5) : un INDEX TEMPORAIRE, jamais l'index réel — nettoyé
+        # dans TOUS les cas (succès, échec, exception) via `finally`, jamais laissé en place au-delà
+        # de cette review (bug réel confirmé de la version précédente : aucun nettoyage n'existait).
+        tmp_index = _stage_intent_to_add_in_temp_index(changed_files)
+        try:
+            batches: List[tuple] = []
+            current_files: List[str] = []
+            current_text = ""
+            covered_files: List[str] = []
+            for f in changed_files:
+                file_diff = _diff_for_file(f, index_file=tmp_index)
+                if not file_diff:
+                    continue  # rien à diffuser pour ce chemin (rare : ex. suppression déjà vidée)
+                entry = f"\n--- {f} ---\n{file_diff}"
+                if current_text and len(current_text) + len(entry) > REVIEW_CHUNK_CHAR_BUDGET:
+                    batches.append((current_files, current_text))
+                    current_files, current_text = [], ""
+                current_files.append(f)
+                current_text += entry
+                covered_files.append(f)
+            if current_text:
                 batches.append((current_files, current_text))
-                current_files, current_text = [], ""
-            current_files.append(f)
-            current_text += entry
-            covered_files.append(f)
-        if current_text:
-            batches.append((current_files, current_text))
 
-        if not batches:
-            return {
-                "success": False, "raw_output": "aucun diff exploitable pour la review",
-                "summary": "review indépendante en échec technique (diffs vides)",
-            }
-
-        contracts = ", ".join(mission.scientific_contracts) if mission and mission.scientific_contracts else "(aucun déclaré)"
-        all_findings: List[dict] = []
-        session_ids: List[str] = []
-        for _batch_files, batch_text in batches:
-            result = _review_one_batch(batch_text, contracts, mission)
-            if not result.functionally_succeeded:
+            if not batches:
                 return {
-                    "success": False, "raw_output": result.stderr or result.stdout,
-                    "summary": "review indépendante en échec technique (lot en erreur)",
+                    "success": False, "raw_output": "aucun diff exploitable pour la review",
+                    "summary": "review indépendante en échec technique (diffs vides)",
                 }
-            body = result.result_structured
-            # V1.1 : un échec de PARSING de la sortie structurée ne doit JAMAIS ressembler à une
-            # review propre — trouvé réellement silencieux lors du canary de cette mission (`body`
-            # retombait sur `{}`, "0 finding(s) — verdict=?" étant indiscernable d'un vrai verdict
-            # CLEAN). `verdict` ET `findings` sont REQUIS par `REVIEW_JSON_SCHEMA` — leur absence
-            # est elle-même la preuve que la sortie structurée n'a pas été correctement obtenue,
-            # traitée comme un échec TECHNIQUE de la review (jamais un commit/push sur cette base).
-            if not isinstance(body, dict) or "verdict" not in body or "findings" not in body:
+
+            contracts = ", ".join(mission.scientific_contracts) if mission and mission.scientific_contracts else "(aucun déclaré)"
+            all_findings: List[dict] = []
+            session_ids: List[str] = []
+            for _batch_files, batch_text in batches:
+                result = _review_one_batch(batch_text, contracts, mission)
+                if not result.functionally_succeeded:
+                    return {
+                        "success": False, "raw_output": result.stderr or result.stdout,
+                        "summary": "review indépendante en échec technique (lot en erreur)",
+                    }
+                body = result.result_structured
+                # V1.1 : un échec de PARSING de la sortie structurée ne doit JAMAIS ressembler à une
+                # review propre — trouvé réellement silencieux lors du canary de cette mission (`body`
+                # retombait sur `{}`, "0 finding(s) — verdict=?" étant indiscernable d'un vrai verdict
+                # CLEAN). `verdict` ET `findings` sont REQUIS par `REVIEW_JSON_SCHEMA` — leur absence
+                # est elle-même la preuve que la sortie structurée n'a pas été correctement obtenue,
+                # traitée comme un échec TECHNIQUE de la review (jamais un commit/push sur cette base).
+                if not isinstance(body, dict) or "verdict" not in body or "findings" not in body:
+                    return {
+                        "success": False,
+                        "raw_output": (
+                            f"sortie structurée du reviewer non exploitable (verdict/findings absents) "
+                            f"pour un lot : {result.stdout[:500]}"
+                        ),
+                        "summary": "review indépendante en échec technique (sortie structurée invalide)",
+                    }
+                all_findings.extend(f for f in body.get("findings", []) if isinstance(f, dict))
+                if result.session_id:
+                    session_ids.append(result.session_id)
+
+            # Vérification EXPLICITE de couverture (mission finalisation V1.1 §2.B : "vérifier
+            # explicitement la couverture complète") — jamais une review considérée complète sans
+            # cette preuve, même si tous les lots individuels ont techniquement réussi.
+            expected = set(changed_files)
+            covered = set(covered_files)
+            if covered != expected:
+                missing = sorted(expected - covered)
                 return {
                     "success": False,
-                    "raw_output": (
-                        f"sortie structurée du reviewer non exploitable (verdict/findings absents) "
-                        f"pour un lot : {result.stdout[:500]}"
-                    ),
-                    "summary": "review indépendante en échec technique (sortie structurée invalide)",
+                    "raw_output": f"couverture de review incomplète — fichiers jamais revus : {missing}",
+                    "summary": "review indépendante en échec technique (couverture incomplète)",
                 }
-            all_findings.extend(f for f in body.get("findings", []) if isinstance(f, dict))
-            if result.session_id:
-                session_ids.append(result.session_id)
 
-        # Vérification EXPLICITE de couverture (mission finalisation V1.1 §2.B : "vérifier
-        # explicitement la couverture complète") — jamais une review considérée complète sans
-        # cette preuve, même si tous les lots individuels ont techniquement réussi.
-        expected = set(changed_files)
-        covered = set(covered_files)
-        if covered != expected:
-            missing = sorted(expected - covered)
+            blocking = [f for f in all_findings if f.get("severity") in ("BLOCKER", "MAJOR")]
             return {
-                "success": False,
-                "raw_output": f"couverture de review incomplète — fichiers jamais revus : {missing}",
-                "summary": "review indépendante en échec technique (couverture incomplète)",
+                "success": True,
+                "blocking_findings": blocking,
+                "reviewed_files": sorted(covered),
+                "summary": (
+                    f"{len(all_findings)} finding(s) sur {len(batches)} lot(s), "
+                    f"{len(covered)} fichier(s) couverts"
+                ),
+                "session_id": session_ids[0] if session_ids else None,
             }
-
-        blocking = [f for f in all_findings if f.get("severity") in ("BLOCKER", "MAJOR")]
-        return {
-            "success": True,
-            "blocking_findings": blocking,
-            "reviewed_files": sorted(covered),
-            "summary": (
-                f"{len(all_findings)} finding(s) sur {len(batches)} lot(s), "
-                f"{len(covered)} fichier(s) couverts"
-            ),
-            "session_id": session_ids[0] if session_ids else None,
-        }
+        finally:
+            if tmp_index is not None:
+                shutil.rmtree(tmp_index.parent, ignore_errors=True)
 
     def real_diagnostic_fn(mission, failure_signature):
         # Mission §8 : "lancer un diagnostic indépendant, tenter une autre approche sûre" — UNE

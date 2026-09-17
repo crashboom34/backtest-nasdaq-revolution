@@ -63,6 +63,12 @@ from scripts.autopilot.state_machine import (
 )
 
 
+_FAILURE_NOTE_PREFIX = "Échec précédent à corriger : "
+"""Préfixe stable identifiant une note de CONSTAT D'ÉCHEC (ajoutée automatiquement par
+`_handle_failure()`), distincte d'un finding ORIGINAL de review/test — permet de préserver ce
+dernier à travers un échec transitoire ultérieur sans rapport (finalisation sécurité point 4.1),
+sans jamais faire grossir indéfiniment `pending_findings` à chaque nouvelle tentative."""
+
 _ERROR_INVALID_PARAMETER = 87  # Windows : code renvoyé par OpenProcess pour un PID qui n'existe
 # structurellement pas (jamais existé/déjà réutilisé par le OS pour un tout autre process) —
 # DISTINCT de ERROR_ACCESS_DENIED (5, le process existe mais est protégé/contexte de sécurité
@@ -361,6 +367,25 @@ class AutopilotSupervisor:
         record = self._state_store.update(**updates)
         return AutopilotState(record.phase)
 
+    @staticmethod
+    def _invoke_safely(fn, *args, label: str, **kwargs) -> dict:
+        """Finalisation sécurité (point 4.2) : enveloppe un callback INJECTÉ (Developer/Tester/
+        Reviewer). Avant ce correctif, seuls `_handle_committing`/`_handle_pushing` protégeaient
+        leur appel Git contre une exception — une exception levée PAR `developer_fn`/`tester_fn`/
+        `reviewer_fn` eux-mêmes (bug interne, ex. `real_reviewer_fn` levant
+        `ForbiddenGitCommandError` via `git_safety`) se propageait hors de `run_one_step()` et
+        crashait tout le process, sans le moindre état persisté ni classification — jamais un
+        succès implicite, jamais un crash silencieux : convertie en échec `success: False` ORDINAIRE,
+        retraité exactement comme n'importe quel autre échec fonctionnel (classification, retry,
+        escalade)."""
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # jamais un crash du superviseur pour un bug du callback injecté
+            return {
+                "success": False,
+                "raw_output": f"exception non gérée dans {label} (jamais un succès implicite) : {exc!r}",
+            }
+
     def _load_missions_or_block(self) -> Optional[List[Mission]]:
         """Mission §4 : un fichier de missions absent/mal formé/invalide ne doit JAMAIS produire
         silencieusement une file vide ni un faux `COMPLETED` — route explicitement vers
@@ -423,6 +448,20 @@ class AutopilotSupervisor:
             AutopilotState.DEVELOPING, mission_id=mission.id,
             next_action=f"développer {mission.title}", attempt_count=0,
             diagnostic_attempted=False, pending_findings=(), last_commit_sha=None, last_push_sha=None,
+            # Finalisation sécurité (point 5) : bug réel confirmé sur le canary de cette mission —
+            # `tests_status`/`review_status`/`reviewed_files`/`artifacts`/les session ids restaient
+            # ceux de la mission PRÉCÉDENTE jusqu'à ce que TESTING/REVIEWING tournent réellement
+            # pour la NOUVELLE mission. `transition_to()` ne fait qu'un merge partiel (tout champ
+            # omis ici est conservé tel quel) — jamais un simple oubli, ces preuves d'une mission ne
+            # doivent jamais pouvoir être lues comme valant pour une autre.
+            tests_status=None, review_status=None, reviewed_files=(), artifacts=(),
+            developer_session_id=None, reviewer_session_id=None,
+            # Complète le fix ci-dessus (trouvé incomplet par la revue reproductibilité/scope de
+            # cette mission, empiriquement reproduit) : un `stop_reason` posé par un événement
+            # RÉSOLU de la mission précédente (ex. la résolution d'un BLOCKED_SAFETY, seul cas où
+            # `stop_reason` se pose sans être ensuite nettoyé par une étape de succès) ne doit
+            # jamais rester lisible comme s'il concernait la nouvelle mission.
+            stop_reason=None,
         )
 
     def _resolve_mission_or_block(self, record: AutopilotStateRecord):
@@ -460,7 +499,7 @@ class AutopilotSupervisor:
         # transmettre l'échec précédent au Developer, jamais répéter le MÊME prompt sans le
         # moindre retour sur ce qui a échoué — `pending_findings` porte ce retour s'il existe déjà.
         findings = list(record.pending_findings) if record.pending_findings else None
-        result = self._developer_fn(mission, attempt, findings=findings)
+        result = self._invoke_safely(self._developer_fn, mission, attempt, label="developer_fn", findings=findings)
         if not result.get("success", False):
             return self._handle_failure(result, attempt, mission)
         return self._transition(
@@ -475,7 +514,7 @@ class AutopilotSupervisor:
         mission, blocked = self._resolve_mission_or_block(record)
         if blocked is not None:
             return blocked
-        result = self._tester_fn(mission)
+        result = self._invoke_safely(self._tester_fn, mission, label="tester_fn")
         if not result.get("success", False):
             attempt = record.attempt_count + 1
             # Finalisation V1.1 (§2.C) — bug réel trouvé : un échec de test retentait en place SUR
@@ -495,7 +534,7 @@ class AutopilotSupervisor:
         mission, blocked = self._resolve_mission_or_block(record)
         if blocked is not None:
             return blocked
-        result = self._reviewer_fn(mission)
+        result = self._invoke_safely(self._reviewer_fn, mission, label="reviewer_fn")
         if not result.get("success", True):
             attempt = record.attempt_count + 1
             return self._handle_failure(result, attempt, mission)
@@ -523,7 +562,10 @@ class AutopilotSupervisor:
         if blocked is not None:
             return blocked
         attempt = record.attempt_count + 1
-        result = self._developer_fn(mission, attempt, findings=list(record.pending_findings))
+        result = self._invoke_safely(
+            self._developer_fn, mission, attempt, label="developer_fn (correcting)",
+            findings=list(record.pending_findings),
+        )
         if not result.get("success", False):
             return self._handle_failure(result, attempt, mission)
         return self._transition(
@@ -547,23 +589,36 @@ class AutopilotSupervisor:
                 AutopilotState.BLOCKED_SAFETY, stop_reason=disk_reason,
                 blocked_reason_category="disk_space", resume_to_phase=AutopilotState.PRE_COMMIT_CHECK.value,
             )
-        # Finalisation V1.1 (§2.B) : "lier les preuves de tests et de review au contenu EXACT
-        # finalement committé" — si le Reviewer a rapporté quels fichiers il a réellement couverts
-        # (`reviewed_files`), tout fichier sur le point d'être committé mais jamais couvert par
-        # cette review est un décalage réel entre ce qui a été approuvé et ce qui va être commité,
-        # jamais silencieusement ignoré. Une doublure de test qui ne renseigne pas
-        # `reviewed_files` (`()` par défaut) désactive ce contrôle — n'affecte pas les tests
-        # existants qui ne modélisent pas cet aspect.
-        if record.reviewed_files and not set(record.artifacts) <= set(record.reviewed_files):
+        # Finalisation V1.1 (§2.B), rendu OBLIGATOIRE par la finalisation sécurité (point 4.4) :
+        # "lier les preuves de tests et de review au contenu EXACT finalement committé" — une
+        # couverture de review ABSENTE OU VIDE ne doit plus jamais laisser passer un commit dès
+        # lors qu'il existe réellement des `artifacts` à committer (bug réel confirmé : l'ancienne
+        # garde était opt-in — un `reviewer_fn` ne renseignant pas `reviewed_files`, par bug ou par
+        # contournement, désactivait purement et simplement ce contrôle). Rien à committer
+        # (`artifacts=()`) reste le seul cas trivialement non bloqué : il n'y a alors rien qui
+        # aurait pu échapper à la review.
+        if record.artifacts:
+            if not record.reviewed_files:
+                return self._transition(
+                    AutopilotState.BLOCKED_SAFETY,
+                    stop_reason=(
+                        "aucune preuve de couverture de review pour les fichiers sur le point "
+                        f"d'être committés ({sorted(record.artifacts)}) — une liste de fichiers "
+                        "revus absente ou vide ne doit jamais permettre un commit/push "
+                        "(finalisation sécurité point 4.4)."
+                    ),
+                    blocked_reason_category="unreviewed_files",
+                )
             unreviewed = sorted(set(record.artifacts) - set(record.reviewed_files))
-            return self._transition(
-                AutopilotState.BLOCKED_SAFETY,
-                stop_reason=(
-                    f"fichier(s) sur le point d'être committé(s) jamais couvert(s) par la review "
-                    f"indépendante : {unreviewed} (mission finalisation V1.1 §2.B)."
-                ),
-                blocked_reason_category="unreviewed_files",
-            )
+            if unreviewed:
+                return self._transition(
+                    AutopilotState.BLOCKED_SAFETY,
+                    stop_reason=(
+                        f"fichier(s) sur le point d'être committé(s) jamais couvert(s) par la review "
+                        f"indépendante : {unreviewed} (mission finalisation V1.1 §2.B)."
+                    ),
+                    blocked_reason_category="unreviewed_files",
+                )
         return self._transition(AutopilotState.COMMITTING, next_action="commit atomique")
 
     def _handle_committing(self) -> AutopilotState:
@@ -735,6 +790,16 @@ class AutopilotSupervisor:
         category = classify_failure(raw_output)
         signature = raw_output.strip()[:200]
         current_phase_value = self._current_phase().value
+        record_before = self._current_record()
+        # Finalisation sécurité (point 4.1) : les findings ORIGINAUX que CORRECTING existe pour
+        # résoudre ne doivent jamais être perdus par un échec ultérieur SANS RAPPORT (ex.
+        # `developer_fn` en erreur technique transitoire PENDANT CORRECTING lui-même) — distingués
+        # ici des notes de constat d'échec déjà ajoutées à une tentative précédente (préfixées),
+        # jamais réinjectées telles quelles ni dupliquées indéfiniment à chaque nouvel échec.
+        prior_original_findings = tuple(
+            f for f in (record_before.pending_findings if record_before is not None else ())
+            if not f.startswith(_FAILURE_NOTE_PREFIX)
+        )
 
         if category == FailureCategory.QUOTA_LIMIT:
             return self._transition(
@@ -764,7 +829,14 @@ class AutopilotSupervisor:
             # le moindre contexte sur ce qui a échoué (bug réel trouvé : un échec de TESTING
             # retentait auparavant TESTING seul, rappelant `tester_fn()` sans aucun changement de
             # code entre-temps, ce qui ne peut jamais corriger quoi que ce soit).
-            feedback = (f"Échec précédent à corriger : {raw_output.strip()[:2000]}",)
+            new_note = f"{_FAILURE_NOTE_PREFIX}{raw_output.strip()[:2000]}"
+            if retry_target is None and prior_original_findings:
+                # Retentative EN PLACE (CORRECTING échoue sur lui-même, sans changer de phase) :
+                # préserver le(s) finding(s) original(aux), jamais les remplacer par le seul
+                # constat de CE nouvel échec (bug réel confirmé, finalisation sécurité point 4.1).
+                feedback = prior_original_findings + (new_note,)
+            else:
+                feedback = (new_note,)
             if retry_target is not None:
                 return self._transition(
                     retry_target, attempt_count=attempt, pending_findings=feedback,
@@ -786,12 +858,27 @@ class AutopilotSupervisor:
         if self._diagnostic_fn is not None and not record.diagnostic_attempted:
             diagnosis = self._diagnostic_fn(self._mission_by_id(record.mission_id), signature)
             notes = diagnosis.get("approach_notes", "(aucune note)") if isinstance(diagnosis, dict) else "(aucune note)"
+            diagnostic_stop_reason = (
+                f"échec répété ({self._failure_limit}x, signature identique) — diagnostic "
+                f"indépendant tenté avant escalade : {notes}"
+            )
+            if retry_target is not None:
+                # Finalisation sécurité (point 4.6) : bug réel confirmé — `retry_target` était
+                # ignoré ici, retombant toujours sur une retentative EN PLACE. Pour une escalade
+                # originant de TESTING (`retry_target=CORRECTING`), ceci laissait la phase à
+                # TESTING : le prochain `run_one_step()` rappelait `tester_fn()` directement, SANS
+                # repasser par le Developer — réintroduisant l'anti-pattern éliminé par le
+                # correctif §2.C, pour ce seul cycle diagnostic. Transmet aussi le constat d'échec
+                # ET la note de diagnostic comme retour exploitable pour cette invocation.
+                new_note = f"{_FAILURE_NOTE_PREFIX}{raw_output.strip()[:2000]}"
+                diag_note = f"Note de diagnostic (approche différente suggérée) : {notes}"
+                feedback = prior_original_findings + (new_note, diag_note)
+                return self._transition(
+                    retry_target, attempt_count=attempt, diagnostic_attempted=True,
+                    pending_findings=feedback, stop_reason=diagnostic_stop_reason,
+                )
             return self._retry_in_place(
-                attempt_count=attempt, diagnostic_attempted=True,
-                stop_reason=(
-                    f"échec répété ({self._failure_limit}x, signature identique) — diagnostic "
-                    f"indépendant tenté avant escalade : {notes}"
-                ),
+                attempt_count=attempt, diagnostic_attempted=True, stop_reason=diagnostic_stop_reason,
             )
 
         reason = (

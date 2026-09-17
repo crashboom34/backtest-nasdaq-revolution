@@ -592,6 +592,92 @@ def test_real_reviewer_fn_fails_when_a_changed_file_is_never_actually_covered(mo
     assert "never_diffed.py" in result["raw_output"]
 
 
+def test_stage_intent_to_add_in_temp_index_never_touches_the_real_index(tmp_path):
+    """Finalisation sécurité (point 4.5) : bug réel confirmé — l'ancien `_stage_intent_to_add()`
+    posait son `git add --intent-to-add` sur l'INDEX RÉEL (`.git/index`) sans AUCUN mécanisme de
+    nettoyage ; une mission qui n'atteint jamais COMMITTING (ex. escalade vers Human Gate) laissait
+    ces entrées en place indéfiniment, pouvant rendre `dirty_worktree` non résoluble pour toujours
+    (le contraire exact de ce que le correctif finalisation V1.1 §2.E promet). Doit désormais
+    utiliser un INDEX TEMPORAIRE (`GIT_INDEX_FILE`), jamais l'index réel — vérifié ici avec un VRAI
+    dépôt Git, pas une simulation."""
+    import shutil
+    import subprocess
+
+    import scripts.autopilot.cli as cli_module
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+    (repo / "brand_new.py").write_text("y = 1\n", encoding="utf-8")
+    status_before = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True,
+    ).stdout
+    assert status_before.strip() == "?? brand_new.py"
+
+    tmp_index = cli_module._stage_intent_to_add_in_temp_index(["brand_new.py"], repo_dir=repo)
+    try:
+        diff_text = cli_module._diff_for_file("brand_new.py", repo_dir=repo, index_file=tmp_index)
+        assert "y = 1" in diff_text  # le contenu réel du nouveau fichier est bien visible au diff
+
+        status_during = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True,
+        ).stdout
+        # L'INDEX RÉEL doit rester STRICTEMENT inchangé PENDANT la review — le fichier reste non
+        # suivi ("??"), jamais promu en staged ("A ") comme le ferait un intent-to-add réel.
+        assert status_during.strip() == "?? brand_new.py"
+    finally:
+        if tmp_index is not None:
+            shutil.rmtree(tmp_index.parent, ignore_errors=True)
+
+    status_after = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True,
+    ).stdout
+    assert status_after.strip() == "?? brand_new.py"
+
+
+def test_stage_intent_to_add_in_temp_index_raises_and_cleans_up_when_read_tree_fails(tmp_path, monkeypatch):
+    """Régression — bug réel confirmé par la revue indépendante (finalisation sécurité, fix 5) :
+    le code de retour de `git read-tree HEAD` n'était jamais vérifié. Sur un HEAD invalide (dépôt
+    sans aucun commit, cas réel reproduit), l'index temporaire restait silencieusement SOUS-SEEDÉ
+    plutôt que peuplé depuis HEAD — un fichier déjà suivi et modifié apparaissait alors au diff
+    comme une SUPPRESSION COMPLÈTE plutôt que sa vraie modification, une review fondée sur un diff
+    fabriqué. Doit désormais lever bruyamment (jamais un index partiellement initialisé retourné
+    comme si de rien n'était) ET nettoyer son propre répertoire temporaire avant de lever — jamais
+    un répertoire créé puis abandonné sur disque si l'initialisation échoue en cours de route."""
+    import subprocess as real_subprocess
+    import tempfile as real_tempfile
+
+    import scripts.autopilot.cli as cli_module
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    real_subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / "brand_new.py").write_text("y = 1\n", encoding="utf-8")
+    # Aucun commit -> HEAD n'existe pas -> `git read-tree HEAD` échoue nécessairement.
+
+    created_dirs = []
+    real_mkdtemp = real_tempfile.mkdtemp
+
+    def recording_mkdtemp(*args, **kwargs):
+        path = real_mkdtemp(*args, **kwargs)
+        created_dirs.append(path)
+        return path
+
+    monkeypatch.setattr(cli_module.tempfile, "mkdtemp", recording_mkdtemp)
+
+    with pytest.raises(RuntimeError):
+        cli_module._stage_intent_to_add_in_temp_index(["brand_new.py"], repo_dir=repo)
+
+    assert len(created_dirs) == 1
+    assert not os.path.exists(created_dirs[0])  # jamais laissé en place après un échec interne
+
+
 def test_real_tester_fn_invokes_sys_executable_not_a_hardcoded_relative_venv_path(monkeypatch):
     """Régression — trouvé RÉELLEMENT cassé par le canary V1.1 (mission §9) : un chemin relatif
     codé en dur (".venv/Scripts/python.exe") échoue (`FileNotFoundError`/`WinError 2`) dans tout
@@ -648,6 +734,48 @@ def test_git_common_dir_resolves_to_the_same_absolute_path_from_a_linked_worktre
     from_linked = cli_module._git_common_dir(linked_worktree)
 
     assert from_main == from_linked
+    assert from_main == (main_repo / ".git").resolve()
+
+
+def test_git_common_dir_never_crashes_when_the_git_binary_is_unavailable_and_still_matches_across_worktrees(
+    tmp_path, monkeypatch,
+):
+    """Finalisation sécurité (point 4.3) : bug réel confirmé — `_git_common_dir()` ne rattrapait
+    qu'un `returncode != 0`, jamais une exception (`git` absent du PATH, `FileNotFoundError`...).
+    Comme `LOCK_PATH`/`STOP_SIGNAL_PATH` sont calculés à l'IMPORT du module, une telle exception
+    rendait `import scripts.autopilot.cli` impossible — même `autopilot stop` devenait inutilisable
+    exactement quand il serait le plus utile. Le repli doit aussi rester SÛR (jamais un verrou
+    ALTERNATIF différent selon le worktree) : recalculé par lecture directe de la structure `.git`,
+    jamais un `repo_dir / ".git"` brut (qui serait un FICHIER de redirection dans un worktree lié,
+    pas le répertoire commun réel)."""
+    import subprocess
+
+    import scripts.autopilot.cli as cli_module
+
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=main_repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=main_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=main_repo, check=True)
+    (main_repo / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=main_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=main_repo, check=True)
+
+    linked_worktree = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "other-branch2", str(linked_worktree)],
+        cwd=main_repo, check=True, capture_output=True, text=True,
+    )
+
+    def raise_git_missing(*args, **kwargs):
+        raise FileNotFoundError("[WinError 2] git introuvable sur le PATH")
+
+    monkeypatch.setattr(cli_module.subprocess, "run", raise_git_missing)
+
+    from_main = cli_module._git_common_dir(main_repo)  # ne doit JAMAIS lever
+    from_linked = cli_module._git_common_dir(linked_worktree)
+
+    assert from_main == from_linked  # jamais un verrou différent d'un worktree à l'autre
     assert from_main == (main_repo / ".git").resolve()
 
 
