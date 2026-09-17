@@ -1754,3 +1754,88 @@ un appel bloqué — bornes ajoutées partout (généreuses, jamais limitantes p
 **Tests** : 180 tests Autopilot dédiés (123 nouveaux/modifiés depuis le Bootstrap V1), tous verts.
 Suite complète du projet : 1190/1190.
 Suite complète du projet également verte.
+
+## 26. AlphaForge Autopilot — Finalisation sécurité opérationnelle, worktree permanent (2026-09-17)
+
+Mission « Finaliser la sécurité opérationnelle et débloquer AF-V-02 Slice 2 », déclenchée après
+qu'une tentative d'ignition réelle depuis le dossier principal a été refusée par
+`requires_clean_worktree` : des modifications préexistantes de l'utilisateur (`AGENTS.md`, ADR
+0016, `docs/agents/skills-usage.md`, `=1.12.0`) étaient présentes dans l'index au moment de
+`cmd_start`. Décision explicite de l'utilisateur : conserver ces fichiers intégralement dans le
+dossier principal (jamais commit/stash/modification) et exécuter l'Autopilot depuis un **worktree
+Git permanent dédié**, plutôt que d'exiger une décision humaine sur leur sort. L'état
+`BLOCKED_SAFETY` original est archivé tel quel dans
+`.autopilot/archive/2026-09-17-blocked-safety-main-repo-dirty-worktree.md` (worktree permanent).
+
+**Worktree permanent** : `C:\Users\Mira Alexandre\Desktop\backtest-nasdaq-revolution-autopilot-permanent`,
+branche `autopilot/permanent`, créé depuis `origin/master` au checkpoint vérifié `f979e76`.
+`.venv/` : jonction NTFS vers le `.venv/` du dossier principal (aucun téléchargement dupliqué) ;
+`nasdaq_3m.csv` copié (gitignoré). Verrou mono-instance et signal d'arrêt rendus VRAIMENT globaux
+au dépôt (`git rev-parse --git-common-dir`, jamais `.autopilot/state/` qui est propre à chaque
+worktree) — un superviseur démarré depuis le dossier principal OU le worktree permanent ne peut
+plus jamais tourner en concurrence avec un autre sur la même file. Worktree conservé durablement
+(jamais supprimé), contrairement aux worktrees jetables des missions précédentes.
+
+**Canary réel de bout en bout exécuté dans ce chemin d'exécution permanent** (aucune doublure) :
+Developer réel a corrigé un bug intentionnel, disclosed, sur une fixture canary jetable
+(`scripts/autopilot/canary_fixture.py`, jamais du code scientifique) ; tests ciblés réels passés ;
+Reviewer indépendant réel a couvert exactement les 2 fichiers attendus, 0 finding ; commit+push
+réel (`67f7db7`) sur la branche distante dédiée `autopilot/canary-test`, jamais `master`. La boucle
+a ensuite automatiquement enchaîné, comme prévu par sa propre autorisation, sur la mission
+scientifique réelle `AF-V-02-SLICE-2` (PID réel, verrou détenu, `claude -p` en train de modifier
+`optimizer.py`/`walk_forward.py` selon ADR 0021 Décision 6).
+
+**Arrêt coopératif exercé en conditions réelles** : sur instruction explicite de sécuriser le
+superviseur avant de laisser Slice 2 se poursuivre, `autopilot stop` a été invoqué pendant que ce
+process réel tournait. Confirmé : le signal d'arrêt n'a PAS forcé la libération du verrou (détenu
+par un process vivant) ; la frontière d'effet exacte est entre deux `run_one_step()` — la phase
+`DEVELOPING` en cours a fini et persisté sa transition vers `TESTING` (le code écrit par le
+Developer restant intact, non commité), puis la boucle s'est arrêtée avant d'invoquer
+`tester_fn()`. Aucun test, aucune review, aucun commit/push n'a eu lieu pour Slice 2 dans cet
+arrêt. Le process a quitté proprement, libérant lui-même son verrou.
+
+**7 corrections apportées, chacune avec un test de régression écrit rouge avant correction** —
+6 trouvées par une paire de revues indépendantes (sécurité/architecture, reproductibilité/scope)
+sur la mission de finalisation précédente, plus 1 trouvée en auditant l'état réel du process Slice
+2 en cours :
+
+1. `_handle_correcting()` ne perd plus les findings de review/test ORIGINAUX lors d'un échec
+   technique transitoire et sans rapport du Developer — préservés et combinés à la nouvelle note
+   d'échec, jamais remplacés.
+2. `_invoke_safely()` (nouveau) enveloppe les 4 points d'appel `developer_fn`/`tester_fn`/
+   `reviewer_fn` — une exception non gérée d'un de ces callbacks ne crashe plus jamais le
+   superviseur hors `COMMITTING`/`PUSHING`, convertie en échec ordinaire classifié normalement.
+3. `_git_common_dir()` rattrape désormais une exception du sous-processus Git (pas seulement un
+   code de retour non nul) et se replie sur une résolution PAR LECTURE DIRECTE de `.git`/
+   `commondir` — jamais un `repo_dir/".git"` brut qui produirait un verrou différent par worktree.
+4. La couverture de review (`reviewed_files`) devient OBLIGATOIRE avant tout commit — une liste
+   absente ou vide avec des `artifacts` non vides bloque désormais systématiquement, jamais un
+   contrôle opt-in contournable silencieusement.
+5. Le diffing de review utilise désormais un INDEX GIT TEMPORAIRE (`GIT_INDEX_FILE`, seedé via
+   `git read-tree HEAD`), jamais l'index réel (`.git/index`) — fermant un bug réel de pollution
+   permanente (`intent-to-add` jamais nettoyé si une mission n'atteignait jamais `COMMITTING`,
+   pouvant rendre `dirty_worktree` non résoluble pour toujours). Deux failles complémentaires,
+   trouvées par les revues, ont aussi été fermées : le code de retour de `read-tree` est
+   maintenant vérifié (un index sous-seedé montrait silencieusement un fichier modifié comme
+   entièrement supprimé au Reviewer) ; l'aide nettoie désormais son propre répertoire temporaire
+   en cas d'échec pendant sa propre initialisation.
+6. Le cycle diagnostic précédant le Human Gate respecte désormais `retry_target` — une escalade
+   originant de TESTING repasse réellement par `CORRECTING` (un vrai appel Developer), jamais un
+   simple retour sur TESTING seul.
+7. `_handle_planning()` réinitialise désormais `tests_status`/`review_status`/`reviewed_files`/
+   `artifacts`/`developer_session_id`/`reviewer_session_id`/`stop_reason` au démarrage d'une
+   nouvelle mission — ses preuves ne peuvent plus jamais être lues comme si elles concernaient la
+   mission précédente.
+
+Une note MINOR reste documentée sans bloquer l'activation : le préfixe textuel distinguant un
+finding original d'une note de constat d'échec pourrait théoriquement entrer en collision avec un
+finding réel commençant par cette même phrase exacte — jugé négligeable en pratique.
+
+**Tests** : 201 tests Autopilot dédiés (52 dans `test_autopilot_supervisor.py`, 35 dans
+`test_autopilot_cli.py`, plus les tests `claude_invoker`), tous verts. Suite complète du projet :
+1243/1243, y compris le travail scientifique de Slice 2 laissé intact et non commité dans ce
+worktree pendant toute cette mission.
+
+**Publication** : commit `1ddb832` (les 4 fichiers de correction, isolé du travail scientifique de
+Slice 2) poussé vers `origin/autopilot/permanent` (branche neuve, aucune divergence, jamais
+`master`) — SHA local et distant vérifiés identiques après push.

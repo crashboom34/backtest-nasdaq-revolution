@@ -35,8 +35,10 @@ opérationnel et validé en conditions réelles lors de la mission « Autopilot 
   PID mort sous Windows via `ctypes`/`OpenProcess` — un verrou orphelin est récupéré, jamais un
   verrou tenu par un process vivant).
 - Un **signal d'arrêt coopératif** (`autopilot stop` dépose un signal, `run_until()` le vérifie
-  entre chaque étape, jamais en plein milieu d'une opération) en plus de la libération
-  inconditionnelle du verrou.
+  entre chaque étape, jamais en plein milieu d'une opération). Le verrou n'est PLUS jamais libéré
+  de force par `stop` tant qu'il est détenu par un process réellement vivant (finalisation
+  sécurité, 2026-09-17) — seul le PROPRIÉTAIRE libère son propre verrou une fois l'arrêt
+  effectif ; `force_release()` reste réservé au nettoyage d'un verrou authentiquement orphelin.
 - Un **schéma de mission enrichi et validé strictement** (`allowed_paths`/`forbidden_paths`/
   `targeted_tests`/`regression_tests`/`risk_level`/`max_attempts`/`max_budget_usd`/
   `requires_clean_worktree`/`scientific_contracts`/`human_gate_conditions`/`completion_evidence`)
@@ -60,7 +62,7 @@ opérationnel et validé en conditions réelles lors de la mission « Autopilot 
 - Des **commandes CLI** (`scripts/autopilot/cli.py`) : `status`, `stop` (signal + verrou),
   `start`/`resume` (boucle réelle).
 
-180 tests Autopilot dédiés, tous verts. Suite complète du projet également verte (1190/1190).
+201 tests Autopilot dédiés, tous verts. Suite complète du projet également verte (1243/1243).
 
 ## Preuve réelle — canary V1.1 (2026-09-17)
 
@@ -110,6 +112,60 @@ commandes Git en lecture seule contournaient encore `git_safety.check_git_comman
 sous-processus n'avait de `timeout=`, rendant l'arrêt coopératif sans effet pendant un appel
 bloqué — les deux corrigés.
 
+## Finalisation opérationnelle — worktree permanent (2026-09-17, suite)
+
+Une seconde mission de finalisation a rendu ce V1.1 sûr pour une exécution enchaînée réelle
+(AF-V-02 Slice 2), après qu'une tentative d'ignition depuis le dossier principal a été refusée par
+`requires_clean_worktree` sur des modifications préexistantes de l'utilisateur (voir
+`.autopilot/archive/2026-09-17-blocked-safety-main-repo-dirty-worktree.md`). Décision retenue :
+conserver ces fichiers intégralement dans le dossier principal et exécuter l'Autopilot depuis un
+**worktree Git permanent dédié** :
+
+- Chemin : `C:\Users\Mira Alexandre\Desktop\backtest-nasdaq-revolution-autopilot-permanent`
+- Branche : `autopilot/permanent`
+- `.venv/` : JONCTION NTFS vers le `.venv/` du dossier principal (aucun téléchargement dupliqué).
+- `nasdaq_3m.csv` : copié depuis le dossier principal (gitignoré, nécessaire à la régression).
+- Jamais supprimé après usage — worktree durable, pas jetable comme les précédents.
+
+Cette mission a corrigé, avec un test de régression dédié pour chacun (TDD, écrit rouge avant
+correction) :
+
+- **Arrêt et verrou** : `cmd_stop()` ne vole plus jamais le verrou d'un process réellement vivant.
+- **Review complète** : couverture de TOUS les changements (suivis, nouveaux, suppressions,
+  renommages), plus de troncature silencieuse à 20000 caractères, découpage en lots vérifié
+  explicitement contre la liste attendue. La couverture (`reviewed_files`) est désormais
+  OBLIGATOIRE avant tout commit, jamais un contrôle opt-in.
+- **Diffing sans toucher l'index réel** : un index Git TEMPORAIRE (`GIT_INDEX_FILE`), jamais
+  `.git/index`, rend les nouveaux fichiers visibles au diff sans jamais polluer durablement l'état
+  du worktree — l'ancienne version laissait des entrées `intent-to-add` définitivement en place si
+  une mission n'atteignait jamais `COMMITTING`.
+- **Tests rouges → correction réelle** : un échec de test route désormais TOUJOURS vers
+  `CORRECTING` (un vrai rappel du Developer avec le retour exploitable), y compris après le cycle
+  de diagnostic pré-Human-Gate — jamais une simple retentative de `tester_fn()` sans rien changer.
+- **Findings préservés** : une retentative de CORRECTING qui échoue pour une raison technique sans
+  rapport ne perd plus les findings ORIGINAUX qu'elle doit encore corriger.
+- **Callbacks protégés** : une exception non gérée de `developer_fn`/`tester_fn`/`reviewer_fn` ne
+  crashe plus jamais le superviseur — convertie en échec ordinaire, classifiée normalement.
+- **Reprise contrôlée après `BLOCKED_SAFETY`** : catégories causales explicites
+  (`blocked_reason_category`), seules `dirty_worktree`/`disk_space` ont une résolution
+  automatique connue (revérifiée à chaque fois) ; tout le reste reste bloqué indéfiniment sans
+  intervention externe réelle — jamais un effacement d'état.
+- **Preuves liées à la bonne mission** : une nouvelle mission ne peut plus afficher les preuves de
+  tests/review de la mission précédente avant d'avoir réellement exécuté les siennes.
+- **Branche/push explicites** : `RealGitOps` vérifie que HEAD correspond à la branche déclarée,
+  pousse un refspec explicite (`branche:référence-distante`, jamais `master` supposé), et confirme
+  le SHA distant après coup.
+
+Deux revues indépendantes (sécurité/architecture, reproductibilité/scope) sur ce diff ont ensuite
+trouvé 2 IMPORTANT supplémentaires, tous deux corrigés : le code de retour de `git read-tree HEAD`
+n'était pas vérifié (un index temporaire sous-seedé aurait montré un fichier modifié comme
+entièrement supprimé au Reviewer) ; le nettoyage du répertoire temporaire de review ne couvrait pas
+un échec survenant PENDANT sa propre initialisation. Une note MINOR reste documentée sans être
+jugée bloquante : le marqueur textuel distinguant un finding original d'une note de constat
+d'échec (`"Échec précédent à corriger : "`) pourrait théoriquement entrer en collision avec un
+finding réel qui commencerait par cette même phrase exacte — probabilité jugée négligeable en
+pratique (nécessiterait que le Reviewer/Tester reproduise cette phrase française mot pour mot).
+
 ## Coût réel observé (à budgéter, jamais négligeable)
 
 Deux sondages réels indépendants (`claude -p --output-format json`) ont mesuré ~0,32-0,41 $ pour
@@ -156,8 +212,15 @@ Tâche planifiée Windows (déclenchement à la connexion, jamais SYSTEM, jamais
 - `prompts/` — un prompt par mission référencée dans `missions.json` (versionné), y compris
   `canary-v1-1.md` (fixture de smoke-test réutilisable pour valider une future modification de la
   boucle) et `af-v02-slice-2.md` (mission scientifique réelle, scope détail dans `AI_HANDOFF.md`).
-- `state/` — état runtime (verrou, signal d'arrêt, état courant, historique, logs) — **jamais
-  versionné** (`.gitignore`), local à chaque machine.
+- `state/` — état courant/historique/logs (`current_state.json`, `.history.json`) — **jamais
+  versionné** (`.gitignore`), propre à CHAQUE worktree/branche (chacun poursuit son propre travail).
+  Le **verrou mono-instance et le signal d'arrêt**, en revanche, vivent désormais sous le
+  répertoire `.git` RÉELLEMENT commun à tous les worktrees du dépôt (`git rev-parse
+  --git-common-dir`, finalisation sécurité 2026-09-17) — jamais sous `state/`, précisément pour
+  qu'un superviseur démarré depuis N'IMPORTE QUEL worktree ne puisse jamais tourner en concurrence
+  avec un autre sur la même file de missions.
+- `archive/` — traces figées d'événements passés (ex. un `BLOCKED_SAFETY` rencontré avant la
+  création d'un nouveau worktree) — **versionné**, jamais réécrit après coup.
 
 ## Sécurité — rappel des interdictions absolues (mission §9, testées)
 
