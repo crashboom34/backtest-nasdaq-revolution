@@ -110,11 +110,21 @@ class RealGitOps:
     **V1.1** : `commit()` revalide secrets/gros fichiers sur le contenu RÉEL de l'index avant de
     committer (mission §3.7) et retourne le SHA produit (idempotence, mission §3.8) ; `push()`
     exécute `git fetch origin` puis vérifie la divergence avant de pousser (mission §3.7/§8) —
-    refuse si `origin/master` a avancé d'une façon non triviale à réconcilier (jamais un push
-    aveugle, jamais un force push)."""
+    refuse si la référence distante ciblée a avancé d'une façon non triviale à réconcilier
+    (jamais un push aveugle, jamais un force push).
 
-    def __init__(self, repo_dir: Path = REPO_ROOT):
+    **Finalisation V1.1 (§2.D)** : `branch`/`remote_ref` sont désormais EXPLICITES, jamais
+    supposés "master" en dur — bug réel trouvé : le code vérifiait HEAD mais poussait
+    inconditionnellement `git push origin master`, une commande qui pousse la branche LOCALE
+    nommée littéralement "master" (par son nom, indépendamment de ce qui est réellement extrait
+    dans CE worktree), pas "la branche courante" — dangereux dès qu'un worktree dédié (mission
+    §3) travaille sur une branche différente. `push()` vérifie maintenant explicitement que HEAD
+    correspond bien à `branch` avant de pousser, avec un refspec `branch:remote_ref` explicite."""
+
+    def __init__(self, repo_dir: Path = REPO_ROOT, branch: str = "master", remote_ref: Optional[str] = None):
         self._repo_dir = repo_dir
+        self._branch = branch
+        self._remote_ref = remote_ref or branch
 
     def _run(self, argv: List[str]) -> str:
         reason = git_safety.check_git_command(argv)
@@ -194,7 +204,8 @@ class RealGitOps:
         return (self.current_head_sha() or "").strip()
 
     def push(self, force: bool = False) -> str:
-        argv = ["git", "push", "origin", "master"]
+        refspec = f"{self._branch}:{self._remote_ref}"
+        argv = ["git", "push", "origin", refspec]
         if force:
             argv.append("--force")
         # La garde doit intercepter une commande interdite (force push, etc.) AVANT tout
@@ -203,14 +214,25 @@ class RealGitOps:
         if reason:
             raise ForbiddenGitCommandError(reason)
 
+        # Finalisation V1.1 (§2.D) : vérifier explicitement que HEAD correspond bien à la branche
+        # de travail DÉCLARÉE avant de pousser quoi que ce soit — jamais supposer implicitement
+        # "master" ni faire confiance à ce que `git push origin <nom>` référence par son nom sans
+        # vérifier que c'est bien ce qui est réellement extrait dans ce worktree.
+        current_branch = self._run(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+        if current_branch != self._branch:
+            raise RuntimeError(
+                f"branche de travail inattendue : HEAD='{current_branch}', attendu '{self._branch}' "
+                "— jamais poussé sans vérification explicite de la branche courante."
+            )
+
         # V1.1 (mission §3.7/§8) : `git fetch origin` + vérification de divergence AVANT tout push
-        # réel — jamais un push aveugle. `origin/master` doit être un ancêtre de HEAD (fast-forward
-        # normal) ; toute autre relation (divergence réelle, avance distante non intégrée) est
-        # refusée ici (jamais un force push) et laissée à `_handle_pushing()` pour router vers
-        # `WAITING_FOR_EXTERNAL_RESOURCE`.
+        # réel — jamais un push aveugle. `origin/<remote_ref>` doit être un ancêtre de HEAD
+        # (fast-forward normal) ; toute autre relation (divergence réelle, avance distante non
+        # intégrée) est refusée ici (jamais un force push) et laissée à `_handle_pushing()` pour
+        # router vers `WAITING_FOR_EXTERNAL_RESOURCE`.
         self._run(["git", "fetch", "origin"])
         try:
-            origin_sha = self._run(["git", "rev-parse", "origin/master"]).strip()
+            origin_sha = self._run(["git", "rev-parse", f"origin/{self._remote_ref}"]).strip()
         except RuntimeError:
             origin_sha = None
         head_sha = (self.current_head_sha() or "").strip()
@@ -223,8 +245,8 @@ class RealGitOps:
             is_ancestor = _run_readonly_git(["git", "merge-base", "--is-ancestor", origin_sha, "HEAD"], self._repo_dir)
             if is_ancestor.returncode == 1:
                 raise RuntimeError(
-                    f"divergence distante détectée (origin/master={origin_sha} n'est pas un "
-                    f"ancêtre de HEAD={head_sha}) — jamais forcé, jamais poussé aveuglément."
+                    f"divergence distante détectée (origin/{self._remote_ref}={origin_sha} n'est "
+                    f"pas un ancêtre de HEAD={head_sha}) — jamais forcé, jamais poussé aveuglément."
                 )
             if is_ancestor.returncode != 0:
                 raise RuntimeError(
@@ -232,10 +254,15 @@ class RealGitOps:
                     f"{is_ancestor.returncode} : {is_ancestor.stderr.strip()}) — jamais poussé "
                     "sans preuve de non-divergence."
                 )
-        argv = ["git", "push", "origin", "master"]
-        if force:
-            argv.append("--force")
         self._run(argv)
+        # Vérification finale explicite (mission §2.D : "vérifier ensuite le SHA distant") : le
+        # SHA distant doit désormais correspondre exactement au SHA local poussé.
+        pushed_remote_sha = self._run(["git", "rev-parse", f"origin/{self._remote_ref}"]).strip()
+        if pushed_remote_sha != head_sha:
+            raise RuntimeError(
+                f"push signalé réussi mais le SHA distant ({pushed_remote_sha}) ne correspond pas "
+                f"au SHA local poussé ({head_sha}) — jamais considéré confirmé sans cette preuve."
+            )
         return head_sha
 
 
@@ -319,9 +346,22 @@ def _mission_budget(mission) -> float:
     return DEFAULT_MAX_BUDGET_USD
 
 
-def _build_real_supervisor() -> AutopilotSupervisor:
+def _detect_current_branch(repo_dir: Path = REPO_ROOT) -> str:
+    """Branche RÉELLEMENT extraite dans ce worktree — jamais supposée "master" (finalisation
+    V1.1 §2.D/§3) : un worktree dédié à l'Autopilot travaille typiquement sur sa propre branche
+    (ex. `autopilot/permanent`), distincte de celle du dossier principal."""
+    return _run_readonly_git(["git", "rev-parse", "--abbrev-ref", "HEAD"], repo_dir).stdout.strip()
+
+
+def _build_real_supervisor(push_remote_ref: Optional[str] = None) -> AutopilotSupervisor:
     """Construit un superviseur avec les VRAIS collaborateurs — la suite de tests utilise
-    toujours des doublures injectées (`tests/test_autopilot_supervisor.py`), jamais ce chemin."""
+    toujours des doublures injectées (`tests/test_autopilot_supervisor.py`), jamais ce chemin.
+
+    `push_remote_ref` : destination distante EXPLICITE (mission finalisation V1.1 §2.D) — la
+    branche locale réellement extraite est toujours poussée vers cette référence distante,
+    jamais supposée identique par défaut à "master". `None` pousse vers une référence distante du
+    MÊME NOM que la branche locale (comportement sûr par défaut, jamais "master" implicitement)."""
+    current_branch = _detect_current_branch()
     developer_invoker = ClaudeInvoker()
 
     def real_developer_fn(mission, attempt, findings=None):
@@ -484,9 +524,9 @@ def _build_real_supervisor() -> AutopilotSupervisor:
         developer_fn=real_developer_fn,
         tester_fn=real_tester_fn,
         reviewer_fn=real_reviewer_fn,
-        git_ops=RealGitOps(),
+        git_ops=RealGitOps(branch=current_branch, remote_ref=push_remote_ref or current_branch),
         lock=SingleInstanceLock(LOCK_PATH),
-        branch="master",
+        branch=current_branch,
         diagnostic_fn=real_diagnostic_fn,
         prompts_base_dir=AUTOPILOT_DIR,
         stop_signal=StopSignal(STOP_SIGNAL_PATH),
@@ -516,12 +556,12 @@ def _record_real_git_context(store: AutopilotStateStore) -> None:
         pass  # audit best-effort — jamais bloquant pour la boucle elle-même
 
 
-def _run_real_loop(max_steps: int) -> int:
+def _run_real_loop(max_steps: int, push_remote_ref: Optional[str] = None) -> int:
     """Exécute RÉELLEMENT la boucle Autopilot (mission §3.1 : "start doit réellement lancer la
     boucle ; il ne doit jamais annoncer RUNNING si aucun superviseur ne tourne"). S'arrête à un
     état d'attente/terminal, ou après `max_steps` transitions (jamais indéfiniment silencieux —
     voir `AutopilotSupervisor.run_until()`). Libère TOUJOURS le verrou en sortie (`finally`)."""
-    supervisor = _build_real_supervisor()
+    supervisor = _build_real_supervisor(push_remote_ref=push_remote_ref)
     if not supervisor.acquire_lock():
         print("Autopilot : une instance semble déjà en cours (verrou présent) — utiliser 'stop' d'abord.")
         return 1
@@ -548,7 +588,9 @@ def _run_real_loop(max_steps: int) -> int:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
-    return _run_real_loop(max_steps=getattr(args, "max_steps", 500))
+    return _run_real_loop(
+        max_steps=getattr(args, "max_steps", 500), push_remote_ref=getattr(args, "push_to", None),
+    )
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
@@ -574,7 +616,9 @@ def cmd_resume(args: argparse.Namespace) -> int:
             "mais ceci mérite un examen si inattendu."
         )
     print(f"Autopilot : reprise depuis la phase {record.phase}.")
-    return _run_real_loop(max_steps=getattr(args, "max_steps", 500))
+    return _run_real_loop(
+        max_steps=getattr(args, "max_steps", 500), push_remote_ref=getattr(args, "push_to", None),
+    )
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -583,6 +627,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     for name in ("start", "resume"):
         sub = subparsers.add_parser(name)
         sub.add_argument("--max-steps", type=int, default=500, dest="max_steps")
+        sub.add_argument(
+            "--push-to", type=str, default=None, dest="push_to",
+            help=(
+                "Référence distante EXPLICITE de destination (finalisation V1.1 §2.D) — sans cette "
+                "option, pousse vers une référence distante du MÊME NOM que la branche locale "
+                "réellement extraite, jamais 'master' implicitement."
+            ),
+        )
     subparsers.add_parser("status")
     subparsers.add_parser("stop")
 

@@ -155,15 +155,23 @@ def test_real_git_ops_commit_succeeds_when_staged_index_is_in_scope(tmp_path, mo
 
 def test_real_git_ops_push_fetches_and_proceeds_when_origin_is_an_ancestor_of_head(tmp_path, monkeypatch):
     """Mission Autopilot V1.1 §3.7/§8 : `git fetch origin` doit avoir lieu avant tout push réel ;
-    quand `origin/master` est un ancêtre de HEAD (avance normale, fast-forward), le push procède."""
+    quand `origin/master` est un ancêtre de HEAD (avance normale, fast-forward), le push procède.
+    Finalisation V1.1 §2.D : vérifie aussi que la branche courante est explicitement contrôlée et
+    que le SHA distant final est revérifié après le push (pas seulement supposé réussi)."""
     import scripts.autopilot.cli as cli_module
 
     calls = []
+    origin_rev_parse_calls = {"count": 0}
 
     def fake_run(argv, cwd, capture_output, text, **kwargs):
         calls.append(argv)
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")
         if argv == ["git", "rev-parse", "origin/master"]:
-            return _fake_result(stdout="oldsha\n")
+            origin_rev_parse_calls["count"] += 1
+            if origin_rev_parse_calls["count"] == 1:
+                return _fake_result(stdout="oldsha\n")  # avant push : état distant connu
+            return _fake_result(stdout="newsha\n")  # après push : le distant a bien avancé
         if argv == ["git", "rev-parse", "HEAD"]:
             return _fake_result(stdout="newsha\n")
         if argv == ["git", "merge-base", "--is-ancestor", "oldsha", "HEAD"]:
@@ -171,13 +179,62 @@ def test_real_git_ops_push_fetches_and_proceeds_when_origin_is_an_ancestor_of_he
         return _fake_result()
 
     monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
-    git_ops = RealGitOps(repo_dir=tmp_path)
+    git_ops = RealGitOps(repo_dir=tmp_path, branch="master")
 
     pushed_sha = git_ops.push()
 
     assert ["git", "fetch", "origin"] in calls
     assert any(c[:2] == ["git", "push"] for c in calls)
     assert pushed_sha == "newsha"
+
+
+def test_real_git_ops_push_uses_an_explicit_refspec_never_a_hardcoded_master(tmp_path, monkeypatch):
+    """Régression — bug réel confirmé (mission finalisation V1.1 §2.D) : le code poussait
+    inconditionnellement `git push origin master`, quelle que soit la branche RÉELLEMENT extraite
+    dans le worktree — dangereux dès qu'un worktree dédié travaille sur une autre branche.
+    `push()` doit désormais vérifier HEAD explicitement et utiliser un refspec `branche:cible`."""
+    import scripts.autopilot.cli as cli_module
+
+    calls = []
+    origin_calls = {"count": 0}
+
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
+        calls.append(argv)
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="autopilot/permanent\n")
+        if argv == ["git", "rev-parse", "origin/master"]:
+            origin_calls["count"] += 1
+            return _fake_result(stdout="oldsha\n" if origin_calls["count"] == 1 else "newsha\n")
+        if argv == ["git", "rev-parse", "HEAD"]:
+            return _fake_result(stdout="newsha\n")
+        if argv == ["git", "merge-base", "--is-ancestor", "oldsha", "HEAD"]:
+            return _fake_result(returncode=0)
+        return _fake_result()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    git_ops = RealGitOps(repo_dir=tmp_path, branch="autopilot/permanent", remote_ref="master")
+
+    git_ops.push()
+
+    push_calls = [c for c in calls if c[:2] == ["git", "push"]]
+    assert push_calls == [["git", "push", "origin", "autopilot/permanent:master"]]
+
+
+def test_real_git_ops_push_refuses_when_head_does_not_match_the_declared_branch(tmp_path, monkeypatch):
+    """Régression — mission finalisation V1.1 §2.D : ne jamais pousser sans vérifier explicitement
+    que HEAD correspond bien à la branche de travail déclarée."""
+    import scripts.autopilot.cli as cli_module
+
+    def fake_run(argv, cwd, capture_output, text, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="some-other-branch\n")
+        raise AssertionError("aucune autre commande Git ne doit être tentée après un mismatch de branche")
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    git_ops = RealGitOps(repo_dir=tmp_path, branch="autopilot/permanent")
+
+    with pytest.raises(RuntimeError, match="branche de travail inattendue"):
+        git_ops.push()
 
 
 def test_real_git_ops_push_refuses_on_real_divergence_never_forcing(tmp_path, monkeypatch):
@@ -187,6 +244,8 @@ def test_real_git_ops_push_refuses_on_real_divergence_never_forcing(tmp_path, mo
     import scripts.autopilot.cli as cli_module
 
     def fake_run(argv, cwd, capture_output, text, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")
         if argv == ["git", "rev-parse", "origin/master"]:
             return _fake_result(stdout="othersha\n")
         if argv == ["git", "rev-parse", "HEAD"]:
@@ -246,6 +305,8 @@ def test_real_tester_fn_pytest_timeout_never_raises_and_is_classified_as_a_failu
     import scripts.autopilot.cli as cli_module
 
     def fake_run(argv, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")  # détection de branche à la construction
         assert kwargs.get("timeout") == cli_module.PYTEST_TIMEOUT_SECONDS
         raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs["timeout"])
 
@@ -268,6 +329,8 @@ def test_real_tester_fn_runs_the_full_suite_when_mission_is_none(monkeypatch):
     calls = []
 
     def fake_run(argv, cwd, capture_output, text, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")  # détection de branche à la construction
         calls.append(argv)
         return _fake_result(stdout="1 passed", returncode=0)
 
@@ -287,6 +350,8 @@ def test_real_tester_fn_runs_the_full_suite_when_targeted_tests_is_empty(monkeyp
     calls = []
 
     def fake_run(argv, cwd, capture_output, text, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")  # détection de branche à la construction
         calls.append(argv)
         return _fake_result(stdout="1 passed", returncode=0)
 
@@ -308,6 +373,8 @@ def test_real_tester_fn_stops_immediately_when_targeted_tests_fail(monkeypatch):
     calls = []
 
     def fake_run(argv, cwd, capture_output, text, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")  # détection de branche à la construction
         calls.append(argv)
         return _fake_result(stdout="1 failed", returncode=1)
 
@@ -333,6 +400,8 @@ def test_real_tester_fn_reruns_full_suite_for_high_risk_missions_even_after_targ
     calls = []
 
     def fake_run(argv, cwd, capture_output, text, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")  # détection de branche à la construction
         calls.append(argv)
         return _fake_result(stdout="1 passed", returncode=0)
 
@@ -356,6 +425,8 @@ def test_real_tester_fn_reruns_full_suite_when_scientific_contracts_declared(mon
     calls = []
 
     def fake_run(argv, cwd, capture_output, text, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")  # détection de branche à la construction
         calls.append(argv)
         return _fake_result(stdout="1 passed", returncode=0)
 
@@ -380,6 +451,8 @@ def test_real_tester_fn_skips_full_suite_for_low_risk_mission_with_no_scientific
     calls = []
 
     def fake_run(argv, cwd, capture_output, text, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")  # détection de branche à la construction
         calls.append(argv)
         return _fake_result(stdout="1 passed", returncode=0)
 
@@ -407,6 +480,8 @@ def test_real_tester_fn_invokes_sys_executable_not_a_hardcoded_relative_venv_pat
     seen_argv = []
 
     def fake_run(argv, cwd, capture_output, text, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")  # détection de branche à la construction
         seen_argv.append(argv)
         return _fake_result(stdout="1 passed", returncode=0)
 
