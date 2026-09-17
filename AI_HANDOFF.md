@@ -1554,3 +1554,94 @@ navigation produit à 12 espaces (mission) vs 10 espaces déjà documentés
 **Aucune fonctionnalité listée dans ces deux documents n'a été implémentée par cette mission.**
 Aucun contrat scientifique existant (`exact-boundary-v2`/`daily-state-ready-v1`/
 `rolling-calendar-v2`) n'a été modifié.
+
+## 24. AlphaForge Autopilot — Bootstrap V1 (2026-09-17)
+
+Superviseur autonome auditable, construit AU MILIEU d'AF-V-02 sans interrompre ni recommencer le
+travail en cours (mission « Bootstrap AlphaForge Autopilot V1 en cours d'AF-V-02 »). AF-V-02
+Slice 1 (voir §23) a été sécurisé et committé (`2a9a6da`, `efe49ef`, poussés) **avant** tout
+travail de Bootstrap — aucune modification étrangère mélangée dans ces commits, aucun travail
+perdu.
+
+- **Package** : `scripts/autopilot/` — `state_machine.py` (18 états, table de transitions
+  explicite, persistance atomique via `atomic_json_store.save_atomic_overwrite()`, nouvelle
+  fonction additive, comportement de `save_atomic()` inchangé), `git_safety.py` (liste fermée de
+  motifs interdits : force push, `--no-verify`, `reset --hard`, `clean` destructeur, suppression
+  de branche distante, `add -A/./--all` ; fichiers protégés ; espace disque ; détection de
+  secrets/gros fichiers ; anti-boucle), `quota_detector.py` (classification prudente, jamais
+  "quota" par défaut), `human_gate.py` (rapport français structuré, 1-3 options, une seule
+  recommandée), `mission_queue.py` (file avec dépendances), `claude_invoker.py` (argv réel,
+  flags confirmés `claude --help` v2.1.220, jamais `--dangerously-skip-permissions`),
+  `supervisor.py` (machine à états pilotée pas à pas, idempotente/reprenable, verrou
+  mono-instance, `FakeGitOps`/`RealGitOps` — toute opération Git passe par `git_safety` avant
+  exécution), `cli.py` (`status`/`stop` pleinement fonctionnels ; `start`/`resume` construisent
+  le superviseur réel mais **jamais exécutés en conditions réelles par cette mission**),
+  `hooks/pre_bash_safety_check.py` (hook `PreToolUse`, testé par sous-processus réel).
+- **`.claude/settings.json`** (nouveau, versionné) : allowlist précise pour les opérations
+  ordinaires (git non destructif, pytest, py_compile), denylist explicite (force push,
+  `--no-verify`, `reset --hard`, `clean -f*`, `add -A/./--all`, `branch -D`, écriture sur
+  `app_corrupted_backup.py`/`nasdaq_3m.csv`), hook `PreToolUse` sur l'outil Bash.
+- **`.autopilot/`** (nouveau) : `policy.json` (résumé lisible, l'application réelle testée reste
+  dans `git_safety.py`), `missions.json` (file — **volontairement un seul gabarit `BLOCKED`**,
+  AF-V-02 Slice 2 n'y a pas été placée automatiquement, voir `prompts/example.md` pour la
+  justification), `README.md` (documentation complète + limites connues, honnêtes).
+  `.autopilot/state/` (runtime, verrou/état/historique) ajouté à `.gitignore`, jamais versionné.
+- **Tests** : 121 (`tests/test_autopilot_*.py` ×9, `tests/test_atomic_json_store.py`) — TDD
+  strict (RED confirmé avant chaque module) puis 9 tests de régression ajoutés après la revue
+  indépendante (voir ci-dessous), aucun sous-processus Claude/Git réel dans la suite (doublures
+  injectées + un seul test d'intégration réelle du hook via sous-processus Python, sans commande
+  Git). Suite complète : **1131/1131** (1010 + 121).
+- **Bugs réels trouvés et corrigés pendant l'implémentation** (TDD, pas seulement en revue) :
+  `SingleInstanceLock.release()` ne libérait pas un verrou détenu par une AUTRE instance de
+  process (`cmd_stop` s'exécute toujours dans une invocation séparée de celle qui a démarré la
+  boucle) — corrigé par `force_release()`, dédié à l'arrêt externe, distinct de `release()`
+  (libération par le détenteur lui-même) ; retenter une même phase (`DEVELOPING`/`TESTING`) via
+  `transition_to()` violait la table de transitions (pas de self-loop autorisé dans
+  `ALLOWED_TRANSITIONS`) — corrigé par `AutopilotStateStore.update()`, une mise à jour de champs
+  SANS transition, distincte de `transition_to()`.
+- **`/code-review` exécuté** (2 sous-agents `general-purpose` indépendants, axes
+  sécurité/architecture et reproductibilité/scope). Axe reproductibilité/scope : 0 BLOCKER, 2
+  IMPORTANT (nombre de tests obsolète dans `.autopilot/README.md`, référence à cette section avant
+  qu'elle n'existe — lecture antérieure à l'édition, résolu), 1 MINOR (fichier étranger
+  préexistant `=1.12.0`, non touché, hors scope). Axe sécurité/architecture : **3 BLOCKER
+  empiriquement reproduits**, tous corrigés avant commit :
+  1. `ALLOWED_TRANSITIONS[PLANNING]` n'incluait pas `COMPLETED` alors que `_handle_planning()` y
+     transitionne si la file de missions se vide entre deux relectures (état et file sont deux
+     fichiers séparés) — `IllegalTransitionError` en reprise réaliste. Corrigé (arête ajoutée +
+     test dédié).
+  2. `ALLOWED_TRANSITIONS[DEVELOPING]` n'incluait pas `WAITING_FOR_EXTERNAL_RESOURCE` alors que
+     `_handle_failure()` y route toute `FailureCategory.NETWORK` — une erreur réseau ordinaire
+     crashait le superviseur. Corrigé (arête ajoutée + test dédié).
+  3. `ALLOWED_TRANSITIONS[TESTING]` n'incluait ni `HUMAN_GATE_REQUIRED` ni
+     `WAITING_FOR_EXTERNAL_RESOURCE`, ET `_handle_failure()` lisait `raw_output` — absent du
+     contrat `tester_fn` (qui ne renvoie que `summary`) — donc classifiait TOUJOURS sur une
+     chaîne vide : trois échecs de test consécutifs, un cas parfaitement ordinaire, crashaient tout
+     le superviseur au lieu de déclencher l'anti-boucle prévue. Corrigé (arêtes ajoutées, repli
+     `raw_output or summary` dans `_handle_failure()`, contrat `tester_fn` précisé, 2 tests dédiés).
+  Plus 4 IMPORTANT, tous corrigés : (I1) un échec Git réel non couvert par `git_safety`
+  (`RuntimeError` au commit/push) sortait de `run_one_step()` sans être rattrapé — `_handle_committing`
+  route désormais vers `BLOCKED_SAFETY`, `_handle_pushing` vers `WAITING_FOR_EXTERNAL_RESOURCE`
+  (déjà réservé pour ce cas par `state_machine.py` mais jamais atteint) ; (I2) `check_scope_files()`
+  ne validait que les chemins passés à `add()`, jamais l'index Git réel au moment du commit —
+  `RealGitOps.commit()` relit désormais `git diff --cached --name-only` et revalide l'index réel
+  avant de committer ; (I3) aucun plafond de coût câblé sur le vrai point d'appel `real_developer_fn`
+  malgré le support existant dans `claude_invoker` — `DEFAULT_MAX_BUDGET_USD=5.0` ajouté par
+  défense en profondeur (le vrai point d'appel n'est de toute façon jamais exercé par cette
+  mission) ; (I4) le commentaire d'en-tête de `resume.ps1` affirmait une reprise déjà câblée —
+  corrigé pour refléter que `cmd_resume` reste un alias de `cmd_start` en V1. 3 MINOR restants,
+  non bloquants et documentés tels quels (paramètre `retry_phase` mort — retiré ; TOCTOU du verrou
+  mono-instance déjà partiellement disclosed ; pattern de deny `settings.json` non testable
+  depuis cette session, `git_safety.py` restant la source de vérité réellement testée).
+- **Limites V1 assumées, documentées dans `.autopilot/README.md`** : review indépendante non
+  encore câblée réellement (`real_reviewer_fn` retourne toujours "propre") ; verrou mono-instance
+  non robuste multi-OS (pas de détection de PID mort) ; historique anti-boucle non persisté à
+  travers un crash réel (repart à zéro) ; tâche planifiée Windows non enregistrée par cette
+  mission (scripts d'installation prêts, jamais exécutés) ; file de missions vide de tout vrai
+  travail ; boucle réelle (`run_until()`) jamais câblée à `cmd_start`/`cmd_resume`.
+- **`start`/`resume` n'ont jamais été exécutés pour de vrai** : aucune boucle autonome réelle
+  n'a tourné, aucun `claude -p` récursif n'a été invoqué, aucun commit/push Autopilot réel n'a eu
+  lieu — uniquement prouvé par tests avec doublures. Choix explicite, pas une incapacité :
+  démarrer une boucle non supervisée avec accès push à `master` méritait d'être vu et approuvé
+  par l'utilisateur au moins une fois avant d'être activé.
+- **Statut** : `AF-V-02 implementation: IN PROGRESS` (inchangé par cette mission), `GATE V: NOT
+  PASSED`. Bootstrap Autopilot committé séparément d'AF-V-02 (aucun mélange de scope).

@@ -67,6 +67,31 @@ def save_atomic(path: Union[str, Path], data: dict, kind: str) -> Path:
     return target
 
 
+def save_atomic_overwrite(path: Union[str, Path], data: dict, kind: str) -> Path:
+    """Comme `save_atomic()`, mais AUTORISE l'écrasement d'un fichier déjà existant — réservée à
+    un état **mutable** qui doit être réécrit à chaque transition (ex. état runtime de
+    l'Autopilot, `scripts/autopilot/`, Bootstrap 2026-09-17), jamais à un artefact scientifique
+    immuable (ceux-ci restent sur `save_atomic()`, dont le refus d'écrasement ne change jamais).
+    `kind` n'est conservé que pour la symétrie de signature avec `save_atomic()` (utile aux
+    messages d'erreur/logs appelants) — il ne peut jamais déclencher de `FileExistsError` ici.
+    Même mécanisme atomique (fichier temporaire unique par `uuid4` + `os.replace()`) : une
+    écriture interrompue ne laisse jamais le fichier cible partiellement écrit."""
+    del kind  # jamais utilisé pour bloquer l'écrasement ici, contrairement à save_atomic()
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    return target
+
+
 def load_json_tolerant(path: Union[str, Path]) -> Optional[dict]:
     """Lecture tolérante d'un fichier JSON vers un `dict` brut (pas de reconstruction de classe) :
     fichier absent, illisible ou invalide -> `None`, jamais d'exception. Bloc partagé par

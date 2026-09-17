@@ -1,0 +1,11 @@
+{
+  "missions": [
+    {
+      "id": "EXAMPLE-001",
+      "title": "Gabarit d'exemple — à remplacer par une vraie mission avant 'autopilot start'",
+      "status": "BLOCKED",
+      "prompt_file": "prompts/example.md",
+      "depends_on": []
+    }
+  ]
+}

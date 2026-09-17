@@ -1,0 +1,19 @@
+{
+  "version": "bootstrap-v1",
+  "min_disk_free_gb": 2.0,
+  "max_repeated_identical_failures": 3,
+  "protected_paths": ["app_corrupted_backup.py", "nasdaq_3m.csv"],
+  "forbidden_git_operations": [
+    "push --force / --force-with-lease / -f",
+    "push --delete / -d (suppression de branche distante)",
+    "reset --hard",
+    "clean -f / -fd / -xdf (toute variante avec force)",
+    "branch -D / --delete --force",
+    "--no-verify (sur toute commande)",
+    "add -A / --all / . (ajout global aveugle)"
+  ],
+  "max_file_size_mb": 50,
+  "require_independent_review": true,
+  "human_gate_max_options": 3,
+  "note": "Source de vérité de la politique de sécurité pour un lecteur humain — l'application réelle vit dans scripts/autopilot/git_safety.py (testé), jamais dérivée automatiquement de ce fichier en V1 (pas de parseur de policy.json dans le code, pour éviter une source de vérité dupliquée non testée)."
+}

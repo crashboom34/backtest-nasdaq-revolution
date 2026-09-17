@@ -57,3 +57,9 @@ derived_data/
 
 # === Secrets fournisseurs de données (clés API) — jamais versionné ===
 settings/data_providers.json
+
+# === Autopilot — état runtime local, jamais versionné (Bootstrap V1, 2026-09-17) ===
+# Config/policy/missions/prompts sous .autopilot/ restent versionnés (source de vérité partagée) ;
+# seul l'état mutable d'exécution (verrou, état courant, historique, logs) est local à la machine.
+.autopilot/state/
+.autopilot/*.log
