@@ -6,6 +6,24 @@
       "status": "BLOCKED",
       "prompt_file": "prompts/example.md",
       "depends_on": []
+    },
+    {
+      "id": "AF-V-02-SLICE-2",
+      "title": "AF-V-02 Slice 2 — Optimizer TRAIN-only + sélection Top-1 + exécution TEST par fold",
+      "status": "PLANNED",
+      "prompt_file": "prompts/af-v02-slice-2.md",
+      "depends_on": [],
+      "allowed_paths": ["optimizer.py", "walk_forward.py", "validation_run.py", "tests/test_optimizer.py", "tests/test_walk_forward.py", "tests/test_validation_run.py"],
+      "forbidden_paths": ["engine.py", "compute_split_dates", "strategy_contracts.py", "dataset_split.py", "strategies/", "app.py", "nasdaq_3m.csv", "app_corrupted_backup.py", "docs/adr/"],
+      "targeted_tests": ["tests/test_walk_forward.py", "tests/test_optimizer.py", "tests/test_validation_run.py"],
+      "regression_tests": [],
+      "risk_level": "high",
+      "max_attempts": 3,
+      "max_budget_usd": 20.0,
+      "requires_clean_worktree": true,
+      "scientific_contracts": ["ADR-0021-decision-6", "ADR-0021-decision-7", "ADR-0021-decision-4"],
+      "human_gate_conditions": ["modification de FINAL_HOLDOUT", "modification de la stratégie étalon Perfect Revolution V1", "conflit scientifique non résoluble sur l'implémentation de expectancy/_run_single"],
+      "completion_evidence": ["tests ciblés verts", "suite complète verte (régression complète imposée par risk_level=high)", "review indépendante sans finding BLOQUANT/MAJEUR", "aucune modification de walk_forward.py au-delà du seam décrit", "run_test_validation=True laisse Optimizer.run() inchangé pour tout appelant existant"]
     }
   ]
 }
