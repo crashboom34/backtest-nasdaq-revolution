@@ -5,17 +5,43 @@
       "title": "Gabarit d'exemple — à remplacer par une vraie mission avant 'autopilot start'",
       "status": "BLOCKED",
       "prompt_file": "prompts/example.md",
-      "depends_on": []
+      "depends_on": [],
+      "allowed_paths": [],
+      "forbidden_paths": [],
+      "targeted_tests": [],
+      "regression_tests": [],
+      "risk_level": "low",
+      "max_attempts": 3,
+      "max_budget_usd": null,
+      "requires_clean_worktree": true,
+      "scientific_contracts": [],
+      "human_gate_conditions": [],
+      "completion_evidence": []
     },
     {
       "id": "CANARY-FINALIZATION",
       "title": "Canary finalisation V1.1 — validation intégrée réelle (aucune valeur produit)",
-      "status": "PLANNED",
+      "status": "DONE",
       "prompt_file": "prompts/canary-finalization.md",
       "depends_on": [],
-      "allowed_paths": ["scripts/autopilot/canary_fixture.py", ".autopilot/canary/"],
-      "forbidden_paths": ["strategies/", "results/", "docs/adr/", "engine.py", "optimizer.py", "walk_forward.py", "app.py", "nasdaq_3m.csv", "app_corrupted_backup.py"],
-      "targeted_tests": ["tests/test_canary_finalization.py"],
+      "allowed_paths": [
+        "scripts/autopilot/canary_fixture.py",
+        ".autopilot/canary/"
+      ],
+      "forbidden_paths": [
+        "strategies/",
+        "results/",
+        "docs/adr/",
+        "engine.py",
+        "optimizer.py",
+        "walk_forward.py",
+        "app.py",
+        "nasdaq_3m.csv",
+        "app_corrupted_backup.py"
+      ],
+      "targeted_tests": [
+        "tests/test_canary_finalization.py"
+      ],
       "regression_tests": [],
       "risk_level": "low",
       "max_attempts": 2,
@@ -23,7 +49,10 @@
       "requires_clean_worktree": true,
       "scientific_contracts": [],
       "human_gate_conditions": [],
-      "completion_evidence": [".autopilot/canary/finalization_marker.md existe", "tests/test_canary_finalization.py passe intégralement"]
+      "completion_evidence": [
+        ".autopilot/canary/finalization_marker.md existe",
+        "tests/test_canary_finalization.py passe intégralement"
+      ]
     },
     {
       "id": "AF-V-02-SLICE-2",
@@ -31,17 +60,52 @@
       "status": "PLANNED",
       "prompt_file": "prompts/af-v02-slice-2.md",
       "depends_on": [],
-      "allowed_paths": ["optimizer.py", "walk_forward.py", "validation_run.py", "tests/test_optimizer.py", "tests/test_walk_forward.py", "tests/test_validation_run.py"],
-      "forbidden_paths": ["engine.py", "compute_split_dates", "strategy_contracts.py", "dataset_split.py", "strategies/", "app.py", "nasdaq_3m.csv", "app_corrupted_backup.py", "docs/adr/"],
-      "targeted_tests": ["tests/test_walk_forward.py", "tests/test_optimizer.py", "tests/test_validation_run.py"],
+      "allowed_paths": [
+        "optimizer.py",
+        "walk_forward.py",
+        "validation_run.py",
+        "tests/test_optimizer.py",
+        "tests/test_walk_forward.py",
+        "tests/test_validation_run.py"
+      ],
+      "forbidden_paths": [
+        "engine.py",
+        "compute_split_dates",
+        "strategy_contracts.py",
+        "dataset_split.py",
+        "strategies/",
+        "app.py",
+        "nasdaq_3m.csv",
+        "app_corrupted_backup.py",
+        "docs/adr/"
+      ],
+      "targeted_tests": [
+        "tests/test_walk_forward.py",
+        "tests/test_optimizer.py",
+        "tests/test_validation_run.py"
+      ],
       "regression_tests": [],
       "risk_level": "high",
       "max_attempts": 3,
       "max_budget_usd": 20.0,
       "requires_clean_worktree": true,
-      "scientific_contracts": ["ADR-0021-decision-6", "ADR-0021-decision-7", "ADR-0021-decision-4"],
-      "human_gate_conditions": ["modification de FINAL_HOLDOUT", "modification de la stratégie étalon Perfect Revolution V1", "conflit scientifique non résoluble sur l'implémentation de expectancy/_run_single"],
-      "completion_evidence": ["tests ciblés verts", "suite complète verte (régression complète imposée par risk_level=high)", "review indépendante sans finding BLOQUANT/MAJEUR", "aucune modification de walk_forward.py au-delà du seam décrit", "run_test_validation=True laisse Optimizer.run() inchangé pour tout appelant existant"]
+      "scientific_contracts": [
+        "ADR-0021-decision-6",
+        "ADR-0021-decision-7",
+        "ADR-0021-decision-4"
+      ],
+      "human_gate_conditions": [
+        "modification de FINAL_HOLDOUT",
+        "modification de la stratégie étalon Perfect Revolution V1",
+        "conflit scientifique non résoluble sur l'implémentation de expectancy/_run_single"
+      ],
+      "completion_evidence": [
+        "tests ciblés verts",
+        "suite complète verte (régression complète imposée par risk_level=high)",
+        "review indépendante sans finding BLOQUANT/MAJEUR",
+        "aucune modification de walk_forward.py au-delà du seam décrit",
+        "run_test_validation=True laisse Optimizer.run() inchangé pour tout appelant existant"
+      ]
     }
   ]
 }

@@ -9,6 +9,4 @@ from __future__ import annotations
 
 
 def format_greeting(name: str, times: int) -> str:
-    # BUG intentionnel de FIXTURE (jamais du code scientifique) : ne répète pas le salut `times`
-    # fois comme l'exige `tests/test_canary_finalization.py` — le Developer réel doit le corriger.
-    return f"Bonjour, {name} !"
+    return " ".join([f"Bonjour, {name} !"] * times)
