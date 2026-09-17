@@ -205,12 +205,146 @@ class OosValidationSpecification:
     holdout_end: str
 
 
-ValidationSpecification = Union[OosValidationSpecification]
-"""Contrat commun explicite (tagged union, AF-V-06) — étendre en ajoutant un membre par futur
-`validation_type`, jamais en élargissant `OosValidationSpecification` elle-même."""
+VALIDATION_TYPE_WALK_FORWARD = "walk_forward"
+"""AF-V-02 (Walk-Forward), voir `docs/adr/0021-walk-forward-rolling-calendar-v1.md` Décision 2 —
+deuxième `validation_type` enregistré après `"oos"`. Les dataclasses ci-dessous (`FoldDefinition`,
+`FoldSelection`, `FoldResult`, `AggregateResult`, `WalkForwardSpecification`,
+`WalkForwardEvidence`) vivent ici, jamais dans `walk_forward.py` : ce module doit rester l'unique
+source canonique de toute forme `Specification`/`Evidence` typée (même principe que `"oos"`), et
+`walk_forward.py` a besoin d'appeler `build_validation_run()` en fin de run — le sens d'import
+`walk_forward.py -> validation_run.py` est donc le seul viable sans cycle. Ce module reste un leaf
+(aucun import de `engine.py`/`optimizer.py`/`walk_forward.py`) : ces dataclasses sont de purs
+conteneurs de données, aucune logique de géométrie/readiness/résolution n'est importée ici — voir
+`walk_forward.py` pour les fonctions `build_walk_forward_specification()`/
+`compute_fold_definitions()` qui les construisent."""
 
-ValidationEvidence = Union[OosValidationEvidence]
-"""Contrat commun explicite (tagged union, AF-V-06) — même principe que `ValidationSpecification`."""
+
+@dataclass(frozen=True)
+class FoldDefinition:
+    """Fenêtres TRAIN/TEST résolues d'UN fold Walk-Forward — voir ADR 0021 Décision 3 (forme
+    minimale, `/domain-modeling` + `/codebase-design`) et Décision 4 (règle terminale V2, corrigée
+    2026-09-15). `train_start` n'a jamais de variante `effective` (jamais readiness-ajusté, même
+    traitement qu'un point de démarrage de sélection d'exécution). `effective_test_end`/
+    `test_end_adjusted` du DERNIER fold (`is_last_fold=True`) valent respectivement
+    `requested_test_end`/`False` INCONDITIONNELLEMENT — jamais résolus par
+    `resolve_state_ready_boundary()` (aucun successeur à protéger ; un décalage en avant
+    risquerait `FINAL_HOLDOUT`)."""
+
+    fold_index: int
+    fold_id: str
+    train_start: str
+    requested_boundary: str
+    effective_boundary: str
+    boundary_adjusted: bool
+    requested_test_end: str
+    effective_test_end: str
+    test_end_adjusted: bool
+    is_last_fold: bool
+
+
+@dataclass(frozen=True)
+class FoldSelection:
+    """Sélection TRAIN Top-1 d'un fold, immuable une fois construite — ADR 0021 Décision 6/7.
+    Hors scope Slice 1 (aucune recherche TRAIN réelle n'existe encore) : forme figée pour la
+    solidité du typage `WalkForwardEvidence`/`FoldResult`, population réelle différée."""
+
+    fold_id: str
+    selected_params: dict
+    selected_params_hash: str
+    score_train: float
+    rank_in_train: int
+    train_candidates_evaluated: int
+    train_candidates_unique: int
+    train_candidates_eligible: int
+    search_space_hash: str
+    algorithm: str
+    fold_seed: Optional[int]
+
+
+@dataclass(frozen=True)
+class FoldResult:
+    """Observation TEST factuelle d'un fold — ADR 0021 Décision 13/15 : uniquement des faits
+    mesurés, `None` explicite si non calculable (ex. `n_trades == 0`), jamais une valeur inventée.
+    Hors scope Slice 1 (aucune exécution TEST réelle) : forme figée, population différée."""
+
+    fold_id: str
+    definition: FoldDefinition
+    selection: FoldSelection
+    n_trades: int
+    net_ret_pct: float
+    max_dd_pct: Optional[float]
+    profit_factor: Optional[float]
+    win_rate: Optional[float]
+    expectancy: Optional[float]
+    score_test: float
+    zero_trade_oos: bool
+    forced_closes: int
+    coverage_bars: int
+
+
+@dataclass(frozen=True)
+class AggregateResult:
+    """Agrégation OOS concaténée sur l'ensemble des folds — ADR 0021 Décision 15 (trades
+    concaténés littéralement, PF/win-rate globaux jamais moyennés). Hors scope Slice 1 (aucun
+    fold exécuté) : forme figée, population différée."""
+
+    n_folds: int
+    n_folds_zero_trade: int
+    total_oos_trades: int
+    oos_net_return_pct: float
+    oos_max_dd_pct: Optional[float]
+    oos_profit_factor: Optional[float]
+    oos_win_rate: Optional[float]
+    oos_sharpe: Optional[float]
+    mean_fold_score_test: Optional[float]
+    median_fold_score_test: Optional[float]
+    worst_fold_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class WalkForwardSpecification:
+    """Intention figée AVANT exécution d'un Walk-Forward — ADR 0021 Décisions 1/4/9. `base_params`
+    fige LE SEUL jeu de paramètres utilisé pour la résolution readiness de TOUS les folds (jamais
+    les `selected_params` variables par fold d'une future recherche TRAIN) — construite via
+    `walk_forward.build_walk_forward_specification()`, jamais directement (validation de
+    `geometry`/`step_period==test_period`/`allow_partial_last_fold` non dupliquée ici, voir
+    docstring de ce module)."""
+
+    geometry: str
+    train_period: str
+    test_period: str
+    step_period: str
+    allow_partial_last_fold: bool
+    position_transition_policy: str
+    walk_forward_semantics_version: str
+    base_params: dict
+    verdict_policy_id: Optional[str] = None
+    master_seed: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class WalkForwardEvidence:
+    """Preuve factuelle + verdict scientifique d'un Walk-Forward — ADR 0021 Décision 13 :
+    `fold_results`/`aggregate` ne portent que des faits mesurés ; `scientific_verdict` est la
+    SEULE valeur de jugement, elle-même contrainte (`PASS` impossible sans politique de verdict
+    pré-enregistrée). `execution_status` (structurel, mirroring `ValidationRun.status`) reste
+    distinct de `scientific_verdict` : une erreur technique n'est jamais traduite en `FAIL`
+    scientifique (ADR 0021 Décision 13)."""
+
+    fold_results: Tuple[FoldResult, ...]
+    aggregate: Optional[AggregateResult]
+    execution_status: str
+    scientific_verdict: str
+    verdict_reasons: Tuple[str, ...]
+
+
+ValidationSpecification = Union[OosValidationSpecification, WalkForwardSpecification]
+"""Contrat commun explicite (tagged union, AF-V-06/AF-V-02) — étendre en ajoutant un membre par
+futur `validation_type`, jamais en élargissant un membre existant."""
+
+ValidationEvidence = Union[OosValidationEvidence, WalkForwardEvidence]
+"""Contrat commun explicite (tagged union, AF-V-06/AF-V-02) — même principe que
+`ValidationSpecification`."""
 
 
 @dataclass(frozen=True)
@@ -239,6 +373,7 @@ class ValidationRun:
 
 _VALIDATION_TYPES: Dict[str, Tuple[type, type]] = {
     VALIDATION_TYPE_OOS: (OosValidationSpecification, OosValidationEvidence),
+    VALIDATION_TYPE_WALK_FORWARD: (WalkForwardSpecification, WalkForwardEvidence),
 }
 """Registre explicite `validation_type -> (classe specification, classe evidence)` — voir
 docstring du module (AF-V-06). Étendre en ajoutant une entrée par futur ticket

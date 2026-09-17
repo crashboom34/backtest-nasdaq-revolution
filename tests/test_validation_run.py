@@ -119,11 +119,14 @@ def test_build_validation_run_requires_a_real_dataset_snapshot_id(bad_id):
         _run(dataset_snapshot_id=bad_id)
 
 
-def test_build_validation_run_only_accepts_oos_validation_type_for_this_ticket():
-    """Contrat AF-V-01 explicite : uniquement validation_type="oos" — la généralisation typée
-    (Walk-Forward, Monte-Carlo...) est hors scope, réservée à AF-V-06."""
+def test_build_validation_run_only_accepts_registered_validation_types():
+    """Contrat AF-V-01/AF-V-06/AF-V-02 : seuls les types explicitement enregistrés dans
+    _VALIDATION_TYPES sont acceptés — "walk_forward" est désormais enregistré (AF-V-02, ce ticket),
+    ce test utilise donc un type encore non enregistré ("monte_carlo", réservé à un futur ticket)
+    pour continuer à vérifier le rejet des types non enregistrés (mise à jour mécanique, 2026-09-15
+    — le probe précédent, "walk_forward", n'aurait plus prouvé ce qu'il prétendait)."""
     with pytest.raises(ValueError):
-        _run(validation_type="walk_forward")
+        _run(validation_type="monte_carlo")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -350,9 +353,11 @@ def test_build_validation_run_rejects_evidence_of_the_wrong_type():
 
 def test_build_validation_run_rejects_unregistered_validation_type_even_with_valid_objects():
     """Un validation_type non enregistré est rejeté même si specification/evidence sont par
-    ailleurs des objets valides — AF-V-06 ne préjuge d'aucune variante future non construite ici."""
+    ailleurs des objets valides — AF-V-06 ne préjuge d'aucune variante future non construite ici.
+    "walk_forward" (probe original) est désormais enregistré (AF-V-02) : remplacé par
+    "monte_carlo", toujours non enregistré (mise à jour mécanique, 2026-09-15)."""
     with pytest.raises(ValueError):
-        _run(validation_type="walk_forward", specification=_specification(), evidence=_evidence())
+        _run(validation_type="monte_carlo", specification=_specification(), evidence=_evidence())
 
 
 def test_save_and_load_validation_run_round_trips_the_new_specification(tmp_path):
@@ -563,3 +568,123 @@ def test_load_validation_run_raises_on_specification_shape_mismatch(tmp_path):
 
     with pytest.raises(IncoherentValidationRunError):
         load_validation_run(path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 1 — registre étendu avec "walk_forward" (WalkForwardSpecification/Evidence)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _fold_definition(fold_index=0, is_last_fold=True):
+    from validation_run import FoldDefinition
+    return FoldDefinition(
+        fold_index=fold_index, fold_id=f"fold_{fold_index:03d}",
+        train_start="2020-01-01T00:00:00+00:00",
+        requested_boundary="2022-01-01T00:00:00+00:00", effective_boundary="2022-01-01T00:00:00+00:00",
+        boundary_adjusted=False,
+        requested_test_end="2022-07-01T00:00:00+00:00", effective_test_end="2022-07-01T00:00:00+00:00",
+        test_end_adjusted=False, is_last_fold=is_last_fold,
+    )
+
+
+def _walk_forward_specification(**kwargs):
+    from validation_run import WalkForwardSpecification
+    kwargs.setdefault("geometry", "rolling")
+    kwargs.setdefault("train_period", "P24M")
+    kwargs.setdefault("test_period", "P6M")
+    kwargs.setdefault("step_period", "P6M")
+    kwargs.setdefault("allow_partial_last_fold", False)
+    kwargs.setdefault("position_transition_policy", "flat_each_fold_v1")
+    kwargs.setdefault("walk_forward_semantics_version", "rolling-calendar-v2")
+    kwargs.setdefault("base_params", {"or_start_h": 15, "or_start_m": 30})
+    kwargs.setdefault("verdict_policy_id", None)
+    kwargs.setdefault("master_seed", None)
+    return WalkForwardSpecification(**kwargs)
+
+
+def _walk_forward_evidence(**kwargs):
+    from validation_run import WalkForwardEvidence
+    kwargs.setdefault("fold_results", ())
+    kwargs.setdefault("aggregate", None)
+    kwargs.setdefault("execution_status", "completed")
+    kwargs.setdefault("scientific_verdict", "INCONCLUSIVE")
+    kwargs.setdefault("verdict_reasons", ("aucune politique de verdict enregistrée",))
+    return WalkForwardEvidence(**kwargs)
+
+
+def test_fold_definition_is_an_explicit_type_not_an_opaque_dict():
+    fold = _fold_definition()
+    from validation_run import FoldDefinition
+    assert isinstance(fold, FoldDefinition)
+
+
+def test_walk_forward_validation_type_is_registered():
+    from validation_run import VALIDATION_TYPE_WALK_FORWARD
+    assert VALIDATION_TYPE_WALK_FORWARD == "walk_forward"
+
+
+def test_build_validation_run_accepts_a_correct_walk_forward_pair():
+    run = _run(
+        validation_type="walk_forward",
+        specification=_walk_forward_specification(),
+        evidence=_walk_forward_evidence(),
+    )
+    assert run.validation_type == "walk_forward"
+    from validation_run import WalkForwardEvidence, WalkForwardSpecification
+    assert isinstance(run.specification, WalkForwardSpecification)
+    assert isinstance(run.evidence, WalkForwardEvidence)
+
+
+def test_build_validation_run_rejects_walk_forward_specification_with_oos_evidence():
+    """Mauvais pairing explicitement rejeté — jamais une combinaison typée incohérente acceptée."""
+    with pytest.raises(ValueError):
+        _run(
+            validation_type="walk_forward",
+            specification=_walk_forward_specification(),
+            evidence=_evidence(),
+        )
+
+
+def test_build_validation_run_rejects_oos_specification_with_walk_forward_evidence():
+    with pytest.raises(ValueError):
+        _run(
+            validation_type="oos",
+            specification=_specification(),
+            evidence=_walk_forward_evidence(),
+        )
+
+
+def test_existing_oos_validation_run_construction_is_unaffected_by_walk_forward_registration():
+    """Non-régression explicite : enregistrer "walk_forward" ne doit rien changer au chemin "oos"
+    déjà établi (AF-V-01/AF-V-06)."""
+    run = _run()
+    assert run.validation_type == "oos"
+    assert isinstance(run.specification, OosValidationSpecification)
+    assert isinstance(run.evidence, OosValidationEvidence)
+
+
+def test_save_and_load_validation_run_round_trips_a_walk_forward_run(tmp_path):
+    """Round-trip du contenu significatif — pas une égalité stricte d'objet : `fold_results`/
+    `verdict_reasons` (`Tuple[...]`) redeviennent des `list` après un aller-retour JSON générique
+    (limitation connue, pas spécifique à Walk-Forward — `load_validation_run()` ne rehydrate pas
+    plus que ce que fait déjà `evidence_cls(**raw_evidence)` pour "oos"). Une rehydratation fine
+    des `FoldResult`/`AggregateResult` imbriqués reste hors scope Slice 1 (`fold_results` est
+    toujours vide tant qu'aucune exécution TEST réelle n'existe, voir mission section 1)."""
+    run = _run(
+        validation_run_id="val_wf",
+        validation_type="walk_forward",
+        specification=_walk_forward_specification(),
+        evidence=_walk_forward_evidence(),
+    )
+    path = tmp_path / "wf_run.json"
+    save_validation_run(path, run)
+
+    loaded = load_validation_run(path)
+
+    assert loaded.validation_type == "walk_forward"
+    assert loaded.specification.geometry == run.specification.geometry
+    assert loaded.specification.base_params == run.specification.base_params
+    assert loaded.evidence.execution_status == run.evidence.execution_status
+    assert loaded.evidence.scientific_verdict == run.evidence.scientific_verdict
+    assert list(loaded.evidence.verdict_reasons) == list(run.evidence.verdict_reasons)
+    assert list(loaded.evidence.fold_results) == list(run.evidence.fold_results)

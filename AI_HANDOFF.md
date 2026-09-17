@@ -1490,3 +1490,67 @@ valider explicitement par l'utilisateur avant toute implémentation).
   d'exploitabilité UI déjà validé.
 - **Prochaine mission unique recommandée** : `AF-V-02` — implémentation TDD du Walk-Forward V1
   conformément à `docs/adr/0021-*.md` et à la spec figée — **non commencée dans cette mission**.
+
+## 22. Vision produit / UX synchronisée avant Autopilot — documentaire uniquement (2026-09-16)
+
+**Priorité immédiate inchangée : `AF-V-02` (Walk-Forward).** Statut au moment de cette mission :
+Slice 1 (DatasetSplitPlan `VALIDATION` + cœur géométrique déterministe) **implémentée en local,
+non committée** (`AF-V-02 implementation: IN PROGRESS`, `GATE V: NOT PASSED` — voir le rapport de
+la mission Slice 1 pour le détail ; ce §22 ne touche ni ne documente ce travail en détail, mission
+strictement documentaire produit/UX, aucun code modifié). Checkpoint Git au début de cette mission :
+`4680448cf4324ae3b33480fc8baf1345eedb214c` (= `origin/master`, divergence `0 0`).
+
+## 23. AF-V-02 Slice 1 — géométrie déterministe Walk-Forward committée (2026-09-17)
+
+Sécurisée et committée à l'ouverture de la mission Bootstrap Autopilot (autorisation explicite de
+commit/push accordée par cette mission — voir son rapport pour la politique complète). Travail
+réalisé lors de la mission Slice 1 précédente (2026-09-15/16), resté non committé jusqu'ici ;
+aucune modification de code entre-temps, uniquement re-vérifié vert avant commit
+(122/122 ciblés, suite complète re-confirmée dans le rapport de cette mission).
+
+- **Contenu** : `WalkForwardSpecification`/`FoldDefinition`/`FoldSelection`/`FoldResult`/
+  `AggregateResult`/`WalkForwardEvidence` (`validation_run.py`, registre `_VALIDATION_TYPES`
+  étendu) ; `walk_forward.py` (géométrie Rolling déterministe, guards FINAL_HOLDOUT/overlap,
+  `WALK_FORWARD_SEMANTICS_VERSION="rolling-calendar-v2"`) ; nouveau `DatasetSplitPlan`
+  (`split_perfect_revolution_v1_walk_forward_v1`, zone `VALIDATION` peuplée, `FINAL_HOLDOUT`
+  inchangé, plan historique jamais modifié) via `scripts/create_walk_forward_validation_split_plan.py`.
+  Détail complet : rapports des missions Slice 1 et de correction terminale (2026-09-15/16),
+  `docs/adr/0021-walk-forward-rolling-calendar-v1.md`.
+- **Non inclus dans cette tranche** (Slice 2+, toujours non commencé) : Optimizer TRAIN-only réel,
+  sélection Top-1 réelle, exécution TEST OOS réelle, persistence complète, agrégation OOS réelle,
+  reprise complète, Monte-Carlo, Parameter Stability.
+- **Statut** : `AF-V-02 implementation: IN PROGRESS`. `GATE V` reste **NON PASSÉE**.
+
+**Ce qui a changé** : la vision produit long terme (« AlphaForge = Strategy Factory », pas un
+simple backtester) et la direction UX/UI sont désormais documentées séparément, pour qu'un futur
+Autopilot puisse distinguer le présent (AF-V-02, validation scientifique) du futur (tout le reste)
+sans jamais confondre documentation produit et preuve d'implémentation :
+
+- **`docs/product/PRODUCT_VISION_V2.md`** — Strategy Factory : Feature Registry massif, génération
+  automatique de stratégies, contrôle combinatoire, méthodes de Discovery, multi-objectifs/Pareto,
+  régimes de marché, Strategy Genealogy, conservation des échecs, détection de similarité,
+  diversification, Portfolio Engine, replay de trade, audit automatique, budget de calcul, early
+  stopping, construction sans code, export ProRealTime/ProOrder, Paper/Forward testing, Strategy
+  Health. Chaque capacité rattachée à un track/gate déjà existant dans `MASTER_ROADMAP.md`
+  (§9 y référence ce document) — **aucun nouveau track, aucune nouvelle gate, aucun réordonnancement**.
+- **`docs/ux/UX_UI_PRODUCT_DIRECTION.md`** — langue française, mode guidé/expert, interprétation
+  des métriques, niveau de preuve (Evidence Ladder), séparation stricte Performance ≠ Robustesse,
+  design system (direction visuelle), grammaire de statuts. Complète, sans le dupliquer,
+  `docs/architecture/UI_UX_ARCHITECTURE.md` (architecture de code/navigation technique, inchangé).
+
+**Statuts utilisés, strictement** : `ACCEPTED PRODUCT DIRECTION / IMPLEMENTATION DEFERRED` pour
+la quasi-totalité (sauf preuve contraire déjà présente dans le dépôt) ; `PLANNED / DEFERRED` pour
+Portfolio Engine (track/gate déjà nommés) et ProRealTime/Paper-Forward ; `PROPOSED / DEFERRED`
+pour Strategy Health (déjà `FUTURE` dans `DOMAIN_MODEL.md` §15). **Rien n'est déclaré
+`IMPLEMENTED`/`TESTED`/`DONE`.**
+
+**Tensions signalées, non résolues par cette mission** (voir les deux documents pour le détail) :
+navigation produit à 12 espaces (mission) vs 10 espaces déjà documentés
+(`UI_UX_ARCHITECTURE.md` §2) ; thème « clair premium » visé vs thème sombre actuel
+(`.streamlit/config.toml`). Deux concepts de domaine nouveaux identifiés sans être définis
+(`Strategy Genealogy`, `Rejected Strategy History`) — nécessitent une future session
+`/domain-modeling` réelle avant toute conception.
+
+**Aucune fonctionnalité listée dans ces deux documents n'a été implémentée par cette mission.**
+Aucun contrat scientifique existant (`exact-boundary-v2`/`daily-state-ready-v1`/
+`rolling-calendar-v2`) n'a été modifié.
