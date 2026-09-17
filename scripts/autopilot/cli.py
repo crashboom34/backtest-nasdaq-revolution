@@ -879,7 +879,24 @@ def cmd_resume(args: argparse.Namespace) -> int:
     )
 
 
+def _ensure_utf8_stdio() -> None:
+    """Finalisation sécurité — bug réel confirmé en conditions réelles (reprise d'AF-V-02 Slice 2
+    après l'arrêt coopératif) : le vrai travail (verrou libéré, état `HUMAN_GATE_REQUIRED`
+    correctement persisté) s'était terminé sans problème, mais le DERNIER `print(...)` du CLI a
+    ensuite levé `UnicodeEncodeError` — un `stop_reason` de Human Gate contient un emoji
+    (`format_human_gate_markdown()`), or la console Windows encode par défaut en `cp1252`,
+    incapable de le représenter. Ceci a fait ressortir le process avec le code de sortie GÉNÉRIQUE
+    1 (crash Python) au lieu du VRAI code 2 (`HUMAN_GATE_REQUIRED`), masquant l'information réelle
+    derrière un traceback. `.reconfigure()` est absent d'un flux redirigé/capturé (tests, certaines
+    redirections) — jamais une exception ici pour cette raison, jamais bloquant pour l'appelant."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    _ensure_utf8_stdio()
     parser = argparse.ArgumentParser(prog="autopilot", description="Superviseur Autopilot AlphaForge V2")
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name in ("start", "resume"):

@@ -34,11 +34,10 @@ from typing import Callable, List, Optional, Tuple
 
 from scripts.autopilot.quota_detector import FailureCategory, classify_failure
 
-RunFn = Callable[[List[str]], Tuple[int, str, str]]
+RunFn = Callable[..., Tuple[int, str, str]]  # (argv, prompt, cwd=...) -> (exit_code, stdout, stderr)
 
 
 def build_claude_argv(
-    prompt: str,
     output_format: str = "json",
     permission_mode: Optional[str] = None,
     max_budget_usd: Optional[float] = None,
@@ -47,12 +46,21 @@ def build_claude_argv(
     model: Optional[str] = None,
     json_schema: Optional[str] = None,
 ) -> List[str]:
-    """Construit l'argv d'un appel `claude -p ...` non interactif. `permission_mode` : l'un de
-    `acceptEdits`/`auto`/`bypassPermissions`/`manual`/`dontAsk`/`plan` (choix réels confirmés,
-    `claude --help`) — jamais validé ici (la CLI validera elle-même), pour ne pas dupliquer une
-    liste qui pourrait changer de version en version. `json_schema` : schéma JSON (chaîne) pour
-    une sortie structurée validée par Claude Code lui-même (`--json-schema`, confirmé disponible
-    sur 2.1.220) — utilisé par le Reviewer indépendant (mission §3.3/§6)."""
+    """Construit l'argv d'un appel `claude -p ...` non interactif — JAMAIS le prompt lui-même
+    (mission finalisation sécurité, bug réel confirmé en conditions réelles sur AF-V-02 Slice 2) :
+    un prompt ajouté comme dernier argument de la ligne de commande a fait échouer un `claude -p`
+    réel sur Windows avec `FileNotFoundError: [WinError 206] Nom de fichier ou extension trop
+    long` dès qu'un lot de diff de review dépassait la limite de longueur de ligne de commande de
+    `CreateProcess` (~32k caractères). Confirmé empiriquement (`echo "..." | claude -p
+    --output-format json` répond correctement) : `claude -p` lit le prompt depuis STDIN en
+    l'absence d'argument positionnel — voir `ClaudeInvoker.run()`/`_real_run()`, qui transmettent
+    désormais le prompt via `subprocess.run(..., input=prompt)`, sans limite de longueur
+    pratique de ce type. `permission_mode` : l'un de `acceptEdits`/`auto`/`bypassPermissions`/
+    `manual`/`dontAsk`/`plan` (choix réels confirmés, `claude --help`) — jamais validé ici (la CLI
+    validera elle-même), pour ne pas dupliquer une liste qui pourrait changer de version en
+    version. `json_schema` : schéma JSON (chaîne) pour une sortie structurée validée par Claude
+    Code lui-même (`--json-schema`, confirmé disponible sur 2.1.220) — utilisé par le Reviewer
+    indépendant (mission §3.3/§6)."""
     argv: List[str] = ["claude", "-p", "--output-format", output_format]
     if permission_mode:
         argv += ["--permission-mode", permission_mode]
@@ -66,7 +74,6 @@ def build_claude_argv(
         argv += ["--model", model]
     if json_schema:
         argv += ["--json-schema", json_schema]
-    argv.append(prompt)
     return argv
 
 
@@ -136,7 +143,7 @@ class ClaudeInvocationResult:
 CLAUDE_SUBPROCESS_TIMEOUT_SECONDS = 1800
 
 
-def _real_run(argv: List[str], cwd: Optional[str] = None) -> Tuple[int, str, str]:
+def _real_run(argv: List[str], prompt: str, cwd: Optional[str] = None) -> Tuple[int, str, str]:
     import subprocess
 
     # `encoding="utf-8", errors="replace"` explicite — jamais le défaut de locale Windows
@@ -145,11 +152,14 @@ def _real_run(argv: List[str], cwd: Optional[str] = None) -> Tuple[int, str, str
     # V1.1 : les réponses JSON de `claude -p` peuvent porter des caractères accentués (dépôt en
     # français), tout comme le diff/les messages Git. `cwd` explicite (finalisation V1.1 §3) —
     # jamais hérité implicitement du répertoire de travail du process appelant : un `claude -p`
-    # lancé depuis un mauvais répertoire modifierait/lirait le mauvais dépôt.
+    # lancé depuis un mauvais répertoire modifierait/lirait le mauvais dépôt. `input=prompt`
+    # (finalisation sécurité, bug réel confirmé sur AF-V-02 Slice 2) — le prompt n'est JAMAIS un
+    # élément d'`argv` (limite de longueur de ligne de commande Windows, ~32k caractères, dépassée
+    # en conditions réelles par un lot de diff de review), transmis par STDIN à la place.
     try:
         completed = subprocess.run(
-            argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=CLAUDE_SUBPROCESS_TIMEOUT_SECONDS,
+            argv, input=prompt, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=CLAUDE_SUBPROCESS_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
         # Jamais une exception non rattrapée hors de `ClaudeInvoker.run()` (contrat : toujours un
@@ -174,11 +184,14 @@ class ClaudeInvoker:
         self._cwd = cwd
 
     def run(self, prompt: str, **kwargs) -> ClaudeInvocationResult:
-        argv = build_claude_argv(prompt, **kwargs)
+        # Le prompt n'est JAMAIS passé à `build_claude_argv()` (finalisation sécurité, bug réel
+        # confirmé) — transmis séparément à `run_fn` pour un envoi par STDIN, jamais concaténé
+        # dans la ligne de commande (limite de longueur Windows dépassée en conditions réelles).
+        argv = build_claude_argv(**kwargs)
         if self._cwd is not None:
-            exit_code, stdout, stderr = self._run_fn(argv, cwd=self._cwd)
+            exit_code, stdout, stderr = self._run_fn(argv, prompt, cwd=self._cwd)
         else:
-            exit_code, stdout, stderr = self._run_fn(argv)
+            exit_code, stdout, stderr = self._run_fn(argv, prompt)
         category = classify_failure(stderr or stdout) if exit_code != 0 else None
         parsed: Optional[dict] = None
         if stdout:

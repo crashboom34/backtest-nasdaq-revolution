@@ -881,6 +881,50 @@ def test_main_stop_command_never_removes_a_lock_with_unreadable_content(tmp_path
     assert (tmp_path / "autopilot.lock").exists()  # jamais supprimé par doute
 
 
+def test_ensure_utf8_stdio_never_crashes_when_printing_non_cp1252_characters():
+    """Régression — bug réel confirmé en conditions réelles (reprise d'AF-V-02 Slice 2 après
+    l'arrêt coopératif) : le vrai travail (verrou libéré, état HUMAN_GATE_REQUIRED persisté)
+    s'était terminé correctement, mais le DERNIER `print(build_status_summary(store))` a ensuite
+    levé `UnicodeEncodeError: 'charmap' codec can't encode character '\\U0001f6a6'` — le
+    `stop_reason` d'un Human Gate contient un emoji (`format_human_gate_markdown()`), et la
+    console Windows par défaut encode en `cp1252`, incapable de le représenter. Ceci a fait
+    ressortir le process avec le code de sortie GÉNÉRIQUE 1 (crash Python) au lieu du VRAI code 2
+    (HUMAN_GATE_REQUIRED), masquant l'information réelle. `_ensure_utf8_stdio()` doit rendre
+    `sys.stdout`/`sys.stderr` capables d'imprimer n'importe quel caractère sans jamais lever."""
+    import io
+
+    import scripts.autopilot.cli as cli_module
+
+    fake_stdout = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", write_through=True)
+    original_stdout = sys.stdout
+    sys.stdout = fake_stdout
+    try:
+        cli_module._ensure_utf8_stdio()
+        print("# 🚦 HUMAN_GATE_REQUIRED\n\nTexte accentué : éàî, ✅ option recommandée")
+    finally:
+        sys.stdout = original_stdout
+
+
+def test_ensure_utf8_stdio_tolerates_a_stream_without_reconfigure():
+    """Un flux redirigé/capturé (ex. par un test, ou une redirection shell inhabituelle) peut ne
+    pas exposer `.reconfigure()` — ne doit jamais faire planter l'appelant pour cette raison."""
+    import scripts.autopilot.cli as cli_module
+
+    class _StreamWithoutReconfigure:
+        def write(self, s):
+            pass
+
+        def flush(self):
+            pass
+
+    original_stdout = sys.stdout
+    sys.stdout = _StreamWithoutReconfigure()
+    try:
+        cli_module._ensure_utf8_stdio()  # ne doit JAMAIS lever AttributeError
+    finally:
+        sys.stdout = original_stdout
+
+
 def test_main_rejects_an_unknown_command():
     with pytest.raises(SystemExit):
         main(["this-command-does-not-exist"])

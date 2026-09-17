@@ -3,7 +3,15 @@ tests/test_autopilot_claude_invoker.py — Bootstrap Autopilot V1 (2026-09-17), 
 
 `ClaudeInvoker` construit l'argv réel (uniquement des flags confirmés par `claude --help` sur la
 version installée, 2.1.220 — jamais un flag supposé) et classe l'échec via `quota_detector` sans
-jamais réellement lancer de sous-processus dans ces tests (fonction `run_fn` injectée)."""
+jamais réellement lancer de sous-processus dans ces tests (fonction `run_fn` injectée).
+
+**Finalisation sécurité (2026-09-17)** : le prompt n'est plus JAMAIS un élément de `argv` — bug
+réel confirmé en conditions réelles sur AF-V-02 Slice 2, un `claude -p` réel a échoué sur Windows
+avec `FileNotFoundError: [WinError 206] Nom de fichier ou extension trop long` dès qu'un lot de
+diff de review dépassait la limite de longueur de ligne de commande de `CreateProcess`. Le prompt
+est désormais transmis en second argument positionnel à `run_fn` (STDIN pour `_real_run()`,
+confirmé empiriquement que `claude -p` lit le prompt depuis STDIN en l'absence d'argument
+positionnel)."""
 
 from __future__ import annotations
 
@@ -31,7 +39,7 @@ def test_real_run_converts_a_subprocess_timeout_into_a_graceful_failure(monkeypa
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    exit_code, stdout, stderr = invoker_module._real_run(["claude", "-p", "x"])
+    exit_code, stdout, stderr = invoker_module._real_run(["claude", "-p"], "x")
 
     assert exit_code == 1
     assert "timeout" in stderr.lower()
@@ -64,19 +72,73 @@ def test_claude_invoker_passes_an_explicit_cwd_through_to_real_run(monkeypatch):
     assert seen_kwargs.get("cwd") == "C:/some/dedicated/worktree"
 
 
-def test_claude_invoker_without_cwd_preserves_the_historical_calling_convention():
-    """Sans `cwd` (défaut `None`), le comportement historique est préservé à l'identique — jamais
-    de régression pour un `run_fn` de test existant qui n'accepte pas ce paramètre."""
+def test_claude_invoker_without_cwd_calls_run_fn_with_argv_and_prompt_as_separate_args():
+    """Finalisation sécurité : sans `cwd` (défaut `None`), `run_fn` reçoit `argv` et `prompt`
+    comme deux arguments positionnels SÉPARÉS — jamais le prompt concaténé dans `argv` (bug réel
+    confirmé sur AF-V-02 Slice 2, voir docstring du module)."""
     seen = {}
 
-    def fake_run(argv):  # pas de **kwargs — doit rester appelable ainsi sans cwd
+    def fake_run(argv, prompt):
         seen["argv"] = argv
+        seen["prompt"] = prompt
         return 0, "{}", ""
 
     invoker = ClaudeInvoker(run_fn=fake_run)
     invoker.run("x")
 
-    assert seen["argv"][-1] == "x"
+    assert "x" not in seen["argv"]
+    assert seen["prompt"] == "x"
+
+
+def test_a_very_large_prompt_is_never_embedded_in_argv():
+    """Régression — bug réel confirmé en conditions réelles (AF-V-02 Slice 2, review d'un gros
+    diff) : le prompt était auparavant ajouté comme DERNIER ARGUMENT de la ligne de commande, ce
+    qui a fait échouer un `claude -p` réel sur Windows avec `FileNotFoundError: [WinError 206]
+    Nom de fichier ou extension trop long` dès qu'un lot de diff dépassait la limite de longueur
+    de ligne de commande de `CreateProcess` (~32k caractères). Le prompt doit désormais être
+    transmis séparément (STDIN pour `_real_run()`), sans aucune limite de longueur de ce type."""
+    seen = {}
+
+    def fake_run(argv, prompt):
+        seen["argv"] = argv
+        seen["prompt"] = prompt
+        return 0, "{}", ""
+
+    huge_prompt = "x" * 100_000  # dépasserait largement la limite Windows si embarqué dans argv
+    invoker = ClaudeInvoker(run_fn=fake_run)
+
+    invoker.run(huge_prompt, permission_mode="plan")
+
+    assert huge_prompt not in seen["argv"]
+    assert all(len(tok) < 1000 for tok in seen["argv"])  # aucun token géant dans argv
+    assert seen["prompt"] == huge_prompt
+
+
+def test_real_run_passes_the_prompt_via_stdin_input_not_argv(monkeypatch):
+    """Complète le test précédent au niveau de `_real_run()` (le `run_fn` RÉEL) : le prompt doit
+    être transmis via `subprocess.run(..., input=prompt)`, jamais concaténé dans `argv`."""
+    import subprocess
+
+    import scripts.autopilot.claude_invoker as invoker_module
+
+    seen_kwargs = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        seen_kwargs["argv"] = argv
+        seen_kwargs.update(kwargs)
+        return _FakeCompleted()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    invoker_module._real_run(["claude", "-p", "--output-format", "json"], "le prompt réel à envoyer")
+
+    assert seen_kwargs.get("input") == "le prompt réel à envoyer"
+    assert "le prompt réel à envoyer" not in seen_kwargs["argv"]
 
 
 def test_real_run_uses_explicit_utf8_encoding_never_the_windows_default(monkeypatch):
@@ -104,48 +166,47 @@ def test_real_run_uses_explicit_utf8_encoding_never_the_windows_default(monkeypa
     # global `subprocess.run` directement, seul point que ce import local pourra résoudre.
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    invoker_module._real_run(["claude", "-p", "x"])
+    invoker_module._real_run(["claude", "-p"], "x")
 
     assert seen_kwargs.get("encoding") == "utf-8"
     assert seen_kwargs.get("errors") == "replace"
 
 
 def test_build_claude_argv_uses_print_and_json_output():
-    argv = build_claude_argv("do the thing")
+    argv = build_claude_argv()
     assert argv[0] == "claude"
     assert "-p" in argv or "--print" in argv
     assert "--output-format" in argv
     assert "json" in argv
-    assert "do the thing" in argv
 
 
 def test_build_claude_argv_includes_permission_mode_when_given():
-    argv = build_claude_argv("x", permission_mode="acceptEdits")
+    argv = build_claude_argv(permission_mode="acceptEdits")
     assert "--permission-mode" in argv
     assert "acceptEdits" in argv
 
 
 def test_build_claude_argv_includes_max_budget_when_given():
-    argv = build_claude_argv("x", max_budget_usd=5.0)
+    argv = build_claude_argv(max_budget_usd=5.0)
     assert "--max-budget-usd" in argv
     assert "5.0" in argv
 
 
 def test_build_claude_argv_includes_resume_session_id_when_given():
-    argv = build_claude_argv("x", resume_session_id="abc-123")
+    argv = build_claude_argv(resume_session_id="abc-123")
     assert "--resume" in argv
     assert "abc-123" in argv
 
 
 def test_build_claude_argv_never_includes_dangerously_skip_permissions_by_default():
     """Mission §9 : "ne pas utiliser --dangerously-skip-permissions comme solution générale"."""
-    argv = build_claude_argv("x")
+    argv = build_claude_argv()
     assert "--dangerously-skip-permissions" not in argv
     assert "--allow-dangerously-skip-permissions" not in argv
 
 
 def test_invoker_returns_success_result_on_zero_exit():
-    def fake_run(argv):
+    def fake_run(argv, prompt):
         return 0, '{"result": "ok"}', ""
 
     invoker = ClaudeInvoker(run_fn=fake_run)
@@ -156,7 +217,7 @@ def test_invoker_returns_success_result_on_zero_exit():
 
 
 def test_invoker_classifies_failure_category_on_nonzero_exit():
-    def fake_run(argv):
+    def fake_run(argv, prompt):
         return 1, "", "Error: rate_limit_error - exceeded"
 
     invoker = ClaudeInvoker(run_fn=fake_run)
@@ -165,21 +226,23 @@ def test_invoker_classifies_failure_category_on_nonzero_exit():
     assert result.category is FailureCategory.QUOTA_LIMIT
 
 
-def test_invoker_passes_the_built_argv_to_run_fn():
+def test_invoker_passes_the_prompt_to_run_fn_separately_from_argv():
     seen = {}
 
-    def fake_run(argv):
+    def fake_run(argv, prompt):
         seen["argv"] = argv
+        seen["prompt"] = prompt
         return 0, "{}", ""
 
     invoker = ClaudeInvoker(run_fn=fake_run)
     invoker.run("hello world", permission_mode="acceptEdits")
-    assert "hello world" in seen["argv"]
+    assert seen["prompt"] == "hello world"
+    assert "hello world" not in seen["argv"]
     assert "acceptEdits" in seen["argv"]
 
 
 def test_build_claude_argv_includes_json_schema_when_given():
-    argv = build_claude_argv("x", json_schema='{"type":"object"}')
+    argv = build_claude_argv(json_schema='{"type":"object"}')
     assert "--json-schema" in argv
     assert '{"type":"object"}' in argv
 
@@ -192,7 +255,7 @@ def test_invoker_extracts_session_id_and_cost_from_real_json_shape(tmp_path):
         '"total_cost_usd":0.321516,"type":"result","subtype":"error_max_budget_usd"}'
     )
 
-    def fake_run(argv):
+    def fake_run(argv, prompt):
         return 1, real_shape, ""
 
     invoker = ClaudeInvoker(run_fn=fake_run)
@@ -206,7 +269,7 @@ def test_invoker_extracts_session_id_and_cost_from_real_json_shape(tmp_path):
 def test_functionally_succeeded_is_false_when_is_error_true_even_with_zero_exit_code():
     """Mission §6 : "ne pas considérer exit_code==0 comme preuve suffisante" — `is_error` du JSON
     structuré doit primer quand il est présent."""
-    def fake_run(argv):
+    def fake_run(argv, prompt):
         return 0, '{"is_error": true, "result": "partial"}', ""
 
     invoker = ClaudeInvoker(run_fn=fake_run)
@@ -217,7 +280,7 @@ def test_functionally_succeeded_is_false_when_is_error_true_even_with_zero_exit_
 
 
 def test_functionally_succeeded_is_true_when_is_error_false_and_exit_code_zero():
-    def fake_run(argv):
+    def fake_run(argv, prompt):
         return 0, '{"is_error": false, "result": "done"}', ""
 
     invoker = ClaudeInvoker(run_fn=fake_run)
@@ -228,7 +291,7 @@ def test_functionally_succeeded_is_true_when_is_error_false_and_exit_code_zero()
 
 
 def test_functionally_succeeded_falls_back_to_exit_code_when_json_has_no_is_error_field():
-    def fake_run(argv):
+    def fake_run(argv, prompt):
         return 0, "not json at all", ""
 
     invoker = ClaudeInvoker(run_fn=fake_run)
@@ -239,7 +302,7 @@ def test_functionally_succeeded_falls_back_to_exit_code_when_json_has_no_is_erro
 
 
 def test_result_structured_parses_a_json_encoded_result_string():
-    def fake_run(argv):
+    def fake_run(argv, prompt):
         return 0, '{"is_error": false, "result": "{\\"verdict\\": \\"CLEAN\\"}"}', ""
 
     invoker = ClaudeInvoker(run_fn=fake_run)
@@ -267,7 +330,7 @@ def test_result_structured_prefers_the_real_structured_output_field(tmp_path):
         '"structured_output":{"verdict":"CLEAN","findings":[]}}'
     )
 
-    def fake_run(argv):
+    def fake_run(argv, prompt):
         return 0, real_shape, ""
 
     invoker = ClaudeInvoker(run_fn=fake_run)
@@ -277,7 +340,7 @@ def test_result_structured_prefers_the_real_structured_output_field(tmp_path):
 
 
 def test_result_structured_falls_back_to_result_when_structured_output_absent():
-    def fake_run(argv):
+    def fake_run(argv, prompt):
         return 0, '{"is_error": false, "result": "{\\"verdict\\": \\"CLEAN\\"}"}', ""
 
     invoker = ClaudeInvoker(run_fn=fake_run)
@@ -290,7 +353,7 @@ def test_result_structured_handles_result_already_being_a_nested_object():
     """Deuxième forme plausible de sortie `--json-schema`, non confirmée empiriquement (le sondage
     réel a épuisé son budget avant réponse) — `result_structured` doit gérer les deux sans
     supposer laquelle Claude Code produit réellement."""
-    def fake_run(argv):
+    def fake_run(argv, prompt):
         return 0, '{"is_error": false, "result": {"verdict": "FINDINGS", "findings": []}}', ""
 
     invoker = ClaudeInvoker(run_fn=fake_run)
@@ -300,7 +363,7 @@ def test_result_structured_handles_result_already_being_a_nested_object():
 
 
 def test_result_structured_is_none_when_result_is_not_json():
-    def fake_run(argv):
+    def fake_run(argv, prompt):
         return 0, '{"is_error": false, "result": "plain text answer"}', ""
 
     invoker = ClaudeInvoker(run_fn=fake_run)
