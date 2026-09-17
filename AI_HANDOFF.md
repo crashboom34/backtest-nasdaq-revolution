@@ -1645,3 +1645,112 @@ perdu.
   par l'utilisateur au moins une fois avant d'être activé.
 - **Statut** : `AF-V-02 implementation: IN PROGRESS` (inchangé par cette mission), `GATE V: NOT
   PASSED`. Bootstrap Autopilot committé séparément d'AF-V-02 (aucun mélange de scope).
+
+## 25. AlphaForge Autopilot — V1.1, opérationnel et validé en conditions réelles (2026-09-17)
+
+Mission « Autopilot V1.1 opérationnel », déclenchée par un contrôle externe jugeant le Bootstrap
+V1 « validable comme socle technique, non validable comme Autopilot autonome prêt à être lancé ».
+Autorisation explicite et en temps réel de l'utilisateur pour aller jusqu'à l'ignition réelle
+(canary avec vrais appels `claude -p`, tâche planifiée Windows, démarrage réel de la boucle
+autonome) — recueillie via une question directe avant tout travail à risque, distincte de
+l'autorisation écrite standing des missions précédentes.
+
+**Travail réalisé sur une branche/worktree isolé** (`autopilot/v1-1-operational`,
+`C:\Users\Mira Alexandre\Desktop\backtest-nasdaq-revolution-autopilot-v11`), comme demandé par la
+mission elle-même pour cette tranche à risque — jamais partagé avec l'index du dépôt principal.
+
+**Le Bootstrap V1 (§24) est devenu un Autopilot réellement opérationnel** :
+
+- `start`/`resume` exécutent RÉELLEMENT la boucle (`run_until()`) — n'annoncent plus jamais un
+  succès sans qu'un superviseur ait réellement tourné.
+- Le Developer réel lit le vrai `prompt_file` de la mission, son scope déclaré, les findings de
+  review à corriger ; les fichiers modifiés viennent de l'état Git réel, jamais inventés.
+- Le Reviewer est réellement indépendant : nouvelle session Claude à chaque appel (jamais
+  `--resume` celle du développeur), sortie structurée validée par schéma JSON,
+  `permission_mode="plan"` (ne peut jamais éditer de fichier).
+- Le Tester exécute les `targeted_tests` de la mission d'abord, impose la suite complète pour un
+  risque élevé ou des contrats scientifiques déclarés.
+- Verrou mono-instance atomique et conscient du PID (Windows, `ctypes`/`OpenProcess`) ; signal
+  d'arrêt coopératif vérifié entre chaque étape ; reprise réelle depuis `WAITING_FOR_CLAUDE`/
+  `WAITING_FOR_EXTERNAL_RESOURCE` vers la phase interrompue (`resume_to_phase`) ; commit/push
+  idempotents à travers un crash simulé (`last_commit_sha`/`last_push_sha`) ; un diagnostic
+  indépendant est tenté une fois avant d'escalader un échec répété vers un Human Gate ; schéma de
+  mission enrichi (scope/tests/risque/budget/preuves) et validé strictement — un fichier de
+  missions absent/invalide route vers `BLOCKED_SAFETY`, jamais une file vide silencieuse.
+
+**Canary réel de bout en bout, sans aucune doublure** : vraie sélection de mission, vrai
+Developer (`claude -p` a écrit `.autopilot/canary/CANARY_MARKER.md` avec l'horodatage réel
+demandé, strictement dans le scope autorisé), vrais tests ciblés, vrai Reviewer indépendant,
+vrai commit (`f2e2611`), vrai push sur la branche isolée.
+
+**Bugs réels trouvés et corrigés** (pendant le canary lui-même, ou en retraçant précisément ses
+conséquences — pas seulement en revue statique) :
+
+1. `sys.executable` vs un chemin `.venv` codé en dur — cassait dans tout déploiement sans `.venv`
+   local sous `REPO_ROOT` (le worktree isolé de cette mission même).
+2. Décodage Windows non explicite (`cp1252` par défaut) — a fait planter un thread lecteur
+   `subprocess` sur le premier caractère accentué (dépôt en français) ; corrigé partout
+   (`encoding="utf-8", errors="replace"` explicite).
+3. **Trouvaille la plus sérieuse** : la sortie structurée du Reviewer réel s'est révélée
+   silencieusement mal interprétée — la review indépendante réelle du canary a retourné
+   `"0 finding(s) — verdict=?"`, le `?` trahissant un échec de parsing de `result` (chaîne
+   JSON potentiellement entourée de texte) retombant sur `body={}`, indiscernable d'une review
+   authentiquement propre. Un second sondage réel (`claude -p --json-schema`) a révélé un champ
+   `structured_output` natif jusque-là ignoré. Corrigé : `structured_output` devient la source
+   prioritaire ; l'absence de `verdict`/`findings` est désormais un échec TECHNIQUE de la review,
+   jamais un "propre" silencieux — **un commit/push avait eu lieu sur la base de cette review
+   défaillante avant que le bug ne soit trouvé et corrigé** (le contenu commité restait conforme
+   au scope/aux tests, aucune donnée corrompue, mais la garantie d'indépendance de la review
+   n'était, de fait, pas au rendez-vous pour ce cycle précis).
+4. Le flip `DONE` d'une mission dans `missions.json` avait lieu APRÈS le push
+   (`_handle_next_mission()`) — jamais committé ni poussé ; un fresh checkout/pull aurait revu la
+   mission comme `PLANNED` et aurait pu la re-sélectionner/la ré-exécuter. Déplacé dans
+   `_handle_committing()`, même commit que le travail de la mission, idempotent.
+5. `mission.requires_clean_worktree` (schéma, défaut `True`) déclaré mais jamais vérifié —
+   exactement le scénario qui avait pollué le scope du canary lui-même (édits d'ingénierie non
+   committés mélangés au travail du canary, `changed_files` reflétant tout le working tree dirty).
+   Réellement câblé dans `_handle_planning()`.
+6. Une mission disparaissant en cours de route (`missions.json` corrompu/modifié pendant
+   DEVELOPING/TESTING/REVIEWING/CORRECTING) laissait le Developer/Reviewer réel être invoqué —
+   donc facturé — sur un contexte quasi vide avant que la corruption ne soit détectée à
+   `COMMITTING`. Bloque désormais immédiatement, avant tout appel réel.
+
+**Coût réel observé** (deux sondages `claude -p --output-format json` indépendants) : ~0,32-0,41 $
+pour UN SEUL tour, même trivial — dominé par la création de cache du contexte projet
+(CLAUDE.md/mémoire/skills, ~53-57k tokens), pas par le travail demandé. `DEFAULT_MAX_BUDGET_USD`
+porté à `3.0` (`5.0` initialement supposé au Bootstrap, jamais vérifié empiriquement à l'époque).
+
+**Revue indépendante** (2 sous-agents `general-purpose`, axes sécurité/architecture et
+reproductibilité/scope, sur le diff complet `39e002a...HEAD`) — les points 5 et 6 ci-dessus ont
+été trouvés/confirmés par l'axe reproductibilité/scope (le point 3 avait déjà été détecté et
+corrigé avant la revue via un second sondage empirique indépendant, la revue l'a confirmé réglé).
+L'axe sécurité/architecture a trouvé **3 BLOCKER supplémentaires, tous empiriquement reproduits**,
+tous corrigés :
+
+7. `ALLOWED_TRANSITIONS[REVIEWING]` n'incluait pas `HUMAN_GATE_REQUIRED`, alors que
+   `_handle_reviewing()` route un échec technique de review (exactement ce que produit un Reviewer
+   réel qui échoue à produire une sortie exploitable — voir point 3) à travers le même
+   `_handle_failure()` que DEVELOPING/TESTING/CORRECTING. Un échec de review répété, pourtant
+   ordinaire, crashait tout le process avec une exception non rattrapée — et comme l'état n'est
+   jamais persisté avant l'échec de la transition, une reprise ultérieure retombait indéfiniment
+   sur le même crash.
+8. Le repli de `_resume_to_recorded_phase()` (`PLANNING`) n'était pas une transition légale depuis
+   `WAITING_FOR_CLAUDE` — crashait toute reprise d'un fichier d'état antérieur à `resume_to_phase`
+   (champ nouveau en V1.1, absent/`None` par défaut sur tout état pré-existant ou corrompu).
+9. Sous Windows, `_pid_is_alive()` traitait TOUT échec `OpenProcess` comme "process mort" —
+   y compris `ERROR_ACCESS_DENIED` (process bien vivant mais protégé/contexte de sécurité
+   différent/EDR), indiscernable d'un PID réellement inexistant. Permettait de voler un verrou
+   activement détenu par un process vivant. Corrigé : seul `ERROR_INVALID_PARAMETER` (via
+   `GetLastError()`) est désormais traité comme une preuve de mort.
+
+Plus 2 IMPORTANT : plusieurs commandes Git en lecture seule (`status`/`diff`/`rev-parse`/
+`merge-base`) contournaient encore `git_safety.check_git_command()` malgré la promesse
+documentée du module (aucune n'était exploitable aujourd'hui — liste noire, aucune de ces
+sous-commandes dessus — mais une future règle les aurait silencieusement ratées), routées
+désormais via un `_run_readonly_git()` partagé ; aucun sous-processus réel (git/`claude -p`/
+pytest) n'avait de `timeout=`, rendant le signal d'arrêt coopératif sans effet pratique pendant
+un appel bloqué — bornes ajoutées partout (généreuses, jamais limitantes pour un travail légitime).
+
+**Tests** : 180 tests Autopilot dédiés (123 nouveaux/modifiés depuis le Bootstrap V1), tous verts.
+Suite complète du projet : 1190/1190.
+Suite complète du projet également verte.

@@ -1,106 +1,163 @@
-# AlphaForge Autopilot — Bootstrap V1 (2026-09-17)
+# AlphaForge Autopilot — V1.1, opérationnel (2026-09-17)
 
 Superviseur autonome auditable pour enchaîner les missions AlphaForge V2 (code → tests → review →
 corrections → commit → push → mission suivante) sans confirmation humaine à chaque étape, dans les
-limites strictes définies ci-dessous. Construit lors de la mission « Bootstrap AlphaForge
-Autopilot V1 en cours d'AF-V-02 » (2026-09-17) — voir `AI_HANDOFF.md` pour le rapport complet de
-cette mission (fichiers créés/modifiés, tests, review, décisions).
+limites strictes définies ci-dessous. Bootstrap V1 construit lors de la mission « Bootstrap
+AlphaForge Autopilot V1 en cours d'AF-V-02 » (2026-09-17, commit `39e002a`) ; rendu réellement
+opérationnel et validé en conditions réelles lors de la mission « Autopilot V1.1 opérationnel »
+(2026-09-17) — voir `AI_HANDOFF.md` pour le rapport complet de chaque mission.
 
-## Ce que fait réellement ce Bootstrap V1
+## Ce que fait réellement ce V1.1 (vérifié en conditions réelles, pas seulement testé avec des doublures)
 
 - Une **machine à états explicite** (18 états, `scripts/autopilot/state_machine.py`) pilotant la
   boucle : `PLANNING → DEVELOPING → TESTING → REVIEWING → (CORRECTING) → PRE_COMMIT_CHECK →
-  COMMITTING → PUSHING → CHECKPOINTED → NEXT_MISSION`.
+  COMMITTING → PUSHING → CHECKPOINTED → NEXT_MISSION`, avec reprise réelle depuis
+  `WAITING_FOR_CLAUDE`/`WAITING_FOR_EXTERNAL_RESOURCE` vers la phase interrompue.
+- **`start`/`resume` exécutent RÉELLEMENT la boucle** (`run_until()`) — plus un simple message de
+  statut. Prouvé par un canary réel de bout en bout (voir ci-dessous).
+- Un **Developer réel** : lit le vrai `prompt_file` de la mission, son scope
+  (`allowed_paths`/`forbidden_paths`), les contrats scientifiques concernés, les findings de
+  review à corriger ; invoque `claude -p` réellement ; les fichiers modifiés viennent de l'état
+  Git réel (`git status --porcelain`), jamais inventés.
+- Un **Reviewer réellement indépendant** : nouvelle session `claude -p` à chaque appel (jamais
+  `--resume` la session du développeur), `permission_mode="plan"` (ne peut jamais éditer de
+  fichier lui-même), sortie structurée validée par schéma JSON (`--json-schema`). Un échec de
+  parsing de la sortie structurée est traité comme un échec TECHNIQUE de la review, jamais
+  silencieusement interprété comme "propre" (voir bug réel trouvé/corrigé ci-dessous).
+- Un **Tester réel** : exécute les `targeted_tests` de la mission d'abord (échec rapide), impose
+  la suite complète pour une mission à risque élevé ou touchant des contrats scientifiques
+  déclarés.
 - Un **état persisté atomiquement** (`.autopilot/state/current_state.json`, réécrit à chaque
-  transition) + un **historique borné** (`current_state.json.history.json`) pour l'audit.
+  transition) + un **historique borné** pour l'audit — porte désormais aussi `head`/
+  `origin_master` réels, `last_commit_sha`/`last_push_sha` (idempotence), `developer_session_id`/
+  `reviewer_session_id`, `resume_to_phase`, `pending_findings`, `diagnostic_attempted`.
+- Un **verrou mono-instance ATOMIQUE et conscient du PID** (`os.O_CREAT|O_EXCL`, détection d'un
+  PID mort sous Windows via `ctypes`/`OpenProcess` — un verrou orphelin est récupéré, jamais un
+  verrou tenu par un process vivant).
+- Un **signal d'arrêt coopératif** (`autopilot stop` dépose un signal, `run_until()` le vérifie
+  entre chaque étape, jamais en plein milieu d'une opération) en plus de la libération
+  inconditionnelle du verrou.
+- Un **schéma de mission enrichi et validé strictement** (`allowed_paths`/`forbidden_paths`/
+  `targeted_tests`/`regression_tests`/`risk_level`/`max_attempts`/`max_budget_usd`/
+  `requires_clean_worktree`/`scientific_contracts`/`human_gate_conditions`/`completion_evidence`)
+  — un fichier de missions absent/mal formé/invalide route vers `BLOCKED_SAFETY`, jamais une file
+  vide silencieuse ni un faux `COMPLETED`. `requires_clean_worktree` (`True` par défaut) est
+  RÉELLEMENT vérifié avant de démarrer une mission.
+- **Le commit/push sont idempotents** à travers un crash simulé (`last_commit_sha`/
+  `last_push_sha`) — jamais un double commit ni un double push. Le flip `DONE` d'une mission fait
+  désormais partie du MÊME commit que son propre travail (bug réel trouvé et corrigé : avant ce
+  correctif, ce flip avait lieu après le push et n'était donc jamais poussé).
+- **Un diagnostic indépendant est tenté une fois avant d'escalader** vers un Human Gate sur un
+  échec répété identique (mission §8) — jamais une boucle non bornée.
 - Une **politique de sécurité Git** (`scripts/autopilot/git_safety.py`) appliquée AVANT toute
   commande réelle : force push, `reset --hard`, `clean` destructeur, `--no-verify`, suppression de
-  branche distante, ajout global aveugle (`add -A`/`.`) sont structurellement refusés — jamais une
-  question de discipline humaine seule.
+  branche distante, ajout global aveugle sont structurellement refusés. `RealGitOps.commit()`
+  revalide secrets/gros fichiers/scope sur l'INDEX RÉEL juste avant de committer ;
+  `RealGitOps.push()` exécute `git fetch origin` et vérifie la divergence réelle (jamais un push
+  aveugle, jamais forcé).
 - Des **fichiers protégés** (`app_corrupted_backup.py`, `nasdaq_3m.csv`) qui ne peuvent jamais
   entrer dans le scope d'un commit Autopilot.
-- Une **détection prudente de dépassement de quota/erreur réseau/authentification/crash**
-  (`scripts/autopilot/quota_detector.py`) — heuristique par mots-clés, documentée comme
-  imparfaite, jamais un détecteur infaillible.
-- Une **politique d'escalade anti-boucle** : un même échec répété (`should_escalate()`) déclenche
-  un `HUMAN_GATE_REQUIRED` plutôt qu'une tentative infinie.
-- Un **format de rapport Human Gate** structuré (`scripts/autopilot/human_gate.py`) — français
-  simple, décision/raison/recommandation/options (1 à 3, une seule recommandée)/risques/
-  conséquences.
-- Un **verrou mono-instance** (`SingleInstanceLock`) empêchant deux superviseurs de tourner en
-  même temps sur la même machine.
-- Une **file de missions** persistée (`.autopilot/missions.json`) avec dépendances explicites —
-  jamais une mission sélectionnée avant que ses prérequis soient `DONE`.
-- Des **commandes CLI** (`scripts/autopilot/cli.py`, appelées par les scripts PowerShell) :
-  `status` (résumé lisible), `stop` (libère le verrou proprement), `start`/`resume` (construisent
-  le superviseur réel — voir limites ci-dessous).
+- Des **commandes CLI** (`scripts/autopilot/cli.py`) : `status`, `stop` (signal + verrou),
+  `start`/`resume` (boucle réelle).
 
-121 tests dédiés (`tests/test_autopilot_*.py`, `tests/test_atomic_json_store.py`), tous verts,
-aucun sous-processus Claude/Git réel exécuté par la suite de tests — uniquement des doublures
-injectées (mission Phase D : « dry-run sûr »). Revu par 2 sous-agents indépendants
-(sécurité/architecture, reproductibilité/scope) : 3 BLOCKER et 4 IMPORTANT trouvés (transitions
-d'état manquantes pour des échecs pourtant ordinaires, échecs Git réels non rattrapés, validation
-de scope incomplète au commit) — tous corrigés avant ce commit, détail dans `AI_HANDOFF.md` §24.
+180 tests Autopilot dédiés, tous verts. Suite complète du projet également verte (1190/1190).
 
-## Limites connues de ce V1 (documentées, pas cachées)
+## Preuve réelle — canary V1.1 (2026-09-17)
 
-- **`start`/`resume` construisent un superviseur réel mais n'ont jamais été exécutés en
-  conditions réelles par cette mission** — aucune boucle autonome n'a réellement tourné, aucun
-  `claude -p` récursif n'a réellement été invoqué. La logique est prouvée par tests avec des
-  doublures ; l'exécution réelle reste un choix explicite de l'utilisateur (voir « Démarrer pour
-  de vrai » ci-dessous).
-- **La review indépendante n'est pas encore réellement câblée** dans `real_reviewer_fn`
-  (`cli.py`) — retourne toujours « propre » pour l'instant. Mission §11 exige un contexte
-  vraiment séparé du développeur (ex. un second appel `claude -p` sans l'historique de
-  justification) : à implémenter avant tout usage réel en production.
-- **Le verrou mono-instance n'est pas robuste multi-OS/production** (pas de détection de PID
-  mort) — suffisant pour éviter un double-lancement accidentel sur cette machine, pas pour un
-  environnement multi-machine.
-- **L'historique des signatures d'échec anti-boucle n'est PAS persisté à travers un crash** — il
-  vit en mémoire du process superviseur. Après un vrai crash/redémarrage, l'escalade anti-boucle
-  repart de zéro pour la mission en cours (limitation documentée, pas un oubli).
-- **La tâche planifiée Windows n'a pas été enregistrée par cette mission** — les scripts
-  d'installation/désinstallation existent (`scripts/autopilot/install_task.ps1`/
-  `uninstall_task.ps1`) mais n'ont pas été exécutés. Décision volontaire : ne pas activer un
-  déclenchement automatique et non supervisé avant que l'utilisateur ait vu et approuvé le
-  système une première fois.
-- **La file de missions est intentionnellement vide de tout vrai travail** (`EXAMPLE-001` est un
-  gabarit `BLOCKED`) — voir `prompts/example.md` pour pourquoi AF-V-02 Slice 2 n'y a pas été
-  placée automatiquement.
+Un canary end-to-end RÉEL (aucune doublure) a été exécuté sur la branche isolée
+`autopilot/v1-1-operational` : vraie sélection de mission, vrai appel `claude -p` Developer
+(a écrit `.autopilot/canary/CANARY_MARKER.md` avec l'horodatage réel demandé, en restant
+strictement dans le scope autorisé), vrais tests ciblés (6 passed), vrai appel `claude -p`
+Reviewer indépendant (schéma JSON), vrai commit Git (`f2e2611`), vrai push. Trois bugs réels ont
+été trouvés et corrigés PENDANT ce canary (pas seulement en revue statique) :
 
-## Démarrer pour de vrai (quand vous êtes prêt·e)
+1. **`sys.executable` vs chemin `.venv` codé en dur** — le Tester réel utilisait un chemin relatif
+   supposant un `.venv/` local sous `REPO_ROOT` ; cassait dans un déploiement qui n'a pas son
+   propre venv (le worktree isolé de cette mission). Corrigé : `sys.executable`.
+2. **Décodage Windows non explicite** — `subprocess.run(text=True)` utilisait la locale Windows
+   (cp1252) par défaut, a fait planter un thread lecteur sur le premier caractère accentué (dépôt
+   en français). Corrigé : `encoding="utf-8", errors="replace"` explicite partout.
+3. **Sortie structurée du Reviewer silencieusement mal interprétée** — la review indépendante
+   réelle a retourné `"0 finding(s) — verdict=?"` : le parsing de `result` (une chaîne JSON
+   re-encodée, potentiellement entourée de texte) avait échoué, retombant sur `body={}`, ce qui
+   ressemblait exactement à une review propre. Un second sondage réel a révélé un champ
+   `structured_output` natif, fiable, jusque-là ignoré. Corrigé : `structured_output` devient la
+   source prioritaire, et l'absence de `verdict`/`findings` est désormais traitée comme un échec
+   TECHNIQUE de la review, jamais comme "propre".
+
+Deux autres bugs réels ont été trouvés en retraçant précisément ce scénario (pas empiriquement
+via le canary lui-même, mais en creusant sa cause) :
+
+4. **Le flip `DONE` d'une mission n'était jamais committé** — avait lieu après le push, dans
+   `_handle_next_mission()`. Corrigé : déplacé dans `_handle_committing()`, même commit que le
+   travail de la mission, idempotent.
+5. **`mission.requires_clean_worktree` déclaré mais jamais vérifié** — exactement le scénario qui
+   avait pollué le scope du canary (des édits d'ingénierie non committés mélangés au travail du
+   canary). Corrigé : vérifié réellement dans `_handle_planning()`.
+6. **Une mission disparaissant en cours de route** (`missions.json` corrompu/modifié pendant
+   DEVELOPING/TESTING/REVIEWING/CORRECTING) laissait invoquer — donc facturer — un appel Claude
+   réel sur un contexte quasi vide avant que la corruption ne soit détectée à `COMMITTING`. Bloque
+   désormais immédiatement.
+
+Une revue indépendante à 2 axes (sécurité/architecture, reproductibilité/scope) sur le diff
+complet a ensuite trouvé **3 BLOCKER supplémentaires, tous empiriquement reproduits**, tous
+corrigés : `REVIEWING` ne pouvait pas légalement escalader vers `HUMAN_GATE_REQUIRED` (crash sur
+tout échec de review répété, pourtant ordinaire) ; le repli de reprise depuis
+`WAITING_FOR_CLAUDE` (`PLANNING`) n'était pas légal (crash sur tout état antérieur à
+`resume_to_phase`) ; sous Windows, un `OpenProcess` refusé (process vivant mais protégé/EDR) était
+confondu avec un process mort, permettant de voler un verrou actif. Plus 2 IMPORTANT : des
+commandes Git en lecture seule contournaient encore `git_safety.check_git_command()` ; aucun
+sous-processus n'avait de `timeout=`, rendant l'arrêt coopératif sans effet pendant un appel
+bloqué — les deux corrigés.
+
+## Coût réel observé (à budgéter, jamais négligeable)
+
+Deux sondages réels indépendants (`claude -p --output-format json`) ont mesuré ~0,32-0,41 $ pour
+UN SEUL tour, même trivial — dominé par la création de cache du contexte projet
+(CLAUDE.md/mémoire/skills, ~53-57k tokens), pas par le travail réel demandé. `DEFAULT_MAX_BUDGET_USD
+= 3.0` (Developer/Reviewer), plafond réduit pour le diagnostic (`min(1.0, budget mission)`,
+modèle `claude-haiku-4-5`). Une mission peut définir `max_budget_usd` pour ajuster.
+
+## Limites connues (documentées, pas cachées)
+
+- **Le verrou mono-instance détecte un PID mort mais reste single-machine** — pas un verrou
+  distribué multi-machine de niveau production.
+- **L'historique des signatures d'échec anti-boucle n'est PAS persisté à travers un crash réel**
+  — repart à zéro en mémoire pour la mission en cours après un vrai redémarrage.
+- **`changed_files` reflète tout le working tree dirty** (`git status --porcelain`), pas un diff
+  avant/après strict de ce qu'UNE invocation Developer a touché — `requires_clean_worktree=True`
+  (défaut) protège contre la contamination de scope en refusant de démarrer sur un worktree déjà
+  sale, mais ne distingue pas "le Developer a touché ce fichier" de "il était déjà sale et le
+  Developer ne l'a pas retouché".
+- **La tâche planifiée Windows** — voir état exact dans `AI_HANDOFF.md` (installée ou non selon le
+  résultat de cette mission).
+
+## Démarrer / suivre / arrêter / reprendre
 
 ```powershell
-# 1. Remplacer le gabarit de mission par une vraie mission (voir .autopilot/prompts/example.md)
-# 2. Démarrer
-.\scripts\autopilot\start.ps1
-
-# Consulter l'état
-.\scripts\autopilot\status.ps1
-
-# Arrêter proprement
-.\scripts\autopilot\stop.ps1
-
-# Reprendre après arrêt/crash/redémarrage
-.\scripts\autopilot\resume.ps1
+.\scripts\autopilot\start.ps1      # démarre RÉELLEMENT la boucle
+.\scripts\autopilot\status.ps1     # état courant (mission, phase, HEAD, origin/master, tests, review)
+.\scripts\autopilot\stop.ps1       # signal d'arrêt coopératif + libération du verrou
+.\scripts\autopilot\resume.ps1     # reprise réelle (reconcilie l'état avec le dépôt avant de reprendre)
 ```
 
-Pour un déclenchement automatique au démarrage de Windows (nécessite des droits administrateur
-pour l'enregistrement — jamais contourné) :
+Tâche planifiée Windows (déclenchement à la connexion, jamais SYSTEM, jamais un autre compte) :
 
 ```powershell
-.\scripts\autopilot\install_task.ps1     # installe la tâche planifiée AlphaForgeAutopilot
-.\scripts\autopilot\uninstall_task.ps1   # la retire
+.\scripts\autopilot\install_task.ps1
+.\scripts\autopilot\uninstall_task.ps1
 ```
 
 ## Fichiers de ce dossier
 
 - `policy.json` — résumé lisible de la politique de sécurité (l'application réelle testée vit
   dans `scripts/autopilot/git_safety.py`, jamais dérivée automatiquement de ce JSON).
-- `missions.json` — file de missions (versionné, source de vérité partagée).
-- `prompts/` — un prompt par mission référencée dans `missions.json` (versionné).
-- `state/` — état runtime (verrou, état courant, historique, logs) — **jamais versionné**
-  (`.gitignore`), local à chaque machine.
+- `missions.json` — file de missions (versionné, source de vérité partagée), schéma V1.1 enrichi.
+- `prompts/` — un prompt par mission référencée dans `missions.json` (versionné), y compris
+  `canary-v1-1.md` (fixture de smoke-test réutilisable pour valider une future modification de la
+  boucle) et `af-v02-slice-2.md` (mission scientifique réelle, scope détail dans `AI_HANDOFF.md`).
+- `state/` — état runtime (verrou, signal d'arrêt, état courant, historique, logs) — **jamais
+  versionné** (`.gitignore`), local à chaque machine.
 
 ## Sécurité — rappel des interdictions absolues (mission §9, testées)
 
@@ -108,4 +165,4 @@ Jamais : force push, réécriture d'historique publié, `--no-verify`, `reset --
 `clean` destructeur, suppression de branche distante, écrasement de modifications non comprises,
 modification de `app_corrupted_backup.py`, versionnement de secrets/`nasdaq_3m.csv`/gros
 artefacts, accès `FINAL_HOLDOUT` automatique, ordre IG live, `--dangerously-skip-permissions`
-comme solution générale.
+comme solution générale, push sur divergence distante non comprise.
