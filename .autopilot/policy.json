@@ -1,7 +1,10 @@
 {
-  "version": "bootstrap-v1",
+  "version": "v1.1",
   "min_disk_free_gb": 2.0,
   "max_repeated_identical_failures": 3,
+  "max_mission_attempts_default": 3,
+  "default_max_budget_usd": 3.0,
+  "subprocess_timeouts_seconds": {"git": 120, "pytest": 900, "claude": 1800},
   "protected_paths": ["app_corrupted_backup.py", "nasdaq_3m.csv"],
   "forbidden_git_operations": [
     "push --force / --force-with-lease / -f",
@@ -14,6 +17,7 @@
   ],
   "max_file_size_mb": 50,
   "require_independent_review": true,
+  "require_clean_worktree_by_default": true,
   "human_gate_max_options": 3,
-  "note": "Source de vérité de la politique de sécurité pour un lecteur humain — l'application réelle vit dans scripts/autopilot/git_safety.py (testé), jamais dérivée automatiquement de ce fichier en V1 (pas de parseur de policy.json dans le code, pour éviter une source de vérité dupliquée non testée)."
+  "note": "Source de vérité de la politique de sécurité pour un lecteur humain — l'application réelle vit dans scripts/autopilot/git_safety.py + supervisor.py (testés), jamais dérivée automatiquement de ce fichier (pas de parseur de policy.json dans le code, pour éviter une source de vérité dupliquée non testée). V1.1 (2026-09-17) : start/resume exécutent réellement la boucle, Reviewer réellement indépendant, mission.requires_clean_worktree et mission.max_attempts réellement appliqués, timeouts explicites sur tout sous-processus réel."
 }
