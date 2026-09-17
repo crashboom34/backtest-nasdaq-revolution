@@ -228,6 +228,26 @@ def test_real_tester_fn_invokes_sys_executable_not_a_hardcoded_relative_venv_pat
     assert ".venv/Scripts/python.exe" not in seen_argv[0]
 
 
+def test_real_git_ops_is_worktree_clean_reflects_git_status_porcelain(tmp_path, monkeypatch):
+    """Régression — mission Autopilot V1.1 §4 : `mission.requires_clean_worktree` était déclaré
+    dans le schéma mais jamais réellement câblé à une vérification Git réelle avant cette mission."""
+    import scripts.autopilot.cli as cli_module
+
+    def fake_run_clean(argv, cwd, capture_output, text, **kwargs):
+        return _fake_result(stdout="")
+
+    def fake_run_dirty(argv, cwd, capture_output, text, **kwargs):
+        return _fake_result(stdout=" M some_file.py\n")
+
+    git_ops = RealGitOps(repo_dir=tmp_path)
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run_clean)
+    assert git_ops.is_worktree_clean() is True
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run_dirty)
+    assert git_ops.is_worktree_clean() is False
+
+
 def test_record_real_git_context_fills_head_and_origin_master(tmp_path, monkeypatch):
     """Régression — mission §6 : `head`/`origin_master` sont des champs d'audit requis, mais
     restaient toujours `(inconnu)` (`None`) tout au long du canary V1.1 réel — jamais renseignés

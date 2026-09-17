@@ -76,6 +76,57 @@ def test_happy_path_reaches_checkpointed_then_next_mission(tmp_path):
     assert git_ops.forced_push_attempted is False
 
 
+def test_requires_clean_worktree_blocks_planning_on_a_dirty_worktree(tmp_path):
+    """Régression — trouvé par la revue indépendante V1.1 : `Mission.requires_clean_worktree`
+    (True par défaut) était déclaré dans le schéma mais jamais réellement vérifié nulle part —
+    exactement le scénario qui a pollué le scope (`changed_files`) du canary réel de cette
+    mission (édits d'ingénierie laissés non committés pendant que le Developer tournait)."""
+    class DirtyGitOps(FakeGitOps):
+        def is_worktree_clean(self):
+            return False
+
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(id="M1", title="x", status="PLANNED", prompt_file="m1.md", requires_clean_worktree=True),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = DirtyGitOps()
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until({AutopilotState.DEVELOPING, AutopilotState.BLOCKED_SAFETY})
+
+    assert final_state == AutopilotState.BLOCKED_SAFETY
+    assert "worktree" in state_store.load().stop_reason.lower()
+
+
+def test_requires_clean_worktree_false_proceeds_despite_a_dirty_worktree(tmp_path):
+    class DirtyGitOps(FakeGitOps):
+        def is_worktree_clean(self):
+            return False
+
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(id="M1", title="x", status="PLANNED", prompt_file="m1.md", requires_clean_worktree=False),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = DirtyGitOps()
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until({AutopilotState.DEVELOPING, AutopilotState.BLOCKED_SAFETY})
+
+    assert final_state == AutopilotState.DEVELOPING
+
+
 def test_mission_done_status_is_committed_together_with_its_own_work(tmp_path):
     """Régression — trouvé RÉELLEMENT cassé par le canary V1.1 : l'ancien `_handle_next_mission()`
     marquait la mission `DONE` dans `missions.json` APRÈS le push, donc ce changement n'était

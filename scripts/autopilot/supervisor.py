@@ -224,6 +224,11 @@ class FakeGitOps:
     def current_head_sha(self) -> Optional[str]:
         return self._last_commit_sha
 
+    def is_worktree_clean(self) -> bool:
+        # Doublure : aucune opération de fichier réelle n'a lieu en dehors de ce que l'Autopilot
+        # lui-même simule via `add()`/`commit()` — toujours "propre" du point de vue de ce factice.
+        return True
+
 
 DeveloperFn = Callable[..., dict]
 TesterFn = Callable[[Optional[Mission]], dict]
@@ -366,6 +371,21 @@ class AutopilotSupervisor:
         mission = select_next_mission(missions)
         if mission is None:
             return self._transition(AutopilotState.COMPLETED)
+        # V1.1 : `requires_clean_worktree` était déclaré dans le schéma de mission mais jamais
+        # réellement vérifié nulle part — trouvé lors de la revue indépendante de cette mission.
+        # Une mission qui l'exige (True par défaut) ne doit JAMAIS démarrer sur un worktree portant
+        # déjà des modifications étrangères non liées : c'est exactement le scénario qui a pollué
+        # le scope (`changed_files`) du canary réel de cette mission (édits d'ingénierie laissés
+        # non committés au moment où le Developer a tourné).
+        if mission.requires_clean_worktree and not self._git_ops.is_worktree_clean():
+            return self._transition(
+                AutopilotState.BLOCKED_SAFETY,
+                stop_reason=(
+                    f"mission {mission.id} exige un worktree propre (requires_clean_worktree=True) "
+                    "mais des modifications non liées sont présentes — jamais démarrée sur un état "
+                    "ambigu (mission Autopilot V1.1 §4/§13)."
+                ),
+            )
         self._failure_signatures = []
         return self._transition(
             AutopilotState.DEVELOPING, mission_id=mission.id,

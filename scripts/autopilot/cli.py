@@ -116,6 +116,15 @@ class RealGitOps:
         except RuntimeError:
             return None
 
+    def is_worktree_clean(self) -> bool:
+        # V1.1 : câble réellement `mission.requires_clean_worktree` (mission §4) — trouvé déclaré
+        # dans le schéma mais jamais vérifié nulle part par la revue indépendante de cette mission.
+        try:
+            status = self._run(["git", "status", "--porcelain"])
+        except RuntimeError:
+            return False  # incapable de vérifier -> prudence, jamais supposer "propre"
+        return status.strip() == ""
+
     def commit(self, message: str) -> str:
         # `check_scope_files()` en `add()` ne valide que les chemins PASSÉS à cet appel — pas
         # l'index Git réel au moment du commit, qui peut déjà porter un contenu étranger/protégé
