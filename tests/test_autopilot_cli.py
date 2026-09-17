@@ -483,7 +483,33 @@ def test_main_status_command_returns_zero(tmp_path, monkeypatch, capsys):
     assert "état" in captured.out.lower() or "démarré" in captured.out.lower()
 
 
-def test_main_stop_command_releases_the_lock_and_returns_zero(tmp_path, monkeypatch, capsys):
+def test_main_stop_command_cleans_an_orphaned_lock_and_returns_zero(tmp_path, monkeypatch, capsys):
+    """Régression — finalisation V1.1 §2.A : ce test écrivait auparavant un verrou au contenu
+    illisible ("locked", pas du JSON) et attendait qu'il soit TOUJOURS supprimé — c'était
+    exactement le comportement buggé (`force_release()` inconditionnel). Un contenu illisible est
+    désormais traité prudemment comme "peut-être détenu" (jamais volé) — ce test écrit donc un
+    verrou explicitement ORPHELIN (PID mort) pour vérifier que ce cas reste bien nettoyé."""
+    import json as _json
+
+    import scripts.autopilot.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(cli_module, "LOCK_PATH", tmp_path / "autopilot.lock")
+    monkeypatch.setattr(cli_module, "STOP_SIGNAL_PATH", tmp_path / "stop.signal")
+    (tmp_path / "autopilot.lock").write_text(
+        _json.dumps({"pid": 2147483647, "acquired_at_utc": "x", "worktree": "x"}), encoding="utf-8",
+    )
+
+    exit_code = main(["stop"])
+    assert exit_code == 0
+    assert not (tmp_path / "autopilot.lock").exists()
+    assert (tmp_path / "stop.signal").exists()  # signal coopératif déposé (mission §3.6)
+
+
+def test_main_stop_command_never_removes_a_lock_with_unreadable_content(tmp_path, monkeypatch):
+    """Complète le test précédent : un contenu de verrou illisible (jamais du JSON valide) doit
+    être traité prudemment comme "peut-être détenu par un process vivant" — jamais supprimé par
+    doute, cohérent avec `_pid_is_alive`/`is_held_by_a_live_process()`."""
     import scripts.autopilot.cli as cli_module
 
     monkeypatch.setattr(cli_module, "STATE_PATH", tmp_path / "state.json")
@@ -493,8 +519,7 @@ def test_main_stop_command_releases_the_lock_and_returns_zero(tmp_path, monkeypa
 
     exit_code = main(["stop"])
     assert exit_code == 0
-    assert not (tmp_path / "autopilot.lock").exists()
-    assert (tmp_path / "stop.signal").exists()  # signal coopératif déposé (mission §3.6)
+    assert (tmp_path / "autopilot.lock").exists()  # jamais supprimé par doute
 
 
 def test_main_rejects_an_unknown_command():

@@ -289,16 +289,27 @@ def cmd_status(_args: argparse.Namespace) -> int:
 
 
 def cmd_stop(_args: argparse.Namespace) -> int:
-    # V1.1 (mission §3.6) : signal d'arrêt COOPÉRATIF (un `run_until()` en cours le voit à la
-    # prochaine frontière d'étape) en plus de la libération inconditionnelle du verrou, qui reste
-    # le filet de sécurité final si aucun process n'est réellement en train de tourner.
+    # Finalisation V1.1 (§2.A) : `force_release()` inconditionnel ici était un bug réel — un
+    # process encore actif (mid-step, ex. dans un vrai `claude -p`) voyait son verrou supprimé
+    # IMMÉDIATEMENT, avant d'avoir pu s'arrêter proprement, permettant à une seconde instance de
+    # démarrer en concurrence pendant que la première tournait encore (le risque exact que ce
+    # verrou existe pour empêcher). Le PROPRIÉTAIRE doit être seul à libérer son propre verrou,
+    # via son propre `finally: supervisor.release_lock()`, une fois l'arrêt RÉELLEMENT effectif —
+    # `force_release()` reste réservé au nettoyage d'un verrou authentiquement orphelin (process
+    # mort), jamais un vol actif.
     StopSignal(STOP_SIGNAL_PATH).request()
     lock = SingleInstanceLock(LOCK_PATH)
-    lock.force_release()
+    if lock.is_held_by_a_live_process():
+        print(
+            "Autopilot : arrêt coopératif demandé — un process actif détient le verrou, il le "
+            "libérera lui-même une fois arrêté proprement (jamais volé pendant qu'il tourne)."
+        )
+    else:
+        lock.force_release()
+        print("Autopilot : arrêt demandé ; verrou orphelin (aucun process vivant) nettoyé.")
     store = AutopilotStateStore(STATE_PATH)
     if store.load() is not None:
         store.update(stop_reason="arrêt demandé par l'utilisateur (autopilot stop)")
-    print("Autopilot : arrêt demandé (signal coopératif envoyé), verrou libéré.")
     return 0
 
 
@@ -332,9 +343,12 @@ def _build_real_supervisor() -> AutopilotSupervisor:
         if mission and mission.completion_evidence:
             sections.append("Preuves de complétion attendues : " + ", ".join(mission.completion_evidence))
         if findings:
+            # Peut venir d'une review indépendante (findings bloquants) OU d'un échec de test/
+            # développement précédent transmis pour correction (mission finalisation V1.1 §2.C) —
+            # jamais supposer que c'est toujours une review.
             sections.append(
-                "Findings de la review indépendante précédente, À CORRIGER RÉELLEMENT :\n"
-                + "\n".join(f"- {f}" for f in findings)
+                "Retour à corriger RÉELLEMENT avant de continuer (review indépendante ou échec "
+                "précédent) :\n" + "\n".join(f"- {f}" for f in findings)
             )
         full_prompt = "\n\n".join(sections)
 
@@ -507,11 +521,16 @@ def _run_real_loop(max_steps: int) -> int:
     boucle ; il ne doit jamais annoncer RUNNING si aucun superviseur ne tourne"). S'arrête à un
     état d'attente/terminal, ou après `max_steps` transitions (jamais indéfiniment silencieux —
     voir `AutopilotSupervisor.run_until()`). Libère TOUJOURS le verrou en sortie (`finally`)."""
-    StopSignal(STOP_SIGNAL_PATH).clear()
     supervisor = _build_real_supervisor()
     if not supervisor.acquire_lock():
         print("Autopilot : une instance semble déjà en cours (verrou présent) — utiliser 'stop' d'abord.")
         return 1
+    # Finalisation V1.1 (§2.A) : nettoyer un signal d'arrêt résiduel SEULEMENT une fois le verrou
+    # RÉELLEMENT acquis par CETTE instance — le nettoyer avant aurait pu effacer un signal destiné
+    # au process qui détenait encore le verrou à cet instant (course réelle : la nouvelle instance
+    # efface le signal, échoue à acquérir, et l'ancien process ne voit alors plus jamais l'arrêt
+    # demandé). Une fois le verrou acquis, ce signal résiduel ne peut plus concerner que NOUS.
+    StopSignal(STOP_SIGNAL_PATH).clear()
     print("Autopilot : démarrage réel de la boucle (run_until)...")
     try:
         final_state = supervisor.run_until(_WAITING_STATES, max_steps=max_steps)

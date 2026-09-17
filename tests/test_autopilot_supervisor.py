@@ -291,6 +291,67 @@ def test_correcting_really_invokes_the_developer_with_the_review_findings(tmp_pa
     assert develop_calls == [None, ["fix X"]]
 
 
+def test_a_test_failure_transmits_to_correcting_never_blindly_reruns_testing(tmp_path):
+    """Régression — trouvé RÉELLEMENT cassé (mission finalisation V1.1 §2.C) : un échec de test
+    non-escaladant retentait auparavant EN PLACE sur TESTING, ce qui ne fait que rappeler
+    `tester_fn()` sans le moindre changement de code — un test déterministe échoue alors
+    IDENTIQUEMENT à chaque fois, sans jamais transmettre l'échec au Developer ni tenter de
+    corriger quoi que ce soit. Doit désormais transiter vers CORRECTING avec l'échec en
+    `pending_findings`, et le Developer doit être réellement rappelé avec ce retour."""
+    develop_calls = []
+
+    def recording_developer(mission, attempt, findings=None):
+        develop_calls.append(findings)
+        return {"success": True, "changed_files": ["dummy.py"], "raw_output": "ok"}
+
+    test_calls = {"count": 0}
+
+    def flaky_tester(mission):
+        test_calls["count"] += 1
+        if test_calls["count"] == 1:
+            return {"success": False, "summary": "AssertionError: test_foo a échoué"}
+        return {"success": True, "summary": "3 passed"}
+
+    supervisor, git_ops, state_store = _make_supervisor(
+        tmp_path, developer_fn=recording_developer, tester_fn=flaky_tester,
+    )
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until({AutopilotState.NEXT_MISSION})
+
+    assert final_state == AutopilotState.NEXT_MISSION
+    assert test_calls["count"] == 2  # jamais rappelé sans un passage par CORRECTING entre les deux
+    # 1er appel (DEVELOPING) : findings=None ; 2e appel (CORRECTING, après l'échec de test) :
+    # findings porte l'échec de test transmis, jamais None ni les anciens findings de review.
+    assert develop_calls[0] is None
+    assert develop_calls[1] is not None
+    assert "test_foo" in develop_calls[1][0]
+
+
+def test_a_developing_retry_transmits_the_previous_failure_as_feedback(tmp_path):
+    """Complète le test précédent pour DEVELOPING lui-même : une retentative en place doit aussi
+    transmettre l'échec précédent, jamais rappeler le Developer avec exactement le même prompt
+    sans aucune information sur ce qui a échoué la première fois."""
+    develop_calls = []
+
+    def flaky_developer(mission, attempt, findings=None):
+        develop_calls.append(findings)
+        if attempt == 1:
+            return {"success": False, "raw_output": "SyntaxError: ligne 42 invalide", "changed_files": []}
+        return {"success": True, "changed_files": ["dummy.py"], "raw_output": "ok"}
+
+    supervisor, git_ops, state_store = _make_supervisor(tmp_path, developer_fn=flaky_developer)
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until({AutopilotState.NEXT_MISSION})
+
+    assert final_state == AutopilotState.NEXT_MISSION
+    assert len(develop_calls) == 2
+    assert develop_calls[0] is None  # 1re tentative : aucun retour antérieur
+    assert develop_calls[1] is not None
+    assert "SyntaxError" in develop_calls[1][0]  # 2e tentative : l'échec précédent est transmis
+
+
 def test_quota_failure_moves_to_waiting_for_claude_not_human_gate(tmp_path):
     def quota_developer(mission, attempt, findings=None):
         return {"success": False, "raw_output": "Error: rate_limit_error - exceeded", "changed_files": []}
@@ -574,6 +635,111 @@ def test_force_release_clears_a_lock_held_by_a_different_process_instance(tmp_pa
 
     stranger = SingleInstanceLock(lock_path)  # nouvelle instance, jamais acquis elle-même
     stranger.force_release()
+
+    assert not lock_path.exists()
+
+
+def test_is_held_by_a_live_process_is_true_while_a_real_second_process_holds_the_lock(tmp_path):
+    """Régression — mission finalisation V1.1 §2.A, reproduite avec DEUX VRAIS PROCESS locaux
+    (pas une simulation) : un verrou détenu par un process réellement vivant ne doit jamais
+    pouvoir être volé, et une nouvelle instance doit rester bloquée jusqu'à sa libération EFFECTIVE
+    par le propriétaire lui-même."""
+    import subprocess
+    import time
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    lock_path = tmp_path / "autopilot.lock"
+    script = (
+        "import sys, time\n"
+        f"sys.path.insert(0, {str(repo_root)!r})\n"
+        "from scripts.autopilot.supervisor import SingleInstanceLock\n"
+        f"lock = SingleInstanceLock({str(lock_path)!r})\n"
+        "assert lock.acquire()\n"
+        "time.sleep(4)\n"
+        "lock.release()\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", script])
+    try:
+        for _ in range(50):
+            if lock_path.exists():
+                break
+            time.sleep(0.1)
+        assert lock_path.exists(), "le vrai process n'a jamais acquis le verrou à temps"
+
+        checker = SingleInstanceLock(lock_path)
+        assert checker.is_held_by_a_live_process() is True
+
+        stranger = SingleInstanceLock(lock_path)
+        assert stranger.acquire() is False  # jamais volé tant que le vrai process tourne
+    finally:
+        proc.wait(timeout=15)
+
+    # Le vrai process a terminé et a libéré SON PROPRE verrou (via son propre `release()`) —
+    # seulement maintenant une nouvelle instance doit pouvoir acquérir.
+    assert not lock_path.exists()
+    assert SingleInstanceLock(lock_path).acquire() is True
+
+
+def test_cmd_stop_never_removes_a_lock_held_by_a_real_live_process(tmp_path, monkeypatch):
+    """Régression — trouvé réellement cassé (mission finalisation V1.1 §2.A) : `cmd_stop()`
+    appelait `force_release()` inconditionnellement, supprimant le verrou d'un vrai process
+    encore actif AVANT qu'il ait pu s'arrêter proprement — une seconde instance pouvait alors
+    démarrer en concurrence pendant que la première tournait toujours."""
+    import subprocess
+    import time
+    from pathlib import Path
+
+    import scripts.autopilot.cli as cli_module
+
+    repo_root = Path(__file__).resolve().parents[1]
+    lock_path = tmp_path / "autopilot.lock"
+    script = (
+        "import sys, time\n"
+        f"sys.path.insert(0, {str(repo_root)!r})\n"
+        "from scripts.autopilot.supervisor import SingleInstanceLock\n"
+        f"lock = SingleInstanceLock({str(lock_path)!r})\n"
+        "assert lock.acquire()\n"
+        "time.sleep(4)\n"
+        "lock.release()\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", script])
+    try:
+        for _ in range(50):
+            if lock_path.exists():
+                break
+            time.sleep(0.1)
+        assert lock_path.exists()
+
+        monkeypatch.setattr(cli_module, "STATE_PATH", tmp_path / "state.json")
+        monkeypatch.setattr(cli_module, "LOCK_PATH", lock_path)
+        monkeypatch.setattr(cli_module, "STOP_SIGNAL_PATH", tmp_path / "stop.signal")
+
+        cli_module.cmd_stop(None)
+
+        # Le verrou du vrai process actif ne doit PAS avoir disparu.
+        assert lock_path.exists()
+    finally:
+        proc.wait(timeout=15)
+
+    assert not lock_path.exists()  # libéré par le propriétaire lui-même, pas par cmd_stop
+
+
+def test_cmd_stop_still_cleans_up_a_genuinely_orphaned_lock(tmp_path, monkeypatch):
+    """Symétrique : un verrou dont le PID enregistré est mort DOIT toujours être nettoyable par
+    `cmd_stop` — le correctif ne doit pas rendre le filet de sécurité inopérant pour ce cas."""
+    import json as _json
+
+    import scripts.autopilot.cli as cli_module
+
+    lock_path = tmp_path / "autopilot.lock"
+    lock_path.write_text(_json.dumps({"pid": 2147483647, "acquired_at_utc": "x", "worktree": "x"}), encoding="utf-8")
+
+    monkeypatch.setattr(cli_module, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(cli_module, "LOCK_PATH", lock_path)
+    monkeypatch.setattr(cli_module, "STOP_SIGNAL_PATH", tmp_path / "stop.signal")
+
+    cli_module.cmd_stop(None)
 
     assert not lock_path.exists()
 

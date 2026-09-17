@@ -121,6 +121,18 @@ class SingleInstanceLock:
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             return None
 
+    def is_held_by_a_live_process(self) -> bool:
+        """Mission finalisation V1.1 (§2.A) : distingue "personne ne détient le verrou"/"détenu
+        par un process mort" (récupérable) de "détenu par un process réellement vivant" (jamais à
+        libérer de force). Contenu illisible/absent traité prudemment comme potentiellement
+        détenu — cohérent avec `_pid_is_alive`/`acquire()` : ne jamais voler un verrou par doute."""
+        if not self.path.exists():
+            return False
+        info = self._read()
+        if info is None:
+            return True  # illisible -> prudence, jamais supposé mort
+        return _pid_is_alive(info.get("pid"))
+
     def acquire(self, _retried: bool = False) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -433,13 +445,17 @@ class AutopilotSupervisor:
         if blocked is not None:
             return blocked
         attempt = record.attempt_count + 1
-        result = self._developer_fn(mission, attempt, findings=None)
+        # Finalisation V1.1 (§2.C) : une retentative en place (échec non-escaladant) doit
+        # transmettre l'échec précédent au Developer, jamais répéter le MÊME prompt sans le
+        # moindre retour sur ce qui a échoué — `pending_findings` porte ce retour s'il existe déjà.
+        findings = list(record.pending_findings) if record.pending_findings else None
+        result = self._developer_fn(mission, attempt, findings=findings)
         if not result.get("success", False):
             return self._handle_failure(result, attempt, mission)
         return self._transition(
             AutopilotState.TESTING, attempt_count=attempt,
             artifacts=tuple(result.get("changed_files", ())),
-            next_action="exécuter les tests ciblés", stop_reason=None,
+            next_action="exécuter les tests ciblés", stop_reason=None, pending_findings=(),
             developer_session_id=result.get("session_id"),
         )
 
@@ -451,7 +467,13 @@ class AutopilotSupervisor:
         result = self._tester_fn(mission)
         if not result.get("success", False):
             attempt = record.attempt_count + 1
-            return self._handle_failure(result, attempt, mission)
+            # Finalisation V1.1 (§2.C) — bug réel trouvé : un échec de test retentait en place SUR
+            # TESTING, ce qui ne fait que rappeler `tester_fn()` sans le moindre changement de code
+            # entre-temps — un test déterministe échoue alors IDENTIQUEMENT à chaque fois, sans
+            # jamais progresser vers une correction (juste vers une escalade accélérée par
+            # signature répétée). Toute retentative non-escaladante doit transmettre l'échec au
+            # Developer via CORRECTING, jamais rester en boucle sur TESTING seul.
+            return self._handle_failure(result, attempt, mission, retry_target=AutopilotState.CORRECTING)
         return self._transition(
             AutopilotState.REVIEWING, tests_status=result.get("summary", "passed"),
             next_action="lancer la review indépendante", stop_reason=None,
@@ -620,7 +642,10 @@ class AutopilotSupervisor:
 
     # ── Échecs / diagnostic / escalade (mission §7/§8/§13) ───────────────────────────────────
 
-    def _handle_failure(self, result: dict, attempt: int, mission: Optional[Mission] = None) -> AutopilotState:
+    def _handle_failure(
+        self, result: dict, attempt: int, mission: Optional[Mission] = None,
+        retry_target: Optional[AutopilotState] = None,
+    ) -> AutopilotState:
         # `developer_fn` renvoie `raw_output` ; `tester_fn`/`reviewer_fn` ne renvoient que
         # `summary` (contrat documenté en tête de module) — sans repli, une classification sur ""
         # masquait TOUJOURS NETWORK/QUOTA_LIMIT pour ces échecs (trouvé par la revue safety/
@@ -653,8 +678,20 @@ class AutopilotSupervisor:
         attempts_exhausted = attempt >= max_attempts
         signature_repeated = git_safety.should_escalate(already_seen, signature, limit=self._failure_limit)
         if not signature_repeated and not attempts_exhausted:
+            # Finalisation V1.1 (§2.C) : transmettre TOUJOURS l'échec comme retour exploitable pour
+            # la prochaine invocation du Developer — jamais une retentative "à l'identique" sans
+            # le moindre contexte sur ce qui a échoué (bug réel trouvé : un échec de TESTING
+            # retentait auparavant TESTING seul, rappelant `tester_fn()` sans aucun changement de
+            # code entre-temps, ce qui ne peut jamais corriger quoi que ce soit).
+            feedback = (f"Échec précédent à corriger : {raw_output.strip()[:2000]}",)
+            if retry_target is not None:
+                return self._transition(
+                    retry_target, attempt_count=attempt, pending_findings=feedback,
+                    stop_reason=f"tentative {attempt} échouée, transmise pour correction : {signature}",
+                )
             return self._retry_in_place(
-                attempt_count=attempt, stop_reason=f"tentative {attempt} échouée : {signature}",
+                attempt_count=attempt, pending_findings=feedback,
+                stop_reason=f"tentative {attempt} échouée : {signature}",
             )
 
         # Mission §8 : "avant le Human Gate, lancer un diagnostic indépendant, tenter une autre
