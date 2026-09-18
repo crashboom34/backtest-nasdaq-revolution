@@ -26,6 +26,20 @@ def test_classifies_a_rate_limit_message_as_quota():
     assert classify_failure(text) is FailureCategory.QUOTA_LIMIT
 
 
+def test_classifies_a_monthly_spend_limit_message_as_quota():
+    """Régression — bug réel confirmé en conditions réelles (reprise d'AF-V-02 Slice 2, tentative
+    4 sur REVIEWING) : `real_reviewer_fn` a réellement reçu
+    `{"is_error":true,...,"stop_reason":"stop_sequence",...}` avec, dans le texte complet (tronqué
+    à 200 caractères dans `stop_reason` persisté), le message "You've hit your monthly spend
+    limit" — jamais reconnu par `_QUOTA_KEYWORDS`, donc classé `UNKNOWN` et traité comme un échec
+    ORDINAIRE plutôt que `QUOTA_LIMIT` (mission §13 : "une limite Claude n'est jamais un Human
+    Gate"). Conséquence réelle : la mission a escaladé vers HUMAN_GATE_REQUIRED (une décision
+    humaine SCIENTIFIQUE apparente) alors que la vraie cause était une limite de dépenses externe,
+    nécessitant simplement d'attendre/d'ajuster le plafond — jamais un Human Gate pour ce cas."""
+    text = "You've hit your monthly spend limit. Your limit will reset next month."
+    assert classify_failure(text) is FailureCategory.QUOTA_LIMIT
+
+
 def test_classifies_a_network_timeout():
     text = "requests.exceptions.ConnectionError: Failed to establish a new connection: [Errno 11001] getaddrinfo failed"
     assert classify_failure(text) is FailureCategory.NETWORK

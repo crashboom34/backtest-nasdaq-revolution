@@ -27,6 +27,14 @@ _STOP_KEYWORDS = ("stop_requested",)
 _QUOTA_KEYWORDS = (
     "usage limit", "rate_limit_error", "rate limit exceeded", "quota exceeded",
     "limite d'usage", "limit reached", "usage limit reached",
+    # Finalisation reprise — bug réel confirmé en conditions réelles (reprise d'AF-V-02 Slice 2,
+    # REVIEWING) : "You've hit your monthly spend limit" (message réel reçu de `claude -p`) n'était
+    # reconnu par AUCUN des motifs ci-dessus, classé `UNKNOWN` plutôt que `QUOTA_LIMIT` — une
+    # limite de dépenses Claude authentique a alors escaladé vers `HUMAN_GATE_REQUIRED` (une
+    # décision humaine SCIENTIFIQUE apparente) au lieu de `WAITING_FOR_CLAUDE` (mission §13 :
+    # "une limite Claude n'est jamais un Human Gate"). "spend limit" (générique, jamais seulement
+    # "monthly") couvre aussi une variante "daily spend limit" plausible.
+    "spend limit",
 )
 _AUTH_KEYWORDS = ("authentication_error", "invalid api key", "unauthorized", " 401 ", "401 unauthorized")
 _NETWORK_KEYWORDS = (
