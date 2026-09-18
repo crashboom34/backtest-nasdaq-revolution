@@ -106,6 +106,61 @@
         "aucune modification de walk_forward.py au-delà du seam décrit",
         "run_test_validation=True laisse Optimizer.run() inchangé pour tout appelant existant"
       ]
+    },
+    {
+      "id": "AF-V-02-SLICE-3",
+      "title": "AF-V-02 Slice 3 — Orchestration multi-fold + agrégation OOS en mémoire (Décision 15)",
+      "status": "PLANNED",
+      "prompt_file": "prompts/af-v02-slice-3.md",
+      "depends_on": ["AF-V-02-SLICE-2"],
+      "allowed_paths": [
+        "optimizer.py",
+        "walk_forward.py",
+        "validation_run.py",
+        "tests/test_optimizer.py",
+        "tests/test_walk_forward.py",
+        "tests/test_validation_run.py"
+      ],
+      "forbidden_paths": [
+        "engine.py",
+        "compute_split_dates",
+        "strategy_contracts.py",
+        "dataset_split.py",
+        "strategies/",
+        "app.py",
+        "nasdaq_3m.csv",
+        "app_corrupted_backup.py",
+        "docs/adr/"
+      ],
+      "targeted_tests": [
+        "tests/test_walk_forward.py",
+        "tests/test_optimizer.py",
+        "tests/test_validation_run.py"
+      ],
+      "regression_tests": [],
+      "risk_level": "high",
+      "max_attempts": 3,
+      "max_budget_usd": 20.0,
+      "requires_clean_worktree": true,
+      "scientific_contracts": [
+        "ADR-0021-decision-14",
+        "ADR-0021-decision-15",
+        "ADR-0021-decision-9"
+      ],
+      "human_gate_conditions": [
+        "modification de FINAL_HOLDOUT",
+        "modification de la stratégie étalon Perfect Revolution V1",
+        "conflit scientifique non résoluble sur la méthode d'agrégation OOS (Décision 15) ou sur l'exposition des trades individuels par fold",
+        "extension du contrat déjà figé de FoldResult/run_fold_test()/execute_walk_forward_fold() non strictement additive"
+      ],
+      "completion_evidence": [
+        "tests ciblés verts",
+        "suite complète verte (régression complète imposée par risk_level=high)",
+        "review indépendante sans finding BLOQUANT/MAJEUR",
+        "AggregateResult peuplé selon ADR 0021 Décision 15 (concaténation trades, courbe d'equity chaînée, aucune moyenne de ratios)",
+        "aucune rétroaction inter-fold démontrée par test (ADR 0021 Décision 14)",
+        "aucune persistance disque ni WalkForwardEvidence/verdict scientifique produit (hors scope, tranche suivante)"
+      ]
     }
   ]
 }

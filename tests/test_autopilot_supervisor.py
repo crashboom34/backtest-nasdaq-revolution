@@ -1550,3 +1550,37 @@ def test_resolve_human_gate_resets_the_retry_budget_for_the_resumed_phase(tmp_pa
     final_state = supervisor.run_one_step()
     assert final_state != AutopilotState.HUMAN_GATE_REQUIRED
     assert review_calls["count"] == 1
+
+
+def test_a_ready_authorized_next_mission_chains_automatically_without_stopping(tmp_path):
+    """Vérification (mission « poursuite AlphaForge », point 5) — pas une correction : le
+    superviseur ne doit JAMAIS s'arrêter entre deux missions quand la suivante est `PLANNED` et sa
+    seule dépendance déjà `DONE` — un UNIQUE `run_until()` doit traverser M1 (jusqu'à
+    NEXT_MISSION) PUIS enchaîner automatiquement M2 en entier (PLANNING -> ... -> NEXT_MISSION ->
+    PLANNING -> ... -> COMPLETED), sans qu'aucun appelant externe n'ait besoin de relancer la
+    boucle entre les deux. Si ce test échoue, c'est la preuve empirique qu'un correctif minimal
+    est nécessaire (point 5) ; s'il passe, aucune intervention supplémentaire n'est justifiée."""
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(id="M1", title="Premiere", status="PLANNED", prompt_file="m1.md"),
+        Mission(
+            id="M2", title="Seconde", status="PLANNED", prompt_file="m2.md", depends_on=("M1",),
+        ),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    supervisor.acquire_lock()
+
+    final_state = supervisor.run_until({AutopilotState.COMPLETED}, max_steps=100)
+
+    assert final_state == AutopilotState.COMPLETED
+    record = state_store.load()
+    assert record.mission_id == "M2"  # la dernière mission traitée, jamais restée sur M1
+    from scripts.autopilot.mission_queue import load_missions
+    reloaded = load_missions(missions_path)
+    assert {m.id: m.status for m in reloaded} == {"M1": "DONE", "M2": "DONE"}

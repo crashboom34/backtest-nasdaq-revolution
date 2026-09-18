@@ -166,6 +166,35 @@ d'échec (`"Échec précédent à corriger : "`) pourrait théoriquement entrer 
 finding réel qui commencerait par cette même phrase exacte — probabilité jugée négligeable en
 pratique (nécessiterait que le Reviewer/Tester reproduise cette phrase française mot pour mot).
 
+## Autorisation permanente — slices AF-V-02 déjà cadrées par la spécification validée (2026-09-18)
+
+Décision explicite de l'utilisateur : les tranches (« slices ») d'implémentation d'`AF-V-02`
+(Walk-Forward), dès lors qu'elles dérivent STRICTEMENT du périmètre déjà décidé par
+`docs/adr/0021-walk-forward-rolling-calendar-v1.md` et de la section « Ce qui N'EST PAS dans cette
+tranche » de la tranche précédente, sont **pré-autorisées à s'enchaîner sans demande de
+confirmation individuelle** pour chacune — l'utilisateur n'a plus besoin de valider explicitement
+chaque nouvelle tranche avant sa mise en file/son exécution.
+
+**Cette autorisation reste strictement bornée** — elle ne supprime AUCUNE protection scientifique
+ni opérationnelle existante, ne s'étend à AUCUN autre epic/mission que les tranches AF-V-02 déjà
+couvertes par l'ADR 0021, et ne dispense JAMAIS :
+- du TDD strict (RED confirmé avant implémentation) ;
+- de la review indépendante avant tout commit/push ;
+- des `human_gate_conditions` propres à chaque mission (`FINAL_HOLDOUT`, stratégie étalon Perfect
+  Revolution V1, tout conflit scientifique réellement indéterminé par l'ADR) ;
+- des budgets déjà établis (`max_budget_usd`/`max_attempts` par mission — jamais relevés
+  unilatéralement pour « faire passer » une tranche) ;
+- de `requires_clean_worktree` (jamais désactivé globalement) ;
+- de la distinction stricte entre une limite de quota/dépenses Claude (jamais un Human Gate
+  scientifique — route vers `WAITING_FOR_CLAUDE`, voir `classify_failure()`) et un authentique
+  conflit scientifique (seul cas légitime de `HUMAN_GATE_REQUIRED`).
+
+Chaque nouvelle tranche doit néanmoins être préparée avec la même rigueur qu'une mission mise en
+file manuellement : un prompt dédié (`prompts/af-v02-slice-N.md`) citant précisément les décisions
+ADR concernées et la section « hors scope » de la tranche précédente (jamais un contenu supposé à
+partir du seul numéro de tranche), une entrée `missions.json` avec scope/tests/`human_gate_conditions`/
+`completion_evidence` explicites, avant toute mise en file.
+
 ## Coût réel observé (à budgéter, jamais négligeable)
 
 Deux sondages réels indépendants (`claude -p --output-format json`) ont mesuré ~0,32-0,41 $ pour
