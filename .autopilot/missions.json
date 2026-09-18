@@ -163,6 +163,57 @@
         "aucune rétroaction inter-fold démontrée par test (ADR 0021 Décision 14)",
         "aucune persistance disque ni WalkForwardEvidence/verdict scientifique produit (hors scope, tranche suivante)"
       ]
+    },
+    {
+      "id": "AF-V-02-SLICE-4",
+      "title": "AF-V-02 Slice 4 — Persistance disque des artefacts Walk-Forward (Décision 12, écriture seule)",
+      "status": "PLANNED",
+      "prompt_file": "prompts/af-v02-slice-4.md",
+      "depends_on": ["AF-V-02-SLICE-3"],
+      "allowed_paths": [
+        "walk_forward.py",
+        "validation_run.py",
+        "tests/test_walk_forward.py",
+        "tests/test_validation_run.py"
+      ],
+      "forbidden_paths": [
+        "engine.py",
+        "optimizer.py",
+        "compute_split_dates",
+        "strategy_contracts.py",
+        "dataset_split.py",
+        "strategies/",
+        "app.py",
+        "nasdaq_3m.csv",
+        "app_corrupted_backup.py",
+        "docs/adr/"
+      ],
+      "targeted_tests": [
+        "tests/test_walk_forward.py",
+        "tests/test_validation_run.py"
+      ],
+      "regression_tests": [],
+      "risk_level": "high",
+      "max_attempts": 3,
+      "max_budget_usd": 20.0,
+      "requires_clean_worktree": true,
+      "scientific_contracts": [
+        "ADR-0021-decision-12"
+      ],
+      "human_gate_conditions": [
+        "modification de FINAL_HOLDOUT",
+        "modification de la stratégie étalon Perfect Revolution V1",
+        "conflit scientifique non résoluble sur le format de persistance ou sur l'exposition des trades/equity du TEST",
+        "extension du contrat déjà figé de FoldResult/FoldSelection/FoldDefinition/AggregateResult/WalkForwardRunOutcome/run_walk_forward()/build_aggregate_result() non strictement additive"
+      ],
+      "completion_evidence": [
+        "tests ciblés verts",
+        "suite complète verte (régression complète imposée par risk_level=high)",
+        "review indépendante sans finding BLOQUANT/MAJEUR",
+        "manifest.json/state.json/folds/fold_NNN/*.json/aggregate.json/CSV réellement écrits et désérialisables vers les valeurs réelles",
+        "écriture atomique (atomic_json_store.save_atomic()) pour chaque fichier JSON",
+        "aucune reprise/skip de fold ni WalkForwardEvidence/verdict scientifique produit (hors scope, tranche suivante)"
+      ]
     }
   ]
 }
