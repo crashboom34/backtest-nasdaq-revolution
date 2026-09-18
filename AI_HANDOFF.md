@@ -1886,3 +1886,54 @@ ne permet que `STOPPED`/`PLANNING`, et `PLANNING` rebloquerait immédiatement su
 `requires_clean_worktree` contre le propre travail non commité de Slice 2) — jamais contourné ni
 forcé par cette mission, conformément à l'exigence explicite qu'un Human Gate reste une décision
 humaine.
+
+## 27. AF-V-02 Slice 3 — Orchestration multi-fold + agrégation OOS en mémoire (2026-09-18)
+
+Mission « Poursuite du développement autorisé d'AlphaForge », donnant suite à la finalisation
+opérationnelle (§26). **Autorisation permanente accordée par l'utilisateur** : les tranches AF-V-02
+dérivées strictement du périmètre déjà décidé par l'ADR 0021 s'enchaînent désormais sans demande de
+confirmation individuelle par tranche — consignée dans `.autopilot/README.md` (bornée : ne
+supprime aucune protection scientifique/opérationnelle existante, voir ce document pour le détail
+exact).
+
+**Détermination de la tranche suivante, jamais devinée depuis le seul numéro** : dérivée de la
+section « Ce qui N'EST PAS dans cette tranche » de Slice 2 (item 2, « Agrégation OOS multi-fold »)
+et de l'ADR 0021 Décisions 14/15 — confirmée par lecture du code réel (aucun orchestrateur
+multi-fold n'existait encore, `AggregateResult` déjà typé dans `validation_run.py` mais documenté
+« forme figée, population différée »). Nouveau `.autopilot/prompts/af-v02-slice-3.md`, nouvelle
+entrée `missions.json` (mêmes budget/risque/scope que Slice 2, `depends_on=["AF-V-02-SLICE-2"]`).
+
+**Bug réel trouvé et corrigé avant le lancement** : `COMPLETED` n'avait aucune transition sortante
+ni handler — un `autopilot start` relancé après l'ajout d'une nouvelle mission `PLANNED` à la file
+restait bloqué indéfiniment sans jamais la remarquer (reproduit empiriquement : Slice 3 mise en
+file après que Slice 2 avait déjà atteint `COMPLETED`, `autopilot start` n'a rien fait). Corrigé
+par un nouveau `_handle_completed()` (mirroring exact de `_handle_ready()`) + `ALLOWED_TRANSITIONS
+[COMPLETED] = (PLANNING,)`, TDD, revue indépendante (aucun BLOCKER/IMPORTANT), commit `5e6e60b`.
+
+**Deux limites d'usage Claude réelles rencontrées et correctement gérées** (jamais un Human Gate
+scientifique, conformément à la consigne explicite) :
+1. Une réutilisation de la classification déjà corrigée en §26 (`"spend limit"`) a immédiatement
+   renvoyé `WAITING_FOR_CLAUDE` sur un message similaire.
+2. Une DEUXIÈME limite, de forme différente (coût réel non nul, `$0,56`, 7 tours, avant d'être
+   interrompue), a également été classée `QUOTA_LIMIT` par les motifs génériques déjà présents
+   (`"usage limit"`/`"limit reached"`) — aucun nouveau correctif nécessaire, la généralisation du
+   §26 a tenu. État conservé exactement (`WAITING_FOR_CLAUDE`, `resume_to_phase=REVIEWING`), aucun
+   plafond relevé, aucun budget réinitialisé, reprise simple via `autopilot resume` une fois la
+   limite levée — le travail du Developer déjà réalisé (`walk_forward.py`/`validation_run.py`/
+   `tests/test_walk_forward.py`) est resté intact et non perdu entre les deux pauses.
+
+**Résultat réel, review indépendante comprise** : `AggregateResult` réellement peuplé selon la
+Décision 15 (concaténation littérale des trades, courbe d'equity chaînée — jamais une concaténation
+brute de capital, jamais une moyenne de ratios), aucune rétroaction inter-fold (Décision 14) prouvée
+par test. Suite complète verte (1304/1304). Review indépendante réelle : 2 lots, 3 fichiers
+couverts, aucun finding bloquant retenu au commit final. Commit réel `febe701e400ef37859444de767953fded412e8a2`,
+poussé sur `origin/autopilot/permanent` puis intégré (fast-forward, aucun force-push, suite
+complète revérifiée dans un worktree d'intégration dédié) sur `origin/master`.
+
+**Dossier principal et `business-b2b/`** : intégralement préservés tout du long (jamais touchés).
+
+**Prochaine tranche (non encore cadrée)** : Slice 4, dérivée de l'item 1 restant de la même liste
+« hors scope » (persistance disque, ADR 0021 Décision 12 — `results/job_xxx/walk_forward/`,
+manifest/state/fold/aggregate, `oos_trades.csv`/`oos_equity.csv`) — à spécifier avec la même
+rigueur (prompt dédié citant les décisions ADR réelles, jamais un contenu supposé) avant mise en
+file, une fois la forme exacte de l'orchestrateur de Slice 3 examinée.
