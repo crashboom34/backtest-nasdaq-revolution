@@ -110,9 +110,11 @@
     {
       "id": "AF-V-02-SLICE-3",
       "title": "AF-V-02 Slice 3 — Orchestration multi-fold + agrégation OOS en mémoire (Décision 15)",
-      "status": "PLANNED",
+      "status": "DONE",
       "prompt_file": "prompts/af-v02-slice-3.md",
-      "depends_on": ["AF-V-02-SLICE-2"],
+      "depends_on": [
+        "AF-V-02-SLICE-2"
+      ],
       "allowed_paths": [
         "optimizer.py",
         "walk_forward.py",

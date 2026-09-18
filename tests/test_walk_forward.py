@@ -14,6 +14,7 @@ Optimizer/TEST OOS/persistence — voir walk_forward.py pour le détail du déco
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 
@@ -25,7 +26,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dataset_split import build_split_boundary
 from engine import _add_market_time_columns
 from strategy_contracts import DailyStateReadiness
-from validation_run import FoldDefinition, FoldResult, FoldSelection
+from validation_run import (
+    AggregateResult,
+    FoldDefinition,
+    FoldResult,
+    FoldSelection,
+    WalkForwardRunOutcome,
+)
 from walk_forward import (
     WALK_FORWARD_SEMANTICS_VERSION,
     DatasetTooShortForWalkForward,
@@ -37,6 +44,7 @@ from walk_forward import (
     OosOverlapError,
     UnsupportedWalkForwardGeometry,
     WalkForwardSemanticsMismatch,
+    build_aggregate_result,
     build_walk_forward_specification,
     check_no_final_holdout_overlap,
     check_no_oos_overlap,
@@ -46,6 +54,7 @@ from walk_forward import (
     execute_walk_forward_fold,
     run_fold_test,
     run_fold_train,
+    run_walk_forward,
     select_fold_top1,
     validate_resume_walk_forward_semantics,
 )
@@ -1527,3 +1536,463 @@ class TestExecuteWalkForwardFoldForwardsFoldSeed:
         execute_walk_forward_fold(fold, config, df, fold_seed=2024)
 
         assert captured["fold_seed"] == 2024
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 3 — Orchestration multi-fold + agrégation OOS en mémoire
+# (ADR 0021 Décisions 9/14/15). `run_walk_forward()` orchestre `execute_walk_forward_fold()`
+# (Slice 2, inchangée) fold par fold ; `build_aggregate_result()` peuple `AggregateResult` (déjà
+# défini dans validation_run.py) à partir de la série de `FoldResult` collectée. Aucune
+# persistance disque, aucun `WalkForwardEvidence`/verdict scientifique ici (hors scope).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRunFoldTestExposesGrossWinLossForAggregation:
+    """`FoldResult.gross_win`/`gross_loss`/`n_win` (extension additive Slice 3) : population
+    directe depuis les mêmes `stats` déjà produites par l'unique exécution TEST du fold — aucun
+    second backtest, mêmes noms de grandeur qu'`engine.py::_compute_stats()`."""
+
+    def test_gross_win_loss_and_n_win_populated_from_stats(self, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[110].isoformat(),
+        )
+        trades = pd.DataFrame([
+            {"resultat_net": 10.0, "raison_sortie": "target"},
+            {"resultat_net": -4.0, "raison_sortie": "stop"},
+            {"resultat_net": 2.0, "raison_sortie": "fin-donnees"},
+        ])
+        equity = pd.DataFrame([{"date": "x", "capital": 10_008.0}])
+        stats = {
+            "n_trades": 3, "net_ret_pct": 0.08, "max_dd_pct": 1.5,
+            "profit_factor": 2.1, "win_rate": 66.7,
+            "gross_win": 12.0, "gross_loss": 4.0, "n_win": 2,
+        }
+
+        def fake_run_backtest(df_, strategy, params, **kwargs):
+            return trades, equity, stats
+
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake_run_backtest)
+        config = _minimal_optimizer_config()
+        selection = _fold_selection(fold)
+
+        result = run_fold_test(fold, selection, config, df)
+
+        assert result.gross_win == 12.0
+        assert result.gross_loss == 4.0
+        assert result.n_win == 2
+
+    def test_gross_win_loss_and_n_win_are_zero_for_zero_trade_fold(self, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[110].isoformat(),
+        )
+        empty_trades, empty_equity = pd.DataFrame(), pd.DataFrame()
+
+        import engine
+        monkeypatch.setattr(
+            engine, "run_backtest",
+            lambda *a, **k: (empty_trades, empty_equity, {"n_trades": 0}),
+        )
+        config = _minimal_optimizer_config()
+        selection = _fold_selection(fold)
+
+        result = run_fold_test(fold, selection, config, df)
+
+        assert result.gross_win == 0.0
+        assert result.gross_loss == 0.0
+        assert result.n_win == 0
+
+
+def _fold_result_stub(
+    fold, selection=None, score_test=1.0, net_ret_pct=0.0, n_trades=1,
+    zero_trade_oos=False, gross_win=0.0, gross_loss=0.0, n_win=0,
+):
+    """Construit un `FoldResult` directement (sans backtest réel) pour les tests
+    d'orchestration/d'agrégation Slice 3 — mêmes principes que `_wf_fold()`/`_fold_selection()`
+    ci-dessus pour Slice 1/2."""
+    selection = selection if selection is not None else _fold_selection(fold)
+    return FoldResult(
+        fold_id=fold.fold_id,
+        definition=fold,
+        selection=selection,
+        n_trades=n_trades,
+        net_ret_pct=net_ret_pct,
+        max_dd_pct=None,
+        profit_factor=None,
+        win_rate=None,
+        expectancy=None,
+        score_test=score_test,
+        zero_trade_oos=zero_trade_oos,
+        forced_closes=0,
+        coverage_bars=10,
+        gross_win=gross_win,
+        gross_loss=gross_loss,
+        n_win=n_win,
+    )
+
+
+class TestBuildAggregateResult:
+    """`build_aggregate_result()` — fonction PURE, aucun backtest, ADR 0021 Décision 15."""
+
+    def _folds(self, n, step_months=1):
+        zone = _zone("2023-01-01T00:00:00+00:00", "2023-12-01T00:00:00+00:00")
+        folds = []
+        for k in range(n):
+            train_start = pd.Timestamp("2023-01-01T00:00:00+00:00") + pd.DateOffset(
+                months=k * step_months,
+            )
+            boundary = train_start + pd.DateOffset(months=step_months)
+            test_end = boundary + pd.DateOffset(months=step_months)
+            folds.append(_wf_fold(
+                train_start=train_start.isoformat(), boundary=boundary.isoformat(),
+                test_end=test_end.isoformat(), index=k, is_last=(k == n - 1),
+            ))
+        return folds
+
+    def test_equity_curve_matches_the_adr_reference_example(self):
+        """Exemple de référence de l'ADR (Décision 15) : fold k +5%, fold k+1 -2% ->
+        1.00 -> 1.05 -> 1.029. Jamais une concaténation brute de capital absolu."""
+        fold0, fold1 = self._folds(2)
+        r0 = _fold_result_stub(fold0, net_ret_pct=5.0)
+        r1 = _fold_result_stub(fold1, net_ret_pct=-2.0)
+
+        agg = build_aggregate_result((r0, r1))
+
+        assert agg.oos_net_return_pct == pytest.approx(2.9)
+        # peak=1.05, trough final=1.029 : (1.05-1.029)/1.05*100 == 2.0.
+        assert agg.oos_max_dd_pct == pytest.approx(2.0)
+
+    def test_profit_factor_is_inf_when_gross_loss_total_is_zero_with_real_trades(self):
+        """gross_loss_total == 0 avec des trades réels -> float('inf') (même convention
+        qu'engine.py::_compute_stats(), ligne ~502)."""
+        fold0, = self._folds(1)
+        r0 = _fold_result_stub(fold0, n_trades=5, gross_win=100.0, gross_loss=0.0, n_win=5)
+
+        agg = build_aggregate_result((r0,))
+
+        assert agg.oos_profit_factor == float("inf")
+        assert agg.total_oos_trades == 5
+        assert agg.oos_win_rate == pytest.approx(1.0)
+
+    def test_profit_factor_and_win_rate_are_none_when_total_oos_trades_is_zero(self):
+        """`None` réservé au seul cas total_oos_trades == 0 (tous les folds zéro-trade)."""
+        fold0, fold1 = self._folds(2)
+        r0 = _fold_result_stub(fold0, n_trades=0, zero_trade_oos=True)
+        r1 = _fold_result_stub(fold1, n_trades=0, zero_trade_oos=True)
+
+        agg = build_aggregate_result((r0, r1))
+
+        assert agg.oos_profit_factor is None
+        assert agg.oos_win_rate is None
+        assert agg.total_oos_trades == 0
+
+    def test_profit_factor_sums_gross_win_loss_across_folds_not_averaged(self):
+        fold0, fold1 = self._folds(2)
+        r0 = _fold_result_stub(fold0, n_trades=2, gross_win=10.0, gross_loss=5.0, n_win=1)
+        r1 = _fold_result_stub(fold1, n_trades=3, gross_win=6.0, gross_loss=1.0, n_win=2)
+
+        agg = build_aggregate_result((r0, r1))
+
+        # gross_win_total=16, gross_loss_total=6 -> 16/6, jamais moyenne de (10/5=2.0, 6/1=6.0).
+        assert agg.oos_profit_factor == pytest.approx(16.0 / 6.0)
+        assert agg.total_oos_trades == 5
+        assert agg.oos_win_rate == pytest.approx(3 / 5)
+
+    def test_n_folds_zero_trade_counts_a_mix_correctly(self):
+        fold0, fold1, fold2 = self._folds(3)
+        r0 = _fold_result_stub(fold0, zero_trade_oos=True, n_trades=0)
+        r1 = _fold_result_stub(fold1, zero_trade_oos=False, n_trades=2)
+        r2 = _fold_result_stub(fold2, zero_trade_oos=True, n_trades=0)
+
+        agg = build_aggregate_result((r0, r1, r2))
+
+        assert agg.n_folds == 3
+        assert agg.n_folds_zero_trade == 2
+
+    def test_worst_fold_id_is_the_lowest_score_test_among_at_least_three_folds(self):
+        fold0, fold1, fold2 = self._folds(3)
+        r0 = _fold_result_stub(fold0, score_test=1.0)
+        r1 = _fold_result_stub(fold1, score_test=-5.0)
+        r2 = _fold_result_stub(fold2, score_test=3.0)
+
+        agg = build_aggregate_result((r0, r1, r2))
+
+        assert agg.worst_fold_id == fold1.fold_id
+
+    def test_mean_and_median_fold_score_test_are_diagnostics_not_the_primary_measure(self):
+        fold0, fold1, fold2 = self._folds(3)
+        r0 = _fold_result_stub(fold0, score_test=1.0)
+        r1 = _fold_result_stub(fold1, score_test=2.0)
+        r2 = _fold_result_stub(fold2, score_test=10.0)
+
+        agg = build_aggregate_result((r0, r1, r2))
+
+        assert agg.mean_fold_score_test == pytest.approx(13.0 / 3.0)
+        assert agg.median_fold_score_test == pytest.approx(2.0)
+
+    def test_oos_sharpe_stays_none_in_v1(self):
+        fold0, = self._folds(1)
+        r0 = _fold_result_stub(fold0)
+
+        agg = build_aggregate_result((r0,))
+
+        assert agg.oos_sharpe is None
+
+    def test_returns_an_aggregate_result_instance(self):
+        fold0, = self._folds(1)
+        r0 = _fold_result_stub(fold0)
+
+        agg = build_aggregate_result((r0,))
+
+        assert isinstance(agg, AggregateResult)
+
+
+class TestRunWalkForwardOrchestration:
+    """`run_walk_forward()` — ADR 0021 Décision 14 (aucune rétroaction inter-fold), Décision 9
+    (dérivation `fold_seed`). `execute_walk_forward_fold()` est remplacée par un double de test
+    dans la plupart de ces tests : sa propre substance (TRAIN/Top-1/TEST) reste couverte par les
+    tests Slice 2 ci-dessus, jamais dupliquée ici."""
+
+    def _spec_and_zone(self, **spec_overrides):
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M", **spec_overrides)
+        zone = _zone("2023-01-01T00:00:00+00:00", "2023-04-01T00:00:00+00:00")
+        return spec, zone
+
+    def test_compute_fold_definitions_is_called_exactly_once(self, monkeypatch):
+        spec, zone = self._spec_and_zone()
+        calls = {"count": 0}
+        real_compute = walk_forward_module.compute_fold_definitions
+
+        def spy_compute(*a, **k):
+            calls["count"] += 1
+            return real_compute(*a, **k)
+
+        monkeypatch.setattr(walk_forward_module, "compute_fold_definitions", spy_compute)
+        monkeypatch.setattr(
+            walk_forward_module, "execute_walk_forward_fold",
+            lambda fold, *a, **k: _fold_result_stub(fold),
+        )
+
+        outcome = run_walk_forward(zone, spec, None, _minimal_optimizer_config(), None)
+
+        assert calls["count"] == 1
+        assert isinstance(outcome, WalkForwardRunOutcome)
+        assert outcome.stopped_early is False
+        assert len(outcome.fold_results) == 2
+
+    def test_folds_are_executed_in_order_and_results_collected(self, monkeypatch):
+        spec, zone = self._spec_and_zone()
+        order = []
+
+        def fake_execute(fold, base_config, df, progress_cb=None, stop_flag_fn=None,
+                          fold_seed=None):
+            order.append(fold.fold_id)
+            return _fold_result_stub(fold, score_test=float(fold.fold_index))
+
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold", fake_execute)
+
+        outcome = run_walk_forward(zone, spec, None, _minimal_optimizer_config(), None)
+
+        assert order == ["fold_000", "fold_001"]
+        assert [r.fold_id for r in outcome.fold_results] == ["fold_000", "fold_001"]
+
+    def test_no_cross_fold_feedback_base_config_and_seed_independent_of_prior_result(
+        self, monkeypatch,
+    ):
+        """Décision 14 — un score TRAIN/TEST extrême du fold 0 ne doit jamais influencer le
+        `base_config`/`fold_seed` transmis au fold 1."""
+        spec, zone = self._spec_and_zone(master_seed=777)
+        captured = []
+
+        def fake_execute(fold, base_config, df, progress_cb=None, stop_flag_fn=None,
+                          fold_seed=None):
+            captured.append(
+                {"fold_id": fold.fold_id, "base_config": base_config, "fold_seed": fold_seed},
+            )
+            score = -999999.0 if fold.fold_index == 0 else 1.0
+            return _fold_result_stub(fold, score_test=score)
+
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold", fake_execute)
+        base_config = _minimal_optimizer_config()
+
+        run_walk_forward(
+            zone, spec, None, base_config, None, validation_run_id="wf_run_abc",
+        )
+
+        assert captured[0]["base_config"] is base_config
+        assert captured[1]["base_config"] is base_config
+        expected_seed_0 = int(
+            hashlib.sha256(b"777:wf_run_abc:0:wf-fold-seed-v1").hexdigest(), 16,
+        )
+        expected_seed_1 = int(
+            hashlib.sha256(b"777:wf_run_abc:1:wf-fold-seed-v1").hexdigest(), 16,
+        )
+        assert captured[0]["fold_seed"] == expected_seed_0
+        assert captured[1]["fold_seed"] == expected_seed_1
+
+    def test_fold_seed_is_none_when_master_seed_not_provided(self, monkeypatch):
+        spec, zone = self._spec_and_zone()
+        captured = []
+
+        def fake_execute(fold, base_config, df, progress_cb=None, stop_flag_fn=None,
+                          fold_seed=None):
+            captured.append(fold_seed)
+            return _fold_result_stub(fold)
+
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold", fake_execute)
+
+        run_walk_forward(zone, spec, None, _minimal_optimizer_config(), None)
+
+        assert captured == [None, None]
+
+    def test_master_seed_without_validation_run_id_raises_early(self):
+        spec, zone = self._spec_and_zone(master_seed=777)
+
+        with pytest.raises(ValueError):
+            run_walk_forward(zone, spec, None, _minimal_optimizer_config(), None)
+
+    def test_stop_flag_fn_between_folds_returns_partial_results_marked_stopped(
+        self, monkeypatch,
+    ):
+        spec, zone = self._spec_and_zone()
+        executed = []
+
+        def fake_execute(fold, base_config, df, progress_cb=None, stop_flag_fn=None,
+                          fold_seed=None):
+            executed.append(fold.fold_id)
+            return _fold_result_stub(fold)
+
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold", fake_execute)
+
+        state = {"n": 0}
+
+        def stop_flag_fn():
+            state["n"] += 1
+            return state["n"] > 1  # False avant fold_000, True avant fold_001.
+
+        outcome = run_walk_forward(
+            zone, spec, None, _minimal_optimizer_config(), None, stop_flag_fn=stop_flag_fn,
+        )
+
+        assert executed == ["fold_000"]
+        assert outcome.stopped_early is True
+        assert [r.fold_id for r in outcome.fold_results] == ["fold_000"]
+
+    def test_dataset_too_short_propagates_untouched_never_duplicated(self):
+        spec, _zone_unused = self._spec_and_zone()
+        zone_too_short = _zone("2023-01-01T00:00:00+00:00", "2023-01-15T00:00:00+00:00")
+
+        with pytest.raises(DatasetTooShortForWalkForward):
+            run_walk_forward(zone_too_short, spec, None, _minimal_optimizer_config(), None)
+
+    def test_integration_with_real_execute_walk_forward_fold(self, monkeypatch):
+        """Bout-en-bout avec la vraie `execute_walk_forward_fold()` (Slice 2, inchangée) — moteur
+        monkeypatché comme les tests Slice 2 ci-dessus, jamais une stratégie réelle."""
+        df = _build_synthetic_wf_df(400)
+        spec, _zone_unused = self._spec_and_zone()
+        zone = _zone(
+            df["time_paris"].iloc[0].isoformat(), df["time_paris"].iloc[300].isoformat(),
+        )
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        outcome = run_walk_forward(zone, spec, None, config, df)
+        results = outcome.fold_results
+
+        assert outcome.stopped_early is False
+        assert len(results) >= 2
+        assert all(isinstance(r, FoldResult) for r in results)
+        assert [r.fold_id for r in results] == sorted(r.fold_id for r in results)
+
+    def test_stop_flag_fn_is_never_forwarded_into_the_real_fold_train_search(
+        self, monkeypatch,
+    ):
+        """Fix du finding BLOCKER : le `stop_flag_fn` de frontière inter-fold ne doit jamais
+        atteindre `Optimizer.run()` à l'intérieur d'un fold — sinon une recherche TRAIN encore en
+        cours serait tronquée silencieusement par `_run_batch_sequential`/`_run_batch_parallel`
+        (`optimizer.py`), produisant un `FoldResult` indiscernable d'un résultat complet (viole
+        Décision 6 — Top-1 sélectionné sur TOUT le TRAIN — et l'esprit de Décision 13). Utilise la
+        vraie `execute_walk_forward_fold()` (comme le test d'intégration ci-dessus), jamais un
+        double, pour exercer le chemin réel `run_fold_train -> Optimizer.run(stop_flag_fn=...)`."""
+        df = _build_synthetic_wf_df(400)
+        spec, _zone_unused = self._spec_and_zone()
+        zone = _zone(
+            df["time_paris"].iloc[0].isoformat(), df["time_paris"].iloc[300].isoformat(),
+        )
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        calls = {"n": 0}
+
+        def stop_flag_fn():
+            calls["n"] += 1
+            return False  # ne déclenche jamais l'arrêt — sert uniquement à compter les appels
+
+        outcome = run_walk_forward(zone, spec, None, config, df, stop_flag_fn=stop_flag_fn)
+        results = outcome.fold_results
+
+        assert len(results) >= 2
+        # Une seule vérification entre-folds par fold exécuté. Si stop_flag_fn avait été transmis
+        # jusqu'à Optimizer.run(), il aurait été interrogé une fois par combinaison TRAIN évaluée
+        # (>= 3 avec _param_ranges_3_values, par fold) — donc bien plus que len(results) au total.
+        assert calls["n"] == len(results)
+
+    def test_no_capital_or_pnl_carried_over_between_folds_flat_each_fold_v1(
+        self, monkeypatch,
+    ):
+        """Spec item 2 (mission Slice 3) : `flat_each_fold_v1` (chaque fold repart du même
+        capital initial, aucune position/PnL reportée d'un fold à l'autre) est « à VÉRIFIER par un
+        test de régression sur l'orchestrateur, pas à réimplémenter ». Utilise la vraie
+        `execute_walk_forward_fold()` (comme les tests d'intégration ci-dessus, jamais un double)
+        pour prouver, à l'échelle de `run_walk_forward()`, que `initial_capital` transmis à
+        `engine.run_backtest()` (TRAIN et TEST confondus) reste IDENTIQUE d'un fold à l'autre même
+        quand le premier fold produit un gain massif (x100) — la seule façon dont un capital de
+        fold précédent pourrait fuir vers le fold suivant dans ce codebase, `initial_capital`
+        provenant uniquement de `base_config.global_params` (jamais mutée entre folds, déjà prouvé
+        par `test_no_cross_fold_feedback_...` ci-dessus)."""
+        df = _build_synthetic_wf_df(400)
+        spec, _zone_unused = self._spec_and_zone()
+        zone = _zone(
+            df["time_paris"].iloc[0].isoformat(), df["time_paris"].iloc[300].isoformat(),
+        )
+
+        class _CapitalTrackingRunBacktest:
+            def __init__(self):
+                self.initial_capitals = []
+                self.call_index = 0
+
+            def __call__(self, df_, strategy, params, **kwargs):
+                self.call_index += 1
+                initial_capital = kwargs["initial_capital"]
+                self.initial_capitals.append(initial_capital)
+                # Le tout premier appel (fold 0) simule un gain massif — si ce gain fuyait vers le
+                # fold suivant, son `initial_capital` s'écarterait de la valeur fixe de config.
+                net_ret = 1_000.0 if self.call_index == 1 else params.get("ema_trend_len", 0) / 100.0
+                trades = pd.DataFrame([{"resultat_net": 10.0, "raison_sortie": "fin-donnees"}])
+                equity = pd.DataFrame([{"date": "2020-01-01", "capital": initial_capital + net_ret}])
+                return trades, equity, {"n_trades": 1, "net_ret_pct": net_ret}
+
+        fake = _CapitalTrackingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+        expected_initial_capital = config.global_params.get("initial_capital", 10_000.0)
+
+        outcome = run_walk_forward(zone, spec, None, config, df)
+
+        assert len(outcome.fold_results) >= 2
+        assert fake.initial_capitals, "au moins un backtest attendu"
+        assert fake.initial_capitals == [expected_initial_capital] * len(fake.initial_capitals)

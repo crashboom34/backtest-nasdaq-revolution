@@ -29,6 +29,7 @@ import dataclasses
 import hashlib
 import json
 import re
+import statistics
 from typing import Optional, Tuple
 
 import pandas as pd
@@ -45,7 +46,14 @@ from optimizer import (
     reaches_stratified_sample,
 )
 from strategy_contracts import DailyStateReadiness, resolve_state_ready_boundary
-from validation_run import FoldDefinition, FoldResult, FoldSelection, WalkForwardSpecification
+from validation_run import (
+    AggregateResult,
+    FoldDefinition,
+    FoldResult,
+    FoldSelection,
+    WalkForwardRunOutcome,
+    WalkForwardSpecification,
+)
 
 # Identifie la sémantique du protocole Walk-Forward — géométrie, inclusivité des frontières, règle
 # terminale. Indépendante de TRAIN_TEST_SEMANTICS_VERSION ("exact-boundary-v2")/
@@ -646,6 +654,9 @@ def run_fold_test(
         expectancy = None
         forced_closes = 0
         score_test = test_result["score"]
+        gross_win = 0.0
+        gross_loss = 0.0
+        n_win = 0
     else:
         expectancy = float(trades["resultat_net"].mean())
         forced_closes = int((trades["raison_sortie"] == "fin-donnees").sum())
@@ -655,6 +666,13 @@ def run_fold_test(
             stats, base_config.score_weights, _UNFILTERED_TEST_SCORING,
             params=selection.selected_params, param_ranges=base_config.param_ranges,
         )
+        # gross_win/gross_loss/n_win (AF-V-02 Slice 3, extension additive de FoldResult) : mêmes
+        # noms de grandeur qu'engine.py::_compute_stats(), lus depuis les MÊMES stats déjà
+        # produites — .get(..., défaut) car un faux run_backtest de test peut légitimement ne pas
+        # les fournir (ex. _ScoreByParamRunBacktest, Slice 2).
+        gross_win = float(stats.get("gross_win", 0.0))
+        gross_loss = float(stats.get("gross_loss", 0.0))
+        n_win = int(stats.get("n_win", 0))
 
     ts_boundary = pd.Timestamp(fold.effective_boundary)
     ts_test_end = pd.Timestamp(fold.effective_test_end)
@@ -676,6 +694,9 @@ def run_fold_test(
         zero_trade_oos=zero_trade,
         forced_closes=forced_closes,
         coverage_bars=coverage_bars,
+        gross_win=gross_win,
+        gross_loss=gross_loss,
+        n_win=n_win,
     )
 
 
@@ -703,3 +724,154 @@ def execute_walk_forward_fold(
     )
     selection = select_fold_top1(fold, all_results, base_config, fold_seed=fold_seed)
     return run_fold_test(fold, selection, base_config, df)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 3 — Orchestration multi-fold + agrégation OOS en mémoire
+# (ADR 0021 Décisions 9/14/15). Consomme `execute_walk_forward_fold()` (Slice 2, inchangée)
+# fold par fold ; aucune persistance disque, aucun `WalkForwardEvidence`/verdict scientifique ici
+# (Décisions 12/13, hors scope de cette tranche).
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+_FOLD_SEED_DOMAIN_TAG = "wf-fold-seed-v1"
+
+
+def _derive_fold_seed(
+    master_seed: Optional[int], validation_run_id: Optional[str], fold_index: int,
+) -> Optional[int]:
+    """ADR 0021 Décision 9 : `fold_seed = sha256(f"{master_seed}:{validation_run_id}:"
+    f"{fold_index}:wf-fold-seed-v1")`, jamais `hash()`/`time.time()`/`random.randint()`. Retourne
+    `None` tel quel si `master_seed` n'est pas fourni (le garde `NonDeterministicSearchWithoutSeed`
+    de `run_fold_train()`, Slice 2, reste la seule protection dans ce cas)."""
+    if master_seed is None:
+        return None
+    payload = f"{master_seed}:{validation_run_id}:{fold_index}:{_FOLD_SEED_DOMAIN_TAG}"
+    return int(hashlib.sha256(payload.encode()).hexdigest(), 16)
+
+
+def run_walk_forward(
+    validation_zone: SplitBoundary,
+    spec: WalkForwardSpecification,
+    readiness_spec: Optional[DailyStateReadiness],
+    base_config,
+    df,
+    progress_cb=None,
+    stop_flag_fn=None,
+    validation_run_id: Optional[str] = None,
+) -> WalkForwardRunOutcome:
+    """Orchestrateur multi-fold (ADR 0021 Décisions 9/14) : appelle `compute_fold_definitions()`
+    EXACTEMENT une fois, puis `execute_walk_forward_fold()` (Slice 2, inchangée) pour chaque
+    `FoldDefinition` dans l'ordre, en mémoire uniquement. `base_config`/`spec`/`readiness_spec`
+    sont fixés une fois pour toutes avant la boucle et jamais dérivés d'un `FoldResult` précédent
+    (Décision 14 — aucune rétroaction inter-fold) ; `flat_each_fold_v1` (chaque fold repart du même
+    capital initial) est déjà garanti par construction par `execute_walk_forward_fold()` lui-même.
+
+    `validation_run_id` est obligatoire dès que `spec.master_seed` est fourni (lève `ValueError`
+    AVANT tout calcul de fold sinon) — nécessaire pour dériver un `fold_seed` déterministe par
+    fold (Décision 9). Si `spec.master_seed is None`, `fold_seed=None` est propagé tel quel à
+    chaque fold.
+
+    `stop_flag_fn`, si fourni et retournant `True` ENTRE deux folds, interrompt proprement la
+    boucle (jamais en plein milieu d'un fold) : retourne alors un `WalkForwardRunOutcome` avec
+    `stopped_early=True` et `fold_results` limité au préfixe déjà exécuté — jamais une exception
+    dédiée (voir `WalkForwardRunOutcome` dans `validation_run.py` : l'ADR 0021 Décision 11 fige une
+    taxonomie d'erreurs exhaustive qui n'inclut pas ce cas, une annulation coopérative n'étant pas
+    une erreur). Aucune reprise automatique (Décision 12, hors scope). Ce `stop_flag_fn` est
+    STRICTEMENT une barrière inter-fold : il n'est PAS transmis à `execute_walk_forward_fold()`/
+    `run_fold_train()`/`Optimizer.run()`, dont le paramètre `stop_flag_fn` interne interrompt la
+    recherche TRAIN à l'intérieur même d'un fold (via `_run_batch_sequential`/
+    `_run_batch_parallel`, `optimizer.py`) et produirait un `FoldResult` silencieusement tronqué et
+    indiscernable d'un résultat complet — ce que Décision 6 (Top-1 sélectionné sur TOUT le TRAIN)
+    et l'esprit de Décision 13 (jamais de valeur trompeuse produite silencieusement) excluent. Une
+    fois un fold démarré, il va donc toujours à son terme.
+
+    Lève `DatasetTooShortForWalkForward` telle quelle si `compute_fold_definitions()` ne génère
+    aucun fold (Slice 1, jamais dupliquée ici)."""
+    if spec.master_seed is not None and validation_run_id is None:
+        raise ValueError(
+            "validation_run_id est obligatoire quand spec.master_seed est fourni — nécessaire "
+            "pour dériver un fold_seed déterministe par fold (ADR 0021 Décision 9)."
+        )
+
+    fold_definitions = compute_fold_definitions(validation_zone, spec, readiness_spec)
+
+    fold_results = []
+    for fold in fold_definitions:
+        if stop_flag_fn is not None and stop_flag_fn():
+            return WalkForwardRunOutcome(
+                fold_results=tuple(fold_results), stopped_early=True,
+            )
+        fold_seed = _derive_fold_seed(spec.master_seed, validation_run_id, fold.fold_index)
+        # stop_flag_fn=None volontaire (pas la barrière inter-fold ci-dessus) : voir docstring —
+        # un fold démarré va toujours à son terme, jamais interrompu en cours de recherche TRAIN.
+        result = execute_walk_forward_fold(
+            fold, base_config, df, progress_cb=progress_cb, stop_flag_fn=None,
+            fold_seed=fold_seed,
+        )
+        fold_results.append(result)
+
+    return WalkForwardRunOutcome(fold_results=tuple(fold_results), stopped_early=False)
+
+
+def build_aggregate_result(fold_results: Tuple[FoldResult, ...]) -> AggregateResult:
+    """Peuple `AggregateResult` (ADR 0021 Décision 15) — fonction PURE, aucun backtest.
+
+    `oos_profit_factor`/`oos_win_rate` : sommés sur la série OOS concaténée (`gross_win`/
+    `gross_loss`/`n_win`/`n_trades` de chaque `FoldResult`, sommes séparables — jamais une moyenne
+    de ratios par fold). `gross_loss_total == 0` avec `total_oos_trades > 0` -> `float("inf")`
+    (même convention qu'`engine.py::_compute_stats()`) ; `None` réservé au seul cas
+    `total_oos_trades == 0`.
+
+    Courbe d'equity OOS reconstruite en chaînant les RENDEMENTS normalisés de chaque fold
+    (`flat_each_fold_v1` : chaque fold redémarre au même capital initial 1.0) — jamais une
+    concaténation brute de capital absolu. `oos_max_dd_pct` calculé directement sur cette courbe
+    normalisée (jamais une moyenne/le pire des `max_dd_pct` par fold)."""
+    n_folds = len(fold_results)
+    n_folds_zero_trade = sum(1 for r in fold_results if r.zero_trade_oos)
+    total_oos_trades = sum(r.n_trades for r in fold_results)
+    gross_win_total = sum(r.gross_win for r in fold_results)
+    gross_loss_total = sum(r.gross_loss for r in fold_results)
+    n_win_total = sum(r.n_win for r in fold_results)
+
+    if total_oos_trades == 0:
+        oos_profit_factor = None
+        oos_win_rate = None
+    else:
+        oos_profit_factor = (
+            float("inf") if gross_loss_total == 0 else gross_win_total / gross_loss_total
+        )
+        oos_win_rate = n_win_total / total_oos_trades
+
+    equity_curve = [1.0]
+    for r in fold_results:
+        equity_curve.append(equity_curve[-1] * (1.0 + r.net_ret_pct / 100.0))
+    oos_net_return_pct = (equity_curve[-1] - 1.0) * 100.0
+
+    peak = equity_curve[0]
+    oos_max_dd_pct = 0.0
+    for value in equity_curve[1:]:
+        peak = max(peak, value)
+        if peak > 0:
+            oos_max_dd_pct = max(oos_max_dd_pct, (peak - value) / peak * 100.0)
+
+    scores = [r.score_test for r in fold_results]
+    mean_fold_score_test = statistics.mean(scores) if scores else None
+    median_fold_score_test = statistics.median(scores) if scores else None
+    worst_fold_id = (
+        min(fold_results, key=lambda r: r.score_test).fold_id if fold_results else None
+    )
+
+    return AggregateResult(
+        n_folds=n_folds,
+        n_folds_zero_trade=n_folds_zero_trade,
+        total_oos_trades=total_oos_trades,
+        oos_net_return_pct=oos_net_return_pct,
+        oos_max_dd_pct=oos_max_dd_pct,
+        oos_profit_factor=oos_profit_factor,
+        oos_win_rate=oos_win_rate,
+        oos_sharpe=None,
+        mean_fold_score_test=mean_fold_score_test,
+        median_fold_score_test=median_fold_score_test,
+        worst_fold_id=worst_fold_id,
+    )

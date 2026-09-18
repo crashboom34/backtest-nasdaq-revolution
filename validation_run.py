@@ -265,7 +265,16 @@ class FoldSelection:
 class FoldResult:
     """Observation TEST factuelle d'un fold — ADR 0021 Décision 13/15 : uniquement des faits
     mesurés, `None` explicite si non calculable (ex. `n_trades == 0`), jamais une valeur inventée.
-    Hors scope Slice 1 (aucune exécution TEST réelle) : forme figée, population différée."""
+    Hors scope Slice 1 (aucune exécution TEST réelle) : forme figée, population différée.
+
+    `gross_win`/`gross_loss`/`n_win` (AF-V-02 Slice 3, extension STRICTEMENT additive — mêmes noms
+    de grandeur qu'`engine.py::_compute_stats()`, jamais `gross_profit`/`gross_loss` inventés) :
+    sommes/compte de CE seul fold TEST, `0.0`/`0` pour un fold `zero_trade_oos=True`. Exposées
+    pour permettre à `walk_forward.build_aggregate_result()` de calculer `oos_profit_factor`/
+    `oos_win_rate` sur la série OOS concaténée de tous les folds SANS second backtest ni objet
+    trades brut : ce sont des sommes séparables (`sum(gross_win_i) == gross_win` de la
+    concaténation complète), donc mathématiquement identiques à un recalcul depuis les trades
+    individuels concaténés."""
 
     fold_id: str
     definition: FoldDefinition
@@ -280,13 +289,21 @@ class FoldResult:
     zero_trade_oos: bool
     forced_closes: int
     coverage_bars: int
+    gross_win: float = 0.0
+    gross_loss: float = 0.0
+    n_win: int = 0
 
 
 @dataclass(frozen=True)
 class AggregateResult:
     """Agrégation OOS concaténée sur l'ensemble des folds — ADR 0021 Décision 15 (trades
     concaténés littéralement, PF/win-rate globaux jamais moyennés). Hors scope Slice 1 (aucun
-    fold exécuté) : forme figée, population différée."""
+    fold exécuté) : forme figée, population différée.
+
+    `oos_win_rate` (AF-V-02 Slice 3) : ratio `[0, 1]` (`total_winners / total_trades`, formule
+    littérale de la Décision 15) — ÉCHELLE DÉLIBÉRÉMENT DIFFÉRENTE de `FoldResult.win_rate`
+    (pourcentage `[0, 100]`, même convention qu'`engine.py::_compute_stats()`) : ne jamais
+    comparer ou combiner les deux directement sans conversion explicite."""
 
     n_folds: int
     n_folds_zero_trade: int
@@ -299,6 +316,27 @@ class AggregateResult:
     mean_fold_score_test: Optional[float]
     median_fold_score_test: Optional[float]
     worst_fold_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class WalkForwardRunOutcome:
+    """Résultat de `walk_forward.run_walk_forward()` — porte les `FoldResult` collectés EN
+    MÉMOIRE (aucune persistance disque, aucune reprise : ADR 0021 Décision 12 hors scope) et un
+    drapeau `stopped_early` explicite plutôt qu'une exception dédiée. Choix délibéré : l'ADR 0021
+    Décision 11 fige une taxonomie d'erreurs consolidée et énumère explicitement TOUTES les
+    exceptions du protocole Walk-Forward ; l'arrêt coopératif inter-fold (`stop_flag_fn`) n'est
+    pas une erreur (aucune donnée invalide, aucune impossibilité de calcul) mais une annulation
+    volontaire de l'appelant — le modéliser comme un résultat plutôt qu'une exception évite
+    d'ajouter un membre hors-taxonomie à une liste que l'ADR déclare exhaustive, sans nécessiter
+    d'amendement ADR pour ce cas.
+
+    `stopped_early=True` signifie que `stop_flag_fn()` a retourné `True` ENTRE deux folds (jamais
+    en plein milieu d'un fold, qui va toujours à son terme) et que `fold_results` ne couvre donc
+    qu'un préfixe des folds attendus. `stopped_early=False` (cas normal) : `fold_results` couvre
+    la totalité des `FoldDefinition` de `compute_fold_definitions()`."""
+
+    fold_results: Tuple[FoldResult, ...]
+    stopped_early: bool
 
 
 @dataclass(frozen=True)
