@@ -1584,3 +1584,49 @@ def test_a_ready_authorized_next_mission_chains_automatically_without_stopping(t
     from scripts.autopilot.mission_queue import load_missions
     reloaded = load_missions(missions_path)
     assert {m.id: m.status for m in reloaded} == {"M1": "DONE", "M2": "DONE"}
+
+
+def test_a_fresh_start_from_a_previously_completed_state_notices_a_newly_queued_mission(tmp_path):
+    """Régression — bug réel confirmé en conditions réelles (mission « poursuite AlphaForge »,
+    point 5) : `COMPLETED` n'avait AUCUN handler (`run_one_step()` le retournait tel quel, seul un
+    état vraiment terminal) — l'enchaînement AUTOMATIQUE au sein d'UNE MÊME boucle continue
+    (`_handle_next_mission()`, voir le test précédent) fonctionnait déjà, mais un `autopilot
+    start`/`resume` RELANCÉ APRÈS coup, une fois l'état déjà persisté à `COMPLETED` d'un run
+    antérieur, restait bloqué indéfiniment même après l'ajout d'une toute nouvelle mission
+    `PLANNED` prête (dépendances satisfaites) à la file — jamais remarquée. Reproduit ici
+    exactement ce scénario réel : M1 termine d'abord dans un run complet, PUIS M2 est ajoutée
+    seulement APRÈS que l'état a déjà été persisté à COMPLETED (simulant l'ajout d'une nouvelle
+    tranche AF-V-02 après une session Autopilot précédente), PUIS une NOUVELLE invocation
+    (`run_one_step()`, mirroring un nouveau `cmd_start`/`cmd_resume`) doit reprendre le travail."""
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(id="M1", title="Premiere", status="PLANNED", prompt_file="m1.md"),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    supervisor.acquire_lock()
+    completed = supervisor.run_until({AutopilotState.COMPLETED}, max_steps=100)
+    assert completed == AutopilotState.COMPLETED
+
+    # Une nouvelle tranche est mise en file APRÈS coup — exactement le scénario réel : la boucle
+    # précédente est déjà retombée sur COMPLETED avant que la nouvelle mission n'existe.
+    from scripts.autopilot.mission_queue import load_missions
+    existing = load_missions(missions_path)
+    save_missions(missions_path, list(existing) + [
+        Mission(id="M2", title="Seconde", status="PLANNED", prompt_file="m2.md", depends_on=("M1",)),
+    ])
+
+    # Nouvelle invocation (mirroring un nouveau `cmd_start`/`cmd_resume`) — ne doit PLUS rester
+    # bloquée sur COMPLETED sans jamais revérifier la file.
+    final_state = supervisor.run_until({AutopilotState.COMPLETED}, max_steps=100)
+
+    assert final_state == AutopilotState.COMPLETED
+    record = state_store.load()
+    assert record.mission_id == "M2"
+    reloaded = load_missions(missions_path)
+    assert {m.id: m.status for m in reloaded} == {"M1": "DONE", "M2": "DONE"}

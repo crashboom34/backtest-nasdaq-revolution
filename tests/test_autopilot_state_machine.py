@@ -41,8 +41,15 @@ def test_every_state_has_an_entry_in_the_transition_table():
         assert state in ALLOWED_TRANSITIONS, f"{state} manque dans ALLOWED_TRANSITIONS"
 
 
-def test_terminal_states_have_no_outgoing_transition():
-    assert ALLOWED_TRANSITIONS[AutopilotState.COMPLETED] == ()
+def test_completed_can_only_resume_to_planning_never_a_pipeline_shortcut():
+    """Finalisation « poursuite AlphaForge » (2026-09-18) : `COMPLETED` n'est plus un état
+    absolument sans issue — bug réel confirmé en conditions réelles, un `autopilot start`/`resume`
+    relancé après l'ajout d'une nouvelle mission `PLANNED` prête restait auparavant bloqué sans
+    jamais la remarquer (`ALLOWED_TRANSITIONS[COMPLETED]` était `()`). `_handle_completed()`
+    revérifie désormais la file à chaque reprise et transite vers `PLANNING` UNIQUEMENT — jamais
+    un raccourci direct vers une phase intermédiaire (ex. COMMITTING/PUSHING) qui contournerait le
+    pipeline complet (DEVELOPING -> TESTING -> REVIEWING -> ...) d'une nouvelle mission."""
+    assert ALLOWED_TRANSITIONS[AutopilotState.COMPLETED] == (AutopilotState.PLANNING,)
 
 
 def test_normal_happy_path_transitions_are_allowed():

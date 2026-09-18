@@ -133,7 +133,12 @@ ALLOWED_TRANSITIONS: dict = {
         AutopilotState.CORRECTING, AutopilotState.PRE_COMMIT_CHECK, AutopilotState.COMMITTING,
         AutopilotState.PUSHING,
     ),
-    AutopilotState.COMPLETED: (),
+    # Finalisation « poursuite AlphaForge » (2026-09-18) : bug réel confirmé en conditions
+    # réelles — `COMPLETED` n'avait aucune transition sortante, un `autopilot start`/`resume`
+    # relancé APRÈS coup (une fois l'état déjà persisté à `COMPLETED` d'un run antérieur) restait
+    # bloqué indéfiniment même après l'ajout d'une nouvelle mission `PLANNED` prête à la file —
+    # jamais remarquée (`_handle_completed()`, supervisor.py, revérifie désormais la file).
+    AutopilotState.COMPLETED: (AutopilotState.PLANNING,),
     AutopilotState.STOPPED: (AutopilotState.READY,),
 }
 

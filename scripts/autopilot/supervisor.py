@@ -381,11 +381,15 @@ class AutopilotSupervisor:
             # Finalisation V1.1 (§2.E) : résolution CONTRÔLÉE, plus un no-op — revérifie la cause
             # précise avant toute reprise, ne force jamais.
             AutopilotState.BLOCKED_SAFETY: self._handle_blocked_safety,
+            # Finalisation « poursuite AlphaForge » (2026-09-18) : revérifie la file à CHAQUE
+            # reprise depuis COMPLETED, plus un no-op — un `start`/`resume` relancé après l'ajout
+            # d'une nouvelle mission prête ne doit jamais rester bloqué sans jamais la remarquer.
+            AutopilotState.COMPLETED: self._handle_completed,
         }.get(phase)
         if handler is None:
-            # États terminaux/d'attente restants (COMPLETED, STOPPED, HUMAN_GATE_REQUIRED) : rien
-            # à faire tant qu'un appelant externe ne change pas explicitement l'état (résolution
-            # Human Gate, `autopilot stop`/reprise manuelle...).
+            # États terminaux/d'attente restants (STOPPED, HUMAN_GATE_REQUIRED) : rien à faire
+            # tant qu'un appelant externe ne change pas explicitement l'état (résolution Human
+            # Gate, `autopilot stop`/reprise manuelle...).
             return phase
         return handler()
 
@@ -450,6 +454,23 @@ class AutopilotSupervisor:
             return self._current_phase()
         if select_next_mission(missions) is None:
             return self._transition(AutopilotState.COMPLETED)
+        return self._transition(AutopilotState.PLANNING)
+
+    def _handle_completed(self) -> AutopilotState:
+        """Finalisation « poursuite AlphaForge » (2026-09-18) — bug réel confirmé en conditions
+        réelles : `COMPLETED` n'avait auparavant aucun handler (traité comme un état vraiment
+        terminal par `run_one_step()`) — l'enchaînement automatique au sein d'UNE MÊME boucle
+        continue (`_handle_next_mission()`) fonctionnait déjà correctement, mais un `autopilot
+        start`/`resume` relancé APRÈS coup, une fois l'état déjà persisté à `COMPLETED` d'un run
+        antérieur, restait bloqué indéfiniment même après l'ajout d'une toute nouvelle mission
+        `PLANNED` prête (dépendances satisfaites) à la file — jamais remarquée. Mirroring exact de
+        `_handle_ready()` : revérifie la file à chaque reprise, reste sur `COMPLETED` (inchangé,
+        aucune écriture) si rien de nouveau n'est prêt, jamais une supposition."""
+        missions = self._load_missions_or_block()
+        if missions is None:
+            return self._current_phase()
+        if select_next_mission(missions) is None:
+            return AutopilotState.COMPLETED
         return self._transition(AutopilotState.PLANNING)
 
     def _handle_planning(self) -> AutopilotState:
