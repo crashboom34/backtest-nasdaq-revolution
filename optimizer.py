@@ -143,6 +143,37 @@ def effective_combinations_total(total_combinations: int, max_combinations=None)
     return min(total, limit) if limit is not None else total
 
 
+# Les 3 SEULES entrées du dispatch dict `mode_fn` d'`Optimizer.run()` (voir plus bas) qui NE
+# dispatchent PAS vers `run_mode4()` — TOUT `cfg.mode` absent de cet ensemble ("general" inclus,
+# mais aussi n'importe quelle chaîne non reconnue) retombe sur `run_mode4()` via le
+# `.get(..., self.run_mode4)` par défaut du dict. `Optimizer.run()` réaffirme cette égalité par une
+# assertion runtime à chaque appel (voir plus bas) : toute divergence future entre ce module-level
+# constant et le dispatch dict réel casse la suite immédiatement plutôt que silencieusement.
+DETERMINISTIC_DISPATCH_MODES = frozenset({"single_var", "cross_zone", "grid"})
+
+# Seuils de `Optimizer.run_mode4()` (ci-dessous) déterminant l'atteinte du SEUL point de hasard
+# non-seedé de ce fichier, `Optimizer._run_stratified_sample()` (ADR 0021 Décisions 9/11).
+STRATIFIED_SAMPLE_MIN_COMBINATIONS = 50_000
+STRATIFIED_SAMPLE_MAX_COMBINATIONS = 500_000
+
+
+def reaches_stratified_sample(config) -> bool:
+    """True si `Optimizer.run()` atteindrait `_run_stratified_sample()` (tirage `random.choice()`
+    non-seedé sans `seed=`) pour ce `config` — point de vérité UNIQUE, consulté à la fois par
+    `run_mode4()` ci-dessous et par `walk_forward.run_fold_train()` (garde de déterminisme ADR
+    0021 Décision 9), pour que les deux ne puissent jamais diverger silencieusement l'un de
+    l'autre. Réplique la condition réelle : `cfg.mode` hors des modes déterministes ET sans
+    `max_combinations` explicite (qui route toujours vers `run_mode3()`) ET un nombre de
+    combinaisons déclarées dans ]STRATIFIED_SAMPLE_MIN_COMBINATIONS, STRATIFIED_SAMPLE_MAX_COMBINATIONS]."""
+    if config.mode in DETERMINISTIC_DISPATCH_MODES:
+        return False
+    if normalize_max_combinations(config.max_combinations) is not None:
+        return False
+    active_ranges = [pr for pr in config.param_ranges if pr.enabled]
+    n_total = count_combinations(active_ranges)
+    return STRATIFIED_SAMPLE_MIN_COMBINATIONS < n_total <= STRATIFIED_SAMPLE_MAX_COMBINATIONS
+
+
 @dataclass(frozen=True)
 class ExecutionWindow:
     """Résultat de `resolve_execution_window()` (Dette A — Optimizer Integration, 2026-09-12).
@@ -167,7 +198,18 @@ class ExecutionWindow:
 
     `exec_row_count` : `len(execution_df)` — jamais `len(context_df)`. C'est cette valeur, et
     elle seule, qui doit être exposée dans les métriques/manifests décrivant "les données
-    utilisées pour la période optimisée" (voir `Optimizer.df_rows_used`)."""
+    utilisées pour la période optimisée" (voir `Optimizer.df_rows_used`).
+
+    `opt_end_date` (AF-V-02 Slice 2, 2026-09-17) : deux formats distincts, jamais confondus —
+    une chaîne `"YYYY-MM-DD"` (comportement historique inchangé, borne INCLUSIVE jusqu'à
+    23:59:59 de ce jour civil) ou un timestamp ISO-8601 complet (contient `"T"`, ex.
+    `FoldDefinition.effective_boundary`) traité comme une borne EXCLUSIVE exacte — mirroring
+    `dataset_split.SplitBoundary`/`engine.run_backtest(end_boundary="exclusive")`. Nécessaire pour
+    borner une fenêtre TRAIN de fold Walk-Forward à `[train_start_k, effective_boundary_k)` sans
+    passer par un second split interne (ADR 0021 Décision 6) : le format `"YYYY-MM-DD"` ne peut
+    pas représenter une frontière à la seconde près, et la concaténation historique
+    (`opt_end_date + " 23:59:59"`) produirait un timestamp incohérent si appliquée à un ISO-8601
+    déjà complet."""
 
     context_df: "pd.DataFrame"
     execution_df: "pd.DataFrame"
@@ -198,8 +240,15 @@ def resolve_execution_window(
         ts_start = pd.Timestamp(opt_start_date, tz="Europe/Paris")
         execution_df = execution_df[execution_df["time_paris"] >= ts_start].reset_index(drop=True)
     if opt_end_date:
-        ts_end = pd.Timestamp(opt_end_date + " 23:59:59", tz="Europe/Paris")
-        execution_df = execution_df[execution_df["time_paris"] <= ts_end].reset_index(drop=True)
+        if "T" in opt_end_date:
+            # ISO-8601 complet (AF-V-02 Slice 2) : borne EXCLUSIVE exacte, jamais la
+            # concaténation " 23:59:59" du mode date civile ci-dessous (produirait un timestamp
+            # incohérent sur une chaîne qui porte déjà une heure/un offset).
+            ts_end = pd.Timestamp(opt_end_date, tz="Europe/Paris")
+            execution_df = execution_df[execution_df["time_paris"] < ts_end].reset_index(drop=True)
+        else:
+            ts_end = pd.Timestamp(opt_end_date + " 23:59:59", tz="Europe/Paris")
+            execution_df = execution_df[execution_df["time_paris"] <= ts_end].reset_index(drop=True)
     if max_rows and len(execution_df) > max_rows:
         execution_df = execution_df.iloc[:max_rows].reset_index(drop=True)
 
@@ -244,7 +293,8 @@ def _load_strategy(module_path: str):
 
 def _run_single(params: dict, config: OptimizationConfig,
                 df, start_date=None, end_date=None,
-                end_boundary: Literal["inclusive", "exclusive"] = "inclusive") -> dict:
+                end_boundary: Literal["inclusive", "exclusive"] = "inclusive",
+                include_artifacts: bool = False) -> dict:
     """
     Lance un backtest unique et retourne le résultat scoré.
     Fonction top-level pour être picklable dans ProcessPoolExecutor.
@@ -254,7 +304,17 @@ def _run_single(params: dict, config: OptimizationConfig,
     sans train/test ou pour la phase TEST ; `"exclusive"` pour la phase TRAIN uniquement (voir
     `Optimizer.run()`, `_TRAIN_END_BOUNDARY`/`_TEST_END_BOUNDARY`).
 
+    `include_artifacts` (AF-V-02 Slice 2, ADR 0021 Décision 6) : paramètre optionnel
+    rétrocompatible — `False` par défaut, comportement et forme du dict de retour strictement
+    inchangés pour tout appelant existant (pas de clés `"trades"`/`"equity"`). `True` ajoute ces
+    deux clés (DataFrames `trades`/`equity` réels de `run_backtest()`) — nécessaires à
+    `FoldResult.expectancy`/`forced_closes` (Walk-Forward), calculés à partir des trades
+    individuels, jamais disponibles dans `stats` seul. Sur exception, `trades`/`equity` valent
+    `None` (aucun backtest n'a réellement produit de résultat) ; sur "Aucun trade", ce sont les
+    DataFrames vides réellement retournées par `run_backtest()` (le backtest a bien eu lieu).
+
     Retourne un dict avec : score, params, stats, filtered, filter_reason, warnings
+    (+ trades, equity si include_artifacts=True).
     """
     from engine import run_backtest
 
@@ -263,7 +323,7 @@ def _run_single(params: dict, config: OptimizationConfig,
     mod, strat = _load_strategy(config.strategy_module)
 
     try:
-        _, _, stats = run_backtest(
+        trades_df, equity_df, stats = run_backtest(
             df,
             strat,
             params,
@@ -276,16 +336,24 @@ def _run_single(params: dict, config: OptimizationConfig,
             end_boundary=end_boundary,
         )
     except Exception as e:
-        return {
+        result = {
             "score": 0.0, "params": params, "stats": {},
             "filtered": True, "filter_reason": f"Exception: {e}", "warnings": [],
         }
+        if include_artifacts:
+            result["trades"] = None
+            result["equity"] = None
+        return result
 
     if stats.get("n_trades", 0) == 0:
-        return {
+        result = {
             "score": 0.0, "params": params, "stats": stats,
             "filtered": True, "filter_reason": "Aucun trade", "warnings": [],
         }
+        if include_artifacts:
+            result["trades"] = trades_df
+            result["equity"] = equity_df
+        return result
 
     score, filtered, reason, warnings = compute_score(
         stats,
@@ -295,7 +363,7 @@ def _run_single(params: dict, config: OptimizationConfig,
         param_ranges=config.param_ranges,
     )
 
-    return {
+    result = {
         "score":         score,
         "params":        params,
         "stats":         stats,
@@ -303,6 +371,10 @@ def _run_single(params: dict, config: OptimizationConfig,
         "filter_reason": reason,
         "warnings":      warnings,
     }
+    if include_artifacts:
+        result["trades"] = trades_df
+        result["equity"] = equity_df
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -601,6 +673,11 @@ class Optimizer:
         self._active_ranges = [pr for pr in config.param_ranges if pr.enabled]
         self._max_combinations = normalize_max_combinations(config.max_combinations)
         self._scheduled_combinations = 0
+        # AF-V-02 Slice 2 (ADR 0021 Décision 9/11) : `None` par défaut — `_run_stratified_sample()`
+        # continue d'utiliser le module `random` global (comportement historique inchangé pour tout
+        # appelant existant). `run(seed=...)` assigne cet attribut avant dispatch ; voir
+        # `_run_stratified_sample()` pour le seul site de consommation.
+        self._search_seed: Optional[int] = None
 
     def _remaining_combination_slots(self) -> Optional[int]:
         if self._max_combinations is None:
@@ -855,14 +932,14 @@ class Optimizer:
             return self.run_mode3(
                 progress_cb, stop_flag_fn, already_tested, train_start, train_end, end_boundary)
 
-        if n_total <= 50_000:
+        if n_total <= STRATIFIED_SAMPLE_MIN_COMBINATIONS:
             return self.run_mode3(
                 progress_cb, stop_flag_fn, already_tested, train_start, train_end, end_boundary)
 
-        elif n_total <= 500_000:
+        elif n_total <= STRATIFIED_SAMPLE_MAX_COMBINATIONS:
             return self._run_stratified_sample(
-                50_000, progress_cb, stop_flag_fn, already_tested, train_start, train_end,
-                end_boundary)
+                STRATIFIED_SAMPLE_MIN_COMBINATIONS, progress_cb, stop_flag_fn, already_tested,
+                train_start, train_end, end_boundary)
 
         else:
             return self._run_progressive_grid(
@@ -873,9 +950,17 @@ class Optimizer:
                                progress_cb=None, stop_flag_fn=None,
                                already_tested=None, train_start=None, train_end=None,
                                end_boundary: Literal["inclusive", "exclusive"] = "inclusive") -> list:
-        """Tire n_sample combinaisons aléatoires, réparties uniformément."""
+        """Tire n_sample combinaisons aléatoires, réparties uniformément.
+
+        `self._search_seed` (AF-V-02 Slice 2, ADR 0021 Décision 9/11) : `None` (défaut, tout
+        appelant existant) — les tirages ci-dessous consomment le module `random` global,
+        comportement strictement inchangé. Sinon, une instance `random.Random(self._search_seed)`
+        DÉDIÉE est utilisée — déterministe pour un seed donné, sans muter l'état global du module
+        `random` (qui resterait partagé/mutable entre appels concurrents). Seul point de hasard non
+        pur de `optimizer.py` ; réutilisée seedable plutôt que dupliquée."""
         names  = [pr.name for pr in self._active_ranges]
         values = [pr.generate_values() for pr in self._active_ranges]
+        rng = random.Random(self._search_seed) if self._search_seed is not None else random
 
         seen   = set()
         combos = []
@@ -885,7 +970,7 @@ class Optimizer:
         for _ in range(max_attempts):
             if len(combos) >= n_sample:
                 break
-            combo_vals = tuple(random.choice(v) for v in values)
+            combo_vals = tuple(rng.choice(v) for v in values)
             h = hashlib.md5(str(combo_vals).encode()).hexdigest()[:8]
             if h not in seen:
                 seen.add(h)
@@ -950,16 +1035,34 @@ class Optimizer:
 
     # ── Run principal ──────────────────────────────────────────────────────
     def run(self, progress_cb: Callable = None, stop_flag_fn: Callable = None,
-            already_tested: set = None) -> tuple:
+            already_tested: set = None, run_test_validation: bool = True,
+            seed: Optional[int] = None) -> tuple:
         """
         Lance l'optimisation selon le mode configuré.
 
         Gère le split train/test si activé.
 
+        `run_test_validation` (AF-V-02 Slice 2, ADR 0021 Décision 6) : seam additif — `True`
+        (défaut) laisse le comportement strictement inchangé pour tout appelant existant
+        (`app.py` compris). `False` saute la phase de validation TEST existante ci-dessous
+        (`top_to_validate = [...][:cfg.top_k_save]`) sans rien changer d'autre : utilisé par
+        Walk-Forward pour la recherche TRAIN-only d'un fold (`train_test.enabled=False` dans ce
+        cas — la phase de validation ne s'exécute de toute façon jamais sans train/test actif,
+        ce paramètre a donc un effet visible uniquement quand `train_test.enabled=True`).
+
+        `seed` (AF-V-02 Slice 2, ADR 0021 Décision 9/11) : seam additif — `None` (défaut, tout
+        appelant existant) laisse `_run_stratified_sample()` consommer le module `random` global,
+        comportement strictement inchangé. Fourni, il rend déterministe l'UNIQUE point de hasard
+        non-seedé de ce fichier (`_run_stratified_sample()`, atteint par le mode "general" sur un
+        search space de 50 000 à 500 000 combinaisons déclarées) — sans effet sur les modes
+        `single_var`/`cross_zone`/`grid`, ni sur `general` en dehors de cette plage (tous
+        déterministes par construction, aucun `random.*` consulté).
+
         Retourne
         --------
         (all_results: list, sensitivity: dict)
         """
+        self._search_seed = seed
         cfg = self.config
         tt  = cfg.train_test
 
@@ -1025,13 +1128,24 @@ class Optimizer:
             train_start, train_end = self._exec_start, self._exec_end
 
         # ── Phase optimisation ─────────────────────────────────
-        mode_fn = {
+        mode_dispatch = {
             "single_var": self.run_mode1,
             "cross_zone": lambda pc, sf, at, ts, te, eb: self.run_mode2(
                 [], pc, sf, at, ts, te, eb),  # pas de prior = zones pleines
             "grid":       self.run_mode3,
             "general":    self.run_mode4,
-        }.get(cfg.mode, self.run_mode4)
+        }
+        # Garde de non-régression (ADR 0021 Décision 9) : DETERMINISTIC_DISPATCH_MODES DOIT
+        # rester exactement l'ensemble des clés de ce dict qui ne retombent PAS sur run_mode4 —
+        # toute divergence future (mode renommé/ajouté ici sans mise à jour du module-level
+        # constant consulté par walk_forward.py) casse la suite immédiatement plutôt que de
+        # produire un garde de déterminisme silencieusement obsolète.
+        assert set(mode_dispatch) - {"general"} == DETERMINISTIC_DISPATCH_MODES, (
+            "DETERMINISTIC_DISPATCH_MODES a divergé du dispatch réel de Optimizer.run() — "
+            f"clés dispatch (hors 'general')={set(mode_dispatch) - {'general'}!r}, "
+            f"DETERMINISTIC_DISPATCH_MODES={DETERMINISTIC_DISPATCH_MODES!r}"
+        )
+        mode_fn = mode_dispatch.get(cfg.mode, self.run_mode4)
 
         all_results = mode_fn(
             progress_cb, stop_flag_fn, already_tested or set(),
@@ -1042,7 +1156,7 @@ class Optimizer:
         all_results.sort(key=lambda r: r["score"], reverse=True)
 
         # ── Phase validation (train/test) ──────────────────────
-        if tt.enabled and all_results:
+        if tt.enabled and run_test_validation and all_results:
             windows = self.resolved_train_test_windows
             top_to_validate = [r for r in all_results if r["score"] > 0][:cfg.top_k_save]
             for result in top_to_validate:

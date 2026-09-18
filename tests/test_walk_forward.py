@@ -23,13 +23,17 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataset_split import build_split_boundary
+from engine import _add_market_time_columns
 from strategy_contracts import DailyStateReadiness
-from validation_run import FoldDefinition
+from validation_run import FoldDefinition, FoldResult, FoldSelection
 from walk_forward import (
     WALK_FORWARD_SEMANTICS_VERSION,
     DatasetTooShortForWalkForward,
     FinalHoldoutOverlapError,
+    FoldTestExecutionFailed,
     InsufficientWarmupHistory,
+    NoEligibleTrainCandidate,
+    NonDeterministicSearchWithoutSeed,
     OosOverlapError,
     UnsupportedWalkForwardGeometry,
     WalkForwardSemanticsMismatch,
@@ -39,9 +43,25 @@ from walk_forward import (
     check_warmup_sufficiency,
     compute_fold_definitions,
     detect_partial_tail,
+    execute_walk_forward_fold,
+    run_fold_test,
+    run_fold_train,
+    select_fold_top1,
     validate_resume_walk_forward_semantics,
 )
-from optimizer import NoStateReadyBoundary
+import walk_forward as walk_forward_module
+import optimizer
+from optimizer import (
+    FilterConfig,
+    NoStateReadyBoundary,
+    OptimizationConfig,
+    Optimizer,
+    ParamRange,
+    ScoreWeights,
+    TrainTestConfig,
+    compute_score,
+    params_hash,
+)
 
 _BASE_PARAMS = {"or_start_h": 15, "or_start_m": 30, "ema_trend_len": 120}
 
@@ -645,3 +665,865 @@ def test_validation_run_module_does_not_import_walk_forward():
     import validation_run as vr
     assert not hasattr(vr, "compute_fold_definitions")
     assert not hasattr(vr, "build_walk_forward_specification")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 2 — Optimizer TRAIN-only + sélection Top-1 + exécution TEST par fold
+# (ADR 0021 Décisions 4/6/7). Stratégie et DataFrame 100% synthétiques (même discipline que
+# test_optimizer.py) ; le moteur réel (`engine.run_backtest`) est monkeypatché pour verrouiller
+# QUELLES bornes/QUEL ORDRE d'appels TRAIN/TEST sont produits, sans dépendre d'une stratégie réelle
+# générant des trades.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _build_synthetic_wf_df(n_bars, start="2020-01-01T00:00:00", freq_minutes=1440):
+    times = pd.date_range(start, periods=n_bars, freq=f"{freq_minutes}min")
+    price = 100.0 + pd.Series(range(n_bars), dtype=float) * 0.01
+    raw = pd.DataFrame({
+        "time":  times,
+        "open":  price.values,
+        "high":  (price + 0.5).values,
+        "low":   (price - 0.5).values,
+        "close": price.values,
+    })
+    return _add_market_time_columns(raw)
+
+
+def _minimal_optimizer_config(**overrides):
+    from strategies.perfect_revolution_v1 import DEFAULT_PARAMS
+    defaults = dict(
+        run_id="wf_fold_test",
+        strategy_module="strategies.perfect_revolution_v1",
+        strategy_name="test",
+        data_file="unused.csv",
+        base_params=dict(DEFAULT_PARAMS),
+        param_ranges=[],
+        mode="grid",
+        score_weights=ScoreWeights(),
+        filters=FilterConfig(),
+        train_test=TrainTestConfig(),
+        global_params={},
+        n_workers=1,
+    )
+    defaults.update(overrides)
+    return OptimizationConfig(**defaults)
+
+
+def _param_ranges_3_values():
+    return [ParamRange(
+        name="ema_trend_len", param_type="number", label="x",
+        min_val=100, max_val=140, step=20,
+    )]
+
+
+def _wf_fold(train_start, boundary, test_end, index=0, is_last=True):
+    fold_id = f"fold_{index:03d}"
+    return FoldDefinition(
+        fold_index=index, fold_id=fold_id,
+        train_start=train_start,
+        requested_boundary=boundary, effective_boundary=boundary, boundary_adjusted=False,
+        requested_test_end=test_end, effective_test_end=test_end, test_end_adjusted=False,
+        is_last_fold=is_last,
+    )
+
+
+def _same_instant(iso_a, iso_b):
+    return pd.Timestamp(iso_a, tz="Europe/Paris") == pd.Timestamp(iso_b, tz="Europe/Paris")
+
+
+def _fold_selection(fold, params=None):
+    params = params if params is not None else {"ema_trend_len": 140}
+    return FoldSelection(
+        fold_id=fold.fold_id,
+        selected_params=dict(params),
+        selected_params_hash=params_hash(params),
+        score_train=1.4,
+        rank_in_train=1,
+        train_candidates_evaluated=3,
+        train_candidates_unique=3,
+        train_candidates_eligible=3,
+        search_space_hash="deadbeef",
+        algorithm="grid",
+        fold_seed=None,
+    )
+
+
+class _ScoreByParamRunBacktest:
+    """Faux `engine.run_backtest()` déterministe : score proportionnel à
+    `params['ema_trend_len']` (via `compute_score()` monkeypatché sur `net_ret_pct`) — permet de
+    savoir à coup sûr quel candidat doit gagner TRAIN. Enregistre l'ORDRE et les bornes exactes de
+    chaque appel : utilisé pour prouver l'isolation TEST structurelle (Décision 7), aucun appel
+    TEST ne devant précéder la sélection Top-1."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, df, strategy, params, **kwargs):
+        self.calls.append({
+            "params":       dict(params),
+            "start_date":   kwargs.get("start_date"),
+            "end_date":     kwargs.get("end_date"),
+            # Pas de défaut ambigu : un appel qui omettrait `end_boundary` doit se voir
+            # attribuer ce sentinelle et non une valeur plausible ("inclusive"), pour que
+            # `test_train_calls_always_use_inclusive_end_boundary` détecte une régression où
+            # la production cesserait de le transmettre explicitement (finding MAJEUR, review
+            # indépendante tentative 1).
+            "end_boundary": kwargs.get("end_boundary", "__END_BOUNDARY_NOT_PASSED__"),
+        })
+        net_ret = params.get("ema_trend_len", 0) / 100.0
+        trades = pd.DataFrame([{"resultat_net": 10.0, "raison_sortie": "fin-donnees"}])
+        equity = pd.DataFrame([{"date": "2020-01-01", "capital": 10_000.0 + net_ret}])
+        return trades, equity, {"n_trades": 1, "net_ret_pct": net_ret}
+
+
+def _patch_score_by_net_ret(monkeypatch):
+    monkeypatch.setattr(
+        "optimizer.compute_score",
+        lambda stats, *a, **k: (stats.get("net_ret_pct", 0.0), False, None, []),
+    )
+
+
+class TestRunFoldTrain:
+    """ADR 0021 Décision 6 — Optimizer.run(run_test_validation=False), train_test.enabled=False,
+    fenêtre bornée EXACTEMENT à [fold.train_start, fold.effective_boundary)."""
+
+    def test_train_only_never_executes_a_backtest_touching_the_test_window(self, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        all_results, _sensitivity = run_fold_train(fold, config, df)
+
+        assert fake.calls, "au moins un backtest TRAIN attendu"
+        for call in fake.calls:
+            assert pd.Timestamp(call["end_date"], tz="Europe/Paris") < pd.Timestamp(
+                fold.effective_boundary)
+
+    def test_train_calls_always_use_inclusive_end_boundary(self, monkeypatch):
+        """Régression review indépendante (tentative 2, finding MAJEUR) : rien ne verrouillait
+        `end_boundary="inclusive"` côté TRAIN — un futur refactor qui ferait passer
+        `end_boundary_for_optimization` à `"exclusive"` pour le chemin `train_test.enabled=False`
+        (optimizer.py, ~ligne 1017) perdrait silencieusement la dernière bougie de
+        `[train_start, effective_boundary)` sans qu'aucun test ne le détecte. Miroir exact de
+        l'assertion `end_boundary == "exclusive"` déjà présente côté TestRunFoldTest pour TEST."""
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        run_fold_train(fold, config, df)
+
+        assert fake.calls, "au moins un backtest TRAIN attendu"
+        for call in fake.calls:
+            assert call["end_boundary"] == "inclusive"
+
+    def test_train_results_are_sorted_best_score_first(self, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        all_results, _sensitivity = run_fold_train(fold, config, df)
+
+        assert all_results[0]["params"]["ema_trend_len"] == 140
+
+    def test_train_uses_the_full_search_space_declared_by_the_config(self, monkeypatch):
+        """Décision 14 — chaque fold repart du search space complet, jamais réduit par un fold
+        antérieur : trois combinaisons déclarées -> trois candidats évalués."""
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        all_results, _sensitivity = run_fold_train(fold, config, df)
+
+        assert len(all_results) == 3
+
+    def test_max_rows_inherited_from_base_config_never_truncates_the_train_window(
+        self, monkeypatch,
+    ):
+        """Régression review indépendante (tentative 1, finding MAJEUR) : la docstring de
+        run_fold_train() promet une fenêtre TRAIN bornée EXACTEMENT à [fold.train_start,
+        fold.effective_boundary), mais `base_config.max_rows` était hérité tel quel dans
+        `dataclasses.replace()`. `optimizer.resolve_execution_window()` applique `max_rows` APRÈS
+        le filtrage par dates (optimizer.py) et tronque silencieusement `execution_df`/le
+        `context_df` transmis à `run_backtest()` si `max_rows` est plus petit que la fenêtre
+        réellement demandée — aucune exception, aucun avertissement. run_fold_train() doit
+        neutraliser `max_rows` pour garantir la fenêtre exacte documentée, quel que soit le preset
+        hérité par `base_config` (ex. quick_validation_mode)."""
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        seen_df_lengths = []
+
+        def fake_run_backtest(df_, strategy, params, **kwargs):
+            seen_df_lengths.append(len(df_))
+            trades = pd.DataFrame([{"resultat_net": 10.0, "raison_sortie": "fin-donnees"}])
+            equity = pd.DataFrame([{"date": "2020-01-01", "capital": 10_010.0}])
+            return trades, equity, {"n_trades": 1, "net_ret_pct": 0.1}
+
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake_run_backtest)
+        config = _minimal_optimizer_config(
+            mode="grid", param_ranges=_param_ranges_3_values(), max_rows=10,
+        )
+
+        run_fold_train(fold, config, df)
+
+        assert seen_df_lengths, "au moins un backtest TRAIN attendu"
+        # [train_start, effective_boundary) == barres d'indices 0..99 == 100 barres. Si max_rows=10
+        # hérité de base_config n'était pas neutralisé, chaque appel ne verrait que 10 barres.
+        assert min(seen_df_lengths) == 100, (
+            f"la fenêtre TRAIN complète (100 barres) a été tronquée à {min(seen_df_lengths)} — "
+            "base_config.max_rows ne doit jamais réduire silencieusement [train_start, "
+            "effective_boundary)"
+        )
+
+
+class TestSelectFoldTop1:
+
+    def test_selects_the_best_scoring_train_candidate(self):
+        fold = _wf_fold(
+            train_start="2020-01-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+        config = _minimal_optimizer_config(param_ranges=_param_ranges_3_values())
+        all_results = [
+            {"score": 1.4, "params": {"ema_trend_len": 140}},
+            {"score": 1.2, "params": {"ema_trend_len": 120}},
+            {"score": 1.0, "params": {"ema_trend_len": 100}},
+        ]
+
+        selection = select_fold_top1(fold, all_results, config)
+
+        assert selection.fold_id == fold.fold_id
+        assert selection.selected_params == {"ema_trend_len": 140}
+        assert selection.selected_params_hash == params_hash({"ema_trend_len": 140})
+        assert selection.score_train == 1.4
+        assert selection.rank_in_train == 1
+        assert selection.train_candidates_evaluated == 3
+        assert selection.train_candidates_eligible == 3
+
+    def test_all_zero_trade_candidates_raises_no_eligible_train_candidate(self):
+        fold = _wf_fold(
+            train_start="2020-01-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+        config = _minimal_optimizer_config()
+        all_results = [
+            {"score": 0.0, "params": {"ema_trend_len": 140}},
+            {"score": 0.0, "params": {"ema_trend_len": 100}},
+        ]
+
+        with pytest.raises(NoEligibleTrainCandidate):
+            select_fold_top1(fold, all_results, config)
+
+    def test_no_candidates_at_all_raises_no_eligible_train_candidate(self):
+        fold = _wf_fold(
+            train_start="2020-01-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+        config = _minimal_optimizer_config()
+
+        with pytest.raises(NoEligibleTrainCandidate):
+            select_fold_top1(fold, [], config)
+
+
+class TestRunFoldTest:
+
+    def test_executes_exactly_one_backtest_bounded_to_the_test_window(self, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = _minimal_optimizer_config()
+        selection = _fold_selection(fold)
+
+        result = run_fold_test(fold, selection, config, df)
+
+        assert len(fake.calls) == 1
+        call = fake.calls[0]
+        assert _same_instant(call["start_date"], fold.effective_boundary)
+        assert _same_instant(call["end_date"], fold.effective_test_end)
+        assert call["end_boundary"] == "exclusive"
+        assert call["params"] == selection.selected_params
+        assert isinstance(result, FoldResult)
+
+    def test_builds_fold_result_from_the_real_trades_and_equity(self, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[110].isoformat(),
+        )
+        trades = pd.DataFrame([
+            {"resultat_net": 10.0, "raison_sortie": "target"},
+            {"resultat_net": -4.0, "raison_sortie": "stop"},
+            {"resultat_net": 2.0, "raison_sortie": "fin-donnees"},
+        ])
+        equity = pd.DataFrame([{"date": "x", "capital": 10_008.0}])
+        stats = {
+            "n_trades": 3, "net_ret_pct": 0.08, "max_dd_pct": 1.5,
+            "profit_factor": 2.1, "win_rate": 66.7,
+        }
+
+        def fake_run_backtest(df_, strategy, params, **kwargs):
+            return trades, equity, stats
+
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake_run_backtest)
+        config = _minimal_optimizer_config()
+        selection = _fold_selection(fold)
+
+        result = run_fold_test(fold, selection, config, df)
+
+        assert result.fold_id == fold.fold_id
+        assert result.definition == fold
+        assert result.selection == selection
+        assert result.n_trades == 3
+        assert result.net_ret_pct == 0.08
+        assert result.max_dd_pct == 1.5
+        assert result.profit_factor == 2.1
+        assert result.win_rate == 66.7
+        assert result.expectancy == pytest.approx((10.0 - 4.0 + 2.0) / 3)
+        assert result.forced_closes == 1
+        assert result.zero_trade_oos is False
+        assert result.coverage_bars == 10  # indices 100..109 : [boundary, test_end)
+
+    def test_zero_trade_test_produces_the_adr_mandated_observation_fields(self, monkeypatch):
+        """Décision 15 — zéro trade TEST est une observation scientifique valide, jamais une
+        erreur : n_trades=0, net_ret_pct=0, profit_factor/win_rate/expectancy=None."""
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[110].isoformat(),
+        )
+        empty_trades, empty_equity = pd.DataFrame(), pd.DataFrame()
+
+        import engine
+        monkeypatch.setattr(
+            engine, "run_backtest",
+            lambda *a, **k: (empty_trades, empty_equity, {"n_trades": 0}),
+        )
+        config = _minimal_optimizer_config()
+        selection = _fold_selection(fold)
+
+        result = run_fold_test(fold, selection, config, df)
+
+        assert result.zero_trade_oos is True
+        assert result.n_trades == 0
+        assert result.net_ret_pct == 0
+        assert result.profit_factor is None
+        assert result.win_rate is None
+        assert result.expectancy is None
+        assert result.max_dd_pct is None
+        assert result.score_test == 0.0
+        assert result.forced_closes == 0
+
+    def test_score_test_is_never_silently_zeroed_by_a_train_oriented_eligibility_filter(
+        self, monkeypatch,
+    ):
+        """Régression review indépendante (tentative 2, finding BLOQUANT) : `FilterConfig`
+        (`min_trades`/`max_drawdown_pct`/`min_profit_factor`/`max_consecutive_losses`/
+        `min_win_rate`) est une convention d'ÉLIGIBILITÉ TRAIN — appliquée telle quelle à
+        l'UNIQUE exécution TEST d'un fold via `optimizer._run_single()`, elle collapsait
+        silencieusement `score_test` à 0.0 dès qu'un seuil TRAIN était franchi, même avec des
+        trades réels et des métriques saines. Reproduit empiriquement le cas du finding : 3
+        trades, PF=2.1, win_rate=66.7%, net_ret_pct=0.08 (tous des chiffres sains) avec
+        `FilterConfig()` par défaut (`min_trades=30 > 3`) — `score_test` doit refléter le score
+        pondéré RÉEL de `compute_score()` sur ces `stats`, jamais un 0.0 emprunté au filtre
+        d'éligibilité TRAIN (ADR 0021 Décision 13 : "FoldResult ne porte que des faits mesurés")."""
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[110].isoformat(),
+        )
+        trades = pd.DataFrame([
+            {"resultat_net": 10.0, "raison_sortie": "target"},
+            {"resultat_net": -4.0, "raison_sortie": "stop"},
+            {"resultat_net": 2.0, "raison_sortie": "fin-donnees"},
+        ])
+        equity = pd.DataFrame([{"date": "x", "capital": 10_008.0}])
+        stats = {
+            "n_trades": 3, "net_ret_pct": 0.08, "max_dd_pct": 1.5,
+            "profit_factor": 2.1, "win_rate": 66.7,
+        }
+
+        def fake_run_backtest(df_, strategy, params, **kwargs):
+            return trades, equity, stats
+
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake_run_backtest)
+        # FilterConfig() par défaut : min_trades=30, largement au-dessus des 3 trades réels —
+        # is_filtered_out() renverrait filtered=True sur ce seul critère, alors que PF/win_rate
+        # sont sains.
+        config = _minimal_optimizer_config(filters=FilterConfig())
+        selection = _fold_selection(fold)
+
+        result = run_fold_test(fold, selection, config, df)
+
+        permissive_filters = FilterConfig(
+            min_trades=0, max_drawdown_pct=float("inf"), min_profit_factor=0.0,
+            max_consecutive_losses=2**31 - 1, min_win_rate=0.0,
+        )
+        expected_score, expected_filtered, _reason, _warnings = compute_score(
+            stats, config.score_weights, permissive_filters,
+            params=selection.selected_params, param_ranges=config.param_ranges,
+        )
+        assert expected_filtered is False
+        assert expected_score > 0.0
+        assert result.score_test == pytest.approx(expected_score)
+        assert result.score_test > 0.0
+        assert result.n_trades == 3
+        assert result.profit_factor == 2.1
+
+    def test_technical_exception_during_test_execution_is_never_reported_as_zero_trade(
+        self, monkeypatch,
+    ):
+        """Régression review indépendante (tentative 1, finding MAJEUR) : une exception technique
+        levée par `engine.run_backtest()` est absorbée par `optimizer._run_single()` sous la forme
+        `filtered=True, filter_reason="Exception: ..."`, `stats={}` — ce qui satisfait
+        `n_trades == 0` EXACTEMENT comme un authentique "Aucun trade". Les deux cas ne doivent
+        jamais produire le même `FoldResult(zero_trade_oos=True)` (ADR 0021 Décision 15) : un
+        échec technique de l'UNIQUE exécution TEST d'un fold doit se propager, jamais être
+        traduit silencieusement en observation scientifique."""
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[110].isoformat(),
+        )
+
+        def boom(*a, **k):
+            raise ValueError("colonne manquante")
+
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", boom)
+        config = _minimal_optimizer_config()
+        selection = _fold_selection(fold)
+
+        with pytest.raises(FoldTestExecutionFailed):
+            run_fold_test(fold, selection, config, df)
+
+
+class TestExecuteWalkForwardFold:
+
+    def test_test_execution_happens_strictly_after_all_train_calls(self, monkeypatch):
+        """Décision 7 — isolation TEST structurelle : aucun appel TEST ne doit précéder la
+        sélection Top-1. Prouvé ici en vérifiant que le SEUL appel TEST est le DERNIER de la
+        séquence enregistrée (3 candidats TRAIN + exactement 1 exécution TEST = 4 appels)."""
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        result = execute_walk_forward_fold(fold, config, df)
+
+        assert len(fake.calls) == 4
+        test_calls = [
+            c for c in fake.calls if _same_instant(c["start_date"], fold.effective_boundary)
+        ]
+        assert len(test_calls) == 1
+        assert fake.calls[-1] is test_calls[0]
+        assert result.selection.selected_params["ema_trend_len"] == 140
+        assert isinstance(result, FoldResult)
+
+    def test_no_eligible_train_candidate_propagates_before_any_test_call(self, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        monkeypatch.setattr(
+            "optimizer.compute_score", lambda *a, **k: (0.0, True, "filtré", []))
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        with pytest.raises(NoEligibleTrainCandidate):
+            execute_walk_forward_fold(fold, config, df)
+
+        # Les 3 candidats TRAIN ont bien été évalués (nécessaire pour établir qu'aucun n'est
+        # éligible) — mais aucun appel TEST (start_date == effective_boundary) n'a eu lieu.
+        assert len(fake.calls) == 3
+        assert not [
+            c for c in fake.calls if _same_instant(c["start_date"], fold.effective_boundary)
+        ], "aucun appel TEST ne doit avoir lieu quand aucun candidat TRAIN n'est éligible"
+
+
+class TestAdjacentFoldsShareTheBoundaryExactlyInTheImplementation:
+    """Régression directe sur l'IMPLÉMENTATION (pas seulement la géométrie pure déjà couverte par
+    Slice 1) : aucune barre TEST perdue/dupliquée entre deux folds adjacents réellement exécutés
+    via execute_walk_forward_fold() (ADR 0021 Décision 4)."""
+
+    def test_fold_k_test_end_equals_fold_k_plus_1_train_start_in_the_actual_calls(
+        self, monkeypatch,
+    ):
+        df = _build_synthetic_wf_df(300)
+        fold_0 = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+            index=0, is_last=False,
+        )
+        fold_1 = _wf_fold(
+            train_start=df["time_paris"].iloc[50].isoformat(),
+            boundary=df["time_paris"].iloc[150].isoformat(),
+            test_end=df["time_paris"].iloc[200].isoformat(),
+            index=1, is_last=True,
+        )
+        assert fold_0.effective_test_end == fold_1.effective_boundary  # rappel géométrie Slice 1
+
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        execute_walk_forward_fold(fold_0, config, df)
+        n_calls_after_fold0 = len(fake.calls)
+        execute_walk_forward_fold(fold_1, config, df)
+
+        fold0_test_call = fake.calls[n_calls_after_fold0 - 1]  # dernier appel de fold_0 = TEST
+        fold1_test_calls = [
+            c for c in fake.calls[n_calls_after_fold0:]
+            if _same_instant(c["start_date"], fold_1.effective_boundary)
+        ]
+        assert len(fold1_test_calls) == 1
+        # Aucune barre dupliquée : fold_0 TEST se termine (exclusif) exactement là où fold_1 TEST
+        # démarre (inclusif) — même instant partagé, aucun trou, aucun recouvrement (Décision 4).
+        assert _same_instant(fold0_test_call["end_date"], fold_1.effective_boundary)
+        assert _same_instant(fold1_test_calls[0]["start_date"], fold_0.effective_test_end)
+
+
+class TestFoldOrchestrationAlwaysOverridesRunTestValidationDefault:
+
+    def test_run_fold_train_always_passes_run_test_validation_false_to_optimizer_run(
+        self, monkeypatch,
+    ):
+        """Non-régression explicite (mission AF-V-02 Slice 2, preuve de complétion) :
+        run_fold_train() doit systématiquement appeler Optimizer.run(run_test_validation=False)
+        — jamais laisser le défaut True, qui romprait l'isolation TEST (Décision 7).
+
+        Espionne directement `Optimizer.run` plutôt que d'inférer l'effet via
+        `train_test.enabled` (déjà forcé à `False` par ailleurs dans ce chemin d'appel — un test
+        basé sur l'absence d'appel TEST resterait vert même si `run_test_validation=False` était
+        purement et simplement supprimé de l'appel, review indépendante tentative 1). En espionnant
+        les kwargs réels transmis à `Optimizer.run`, la suppression de cet argument (ou son
+        remplacement par `True`) fait échouer CE test, peu importe la valeur de `train_test.enabled`."""
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        captured_kwargs = {}
+        real_run = Optimizer.run
+
+        def spy_run(self, *args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return real_run(self, *args, **kwargs)
+
+        monkeypatch.setattr(Optimizer, "run", spy_run)
+
+        run_fold_train(fold, config, df)
+
+        assert "run_test_validation" in captured_kwargs, (
+            "run_fold_train() doit transmettre explicitement run_test_validation à "
+            "Optimizer.run() — jamais compter sur son défaut"
+        )
+        assert captured_kwargs["run_test_validation"] is False
+
+
+class TestRunFoldTrainRefusesNonDeterministicSearchWithoutSeed:
+    """ADR 0021 Décisions 9/11, régression review indépendante (tentative 2, finding MAJEUR) : la
+    Décision 9 affirme que `master_seed`/`fold_seed` sont "sans objet" pour les modes actuellement
+    supportés par `optimizer.py` ("tous déterministes") — affirmation FACTUELLEMENT INCORRECTE :
+    mode="general" avec 50 000 < N candidats déclarés <= 500 000 dispatche vers
+    `optimizer._run_stratified_sample()`, qui tire ses combinaisons via `random.choice()` GLOBAL,
+    non-seedé nulle part dans `optimizer.py`. `run_fold_train()` doit refuser ce cas SANS
+    `fold_seed` (jamais produire silencieusement un Top-1 non-reproductible), et transmettre
+    réellement le `fold_seed` fourni à `Optimizer.run(seed=...)` quand il existe (pas seulement
+    contourner le garde — le seed doit réellement seeder le tirage, voir TestStratifiedSampleSeed
+    dans tests/test_optimizer.py pour la preuve côté RNG)."""
+
+    def _fold(self, df):
+        return _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+
+    def _general_config_in_stratified_range(self):
+        # 4 paramètres * 20 valeurs = 160 000 combinaisons déclarées : > 50 000, <= 500 000 —
+        # exactement la plage qui dispatche vers _run_stratified_sample() (optimizer.run_mode4()).
+        ranges = [
+            ParamRange(
+                name=f"p{i}", param_type="number", label=f"p{i}", min_val=0, max_val=19, step=1,
+            )
+            for i in range(4)
+        ]
+        return _minimal_optimizer_config(mode="general", param_ranges=ranges)
+
+    def test_raises_before_any_backtest_when_reachable_without_a_fold_seed(self, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = self._fold(df)
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = self._general_config_in_stratified_range()
+
+        with pytest.raises(NonDeterministicSearchWithoutSeed):
+            run_fold_train(fold, config, df, fold_seed=None)
+
+        assert not fake.calls, (
+            "aucun backtest ne doit être lancé une fois le garde déclenché — la recherche "
+            "TRAIN entière doit être refusée avant tout tirage non-seedé"
+        )
+
+    def test_deterministic_grid_mode_never_raises_even_without_a_fold_seed(self, monkeypatch):
+        """Non-régression : mode="grid" (déterministe, aucun random.choice()) ne doit jamais être
+        bloqué par ce garde, avec ou sans fold_seed — même les search spaces déjà couverts par la
+        suite existante (mode="grid", 3 combinaisons)."""
+        df = _build_synthetic_wf_df(200)
+        fold = self._fold(df)
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        run_fold_train(fold, config, df, fold_seed=None)  # ne doit pas lever
+
+        assert fake.calls
+
+    def test_raises_for_an_unrecognized_mode_string_that_falls_through_to_run_mode4(
+        self, monkeypatch,
+    ):
+        """Régression review indépendante (finding CONFIRMÉ, axe Spec) :
+        `optimizer.Optimizer.run()` dispatche via `{"single_var":..., "cross_zone":...,
+        "grid":..., "general":...}.get(cfg.mode, self.run_mode4)` — TOUT `mode` non reconnu (pas
+        seulement `"general"`) retombe sur `run_mode4()`, donc peut atteindre
+        `_run_stratified_sample()` exactement comme `"general"`. Un garde qui ne teste que
+        `mode == "general"` serait une approximation qui dérive silencieusement de la vraie
+        condition de branchement dès qu'un `mode` mal orthographié/inconnu est utilisé."""
+        df = _build_synthetic_wf_df(200)
+        fold = self._fold(df)
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        ranges = [
+            ParamRange(
+                name=f"p{i}", param_type="number", label=f"p{i}", min_val=0, max_val=19, step=1,
+            )
+            for i in range(4)
+        ]
+        config = _minimal_optimizer_config(mode="not_a_real_mode", param_ranges=ranges)
+
+        with pytest.raises(NonDeterministicSearchWithoutSeed):
+            run_fold_train(fold, config, df, fold_seed=None)
+
+        assert not fake.calls
+
+    def test_forwards_fold_seed_to_optimizer_run_when_provided(self, monkeypatch):
+        """Un fold_seed fourni désamorce le garde ET doit être transmis tel quel à
+        `Optimizer.run(seed=...)` — `Optimizer.run` est ESPIONNÉ (jamais réellement exécuté avec
+        50 000 tirages ici, hors de portée d'un test unitaire) : seul le contrat d'appel est
+        vérifié, la preuve du seeding réel du RNG vit dans tests/test_optimizer.py."""
+        df = _build_synthetic_wf_df(200)
+        fold = self._fold(df)
+        config = self._general_config_in_stratified_range()
+
+        captured_kwargs = {}
+
+        def fake_run(self, *args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return [], {}
+
+        monkeypatch.setattr(Optimizer, "run", fake_run)
+
+        run_fold_train(fold, config, df, fold_seed=999)
+
+        assert captured_kwargs.get("seed") == 999
+
+
+class TestRunFoldTrainGuardIsNotALocalCopyOfOptimizerThresholds:
+    """Régression review indépendante (tentative 3, finding MAJEUR) : `walk_forward.py` dupliquait
+    en dur la table de dispatch/les seuils 50 000-500 000 d'`optimizer.py` au lieu de les
+    consulter. `_train_search_reaches_stratified_sample()` délègue maintenant à
+    `optimizer.reaches_stratified_sample()` — ces tests le prouvent en faisant varier les VRAIES
+    constantes d'`optimizer.py` et en observant que le garde de `run_fold_train()` suit, ce
+    qu'une réplique locale figée ne pourrait jamais faire."""
+
+    def _fold(self, df):
+        return _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+
+    def test_lowering_optimizers_max_threshold_stops_the_guard_from_firing(self, monkeypatch):
+        """Un search space "general" à 160 000 combinaisons déclarées atteint normalement
+        `_run_stratified_sample()` (dans ]50k, 500k]). En abaissant
+        `optimizer.STRATIFIED_SAMPLE_MAX_COMBINATIONS` sous ce nombre, `run_mode4()` router
+        désormais vers `_run_progressive_grid()` (déterministe) — le garde de `run_fold_train()`
+        DOIT suivre et ne plus lever, preuve qu'il ne recopie pas 500_000 en dur."""
+        df = _build_synthetic_wf_df(200)
+        fold = self._fold(df)
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        ranges = [
+            ParamRange(
+                name=f"p{i}", param_type="number", label=f"p{i}", min_val=0, max_val=19, step=1,
+            )
+            for i in range(4)
+        ]
+        config = _minimal_optimizer_config(mode="general", param_ranges=ranges)
+        monkeypatch.setattr(optimizer, "STRATIFIED_SAMPLE_MAX_COMBINATIONS", 100)
+
+        run_fold_train(fold, config, df, fold_seed=None)  # ne doit pas lever
+
+    def test_raising_optimizers_min_threshold_makes_the_guard_fire(self, monkeypatch):
+        """Un search space "general" à 30 combinaisons déclarées (<=50 000) reste normalement en
+        dessous du seuil, donc déterministe (`run_mode3()`). En abaissant
+        `optimizer.STRATIFIED_SAMPLE_MIN_COMBINATIONS` sous 30, ce même search space bascule dans
+        la plage stratifiée — le garde DOIT se déclencher, preuve qu'il ne recopie pas 50_000 en
+        dur non plus."""
+        df = _build_synthetic_wf_df(200)
+        fold = self._fold(df)
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        ranges = [
+            ParamRange(
+                name=f"p{i}", param_type="number", label=f"p{i}", min_val=0, max_val=4, step=1,
+            )
+            for i in range(2)
+        ]  # 5 * 5 = 25 combinaisons déclarées
+        config = _minimal_optimizer_config(mode="general", param_ranges=ranges)
+        monkeypatch.setattr(optimizer, "STRATIFIED_SAMPLE_MIN_COMBINATIONS", 10)
+
+        with pytest.raises(NonDeterministicSearchWithoutSeed):
+            run_fold_train(fold, config, df, fold_seed=None)
+
+        assert not fake.calls
+
+    def test_removing_a_mode_from_deterministic_dispatch_modes_makes_the_guard_fire_for_it(
+        self, monkeypatch,
+    ):
+        """Si `optimizer.DETERMINISTIC_DISPATCH_MODES` ne contenait plus "grid" (ex. `run()`
+        changeait un jour son dispatch dict pour router "grid" vers `run_mode4()`), le garde DOIT
+        recommencer à s'en méfier — preuve qu'il consulte l'ensemble réel, pas une copie figée
+        `{"single_var", "cross_zone", "grid"}` écrite en dur dans walk_forward.py."""
+        df = _build_synthetic_wf_df(200)
+        fold = self._fold(df)
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        ranges = [
+            ParamRange(
+                name=f"p{i}", param_type="number", label=f"p{i}", min_val=0, max_val=19, step=1,
+            )
+            for i in range(4)
+        ]  # 160 000 combinaisons déclarées — dans ]50k, 500k]
+        config = _minimal_optimizer_config(mode="grid", param_ranges=ranges)
+        monkeypatch.setattr(
+            optimizer, "DETERMINISTIC_DISPATCH_MODES", frozenset({"single_var", "cross_zone"}),
+        )
+
+        with pytest.raises(NonDeterministicSearchWithoutSeed):
+            run_fold_train(fold, config, df, fold_seed=None)
+
+        assert not fake.calls
+
+
+class TestExecuteWalkForwardFoldForwardsFoldSeed:
+
+    def test_forwards_fold_seed_to_run_fold_train(self, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        captured = {}
+        real_run_fold_train = walk_forward_module.run_fold_train
+
+        def spy_run_fold_train(fold_, base_config, df_, progress_cb=None, stop_flag_fn=None,
+                                fold_seed=None):
+            captured["fold_seed"] = fold_seed
+            return real_run_fold_train(
+                fold_, base_config, df_, progress_cb=progress_cb, stop_flag_fn=stop_flag_fn,
+                fold_seed=fold_seed,
+            )
+
+        monkeypatch.setattr(walk_forward_module, "run_fold_train", spy_run_fold_train)
+
+        execute_walk_forward_fold(fold, config, df, fold_seed=2024)
+
+        assert captured["fold_seed"] == 2024

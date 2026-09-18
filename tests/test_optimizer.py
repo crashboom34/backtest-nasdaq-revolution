@@ -46,6 +46,7 @@ from optimizer import (
     _worker_run_single,
     benchmark_speed,
     compute_split_dates,
+    reaches_stratified_sample,
     resolve_execution_window,
     validate_resume_state_readiness_semantics,
     validate_resume_train_test_semantics,
@@ -1129,3 +1130,349 @@ class TestStateReadinessSemanticsVersioning:
     def test_error_message_names_the_source_run_id(self):
         with pytest.raises(StateReadinessSemanticsMismatch, match="legacy_src"):
             validate_resume_state_readiness_semantics(True, {}, "legacy_src")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 2 — resolve_execution_window() : opt_end_date accepte désormais un timestamp
+# ISO-8601 complet en borne EXCLUSIVE exacte (nécessaire pour borner une fenêtre TRAIN de fold
+# Walk-Forward à [train_start_k, effective_boundary_k), ADR 0021 Décision 6) — distinct du mode
+# historique "YYYY-MM-DD" (inclusif jusqu'à 23:59:59), inchangé pour tout appelant existant.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestResolveExecutionWindowIsoTimestampOptEndDate:
+
+    def test_full_iso_timestamp_opt_end_date_excludes_the_boundary_bar(self):
+        """Une barre exactement à opt_end_date (ISO-8601 complet) est EXCLUE — jamais incluse
+        comme avec le mode 'YYYY-MM-DD' historique (23:59:59 inclusif)."""
+        df = _build_synthetic_df(5, start="2024-01-01T00:00:00", freq_minutes=60)
+        boundary = df["time_paris"].iloc[2].isoformat()
+
+        window = resolve_execution_window(df, opt_end_date=boundary)
+
+        assert window.exec_row_count == 2
+        assert window.execution_df["time_paris"].iloc[-1] == df["time_paris"].iloc[1]
+
+    def test_plain_date_opt_end_date_behavior_is_unchanged(self):
+        """Non-régression explicite : le mode historique 'YYYY-MM-DD' (jamais de 'T') reste
+        inchangé — inclusif jusqu'à 23:59:59."""
+        df = _build_synthetic_df(20)
+        window = resolve_execution_window(df, opt_end_date=_bar_date_str(df, 14))
+        assert window.exec_row_count == 15
+
+    def test_iso_timestamp_opt_start_date_already_worked_before_this_mission(self):
+        """opt_start_date acceptait déjà un timestamp ISO-8601 complet (comparaison `>=` directe,
+        aucune concaténation de chaîne) — documenté ici explicitement comme le pendant symétrique
+        du nouveau mode de opt_end_date, pas une régression trouvée."""
+        df = _build_synthetic_df(5, start="2024-01-01T00:00:00", freq_minutes=60)
+        start = df["time_paris"].iloc[2].isoformat()
+
+        window = resolve_execution_window(df, opt_start_date=start)
+
+        assert window.execution_df["time_paris"].iloc[0] == df["time_paris"].iloc[2]
+
+    def test_full_iso_timestamp_start_and_end_together_bound_a_half_open_window(self):
+        df = _build_synthetic_df(10, start="2024-01-01T00:00:00", freq_minutes=60)
+        start = df["time_paris"].iloc[2].isoformat()
+        end = df["time_paris"].iloc[6].isoformat()
+
+        window = resolve_execution_window(df, opt_start_date=start, opt_end_date=end)
+
+        assert window.exec_row_count == 4  # indices 2,3,4,5 — 6 exclu
+        assert window.execution_df["time_paris"].iloc[0] == df["time_paris"].iloc[2]
+        assert window.execution_df["time_paris"].iloc[-1] == df["time_paris"].iloc[5]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 2 — _run_single() : paramètre optionnel include_artifacts renvoyant aussi
+# trades/equity (ADR 0021 Décision 6, relecture de clôture) — rétrocompatible, absent par défaut.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRunSingleIncludeArtifacts:
+
+    def test_default_omits_trades_and_equity_from_the_returned_dict(self, monkeypatch):
+        df = _build_synthetic_df(5)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = _minimal_config()
+
+        result = _run_single({}, config, df)
+
+        assert "trades" not in result
+        assert "equity" not in result
+
+    def test_include_artifacts_true_returns_the_real_trades_and_equity_dataframes(self, monkeypatch):
+        df = _build_synthetic_df(5)
+        trades_df = pd.DataFrame([{"resultat_net": 10.0, "raison_sortie": "fin-donnees"}])
+        equity_df = pd.DataFrame([{"date": "x", "capital": 10_010.0}])
+
+        def fake_run_backtest(df_, strategy, params, **kwargs):
+            return trades_df, equity_df, {"n_trades": 1, "net_ret_pct": 0.1}
+
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake_run_backtest)
+        config = _minimal_config()
+
+        result = _run_single({}, config, df, include_artifacts=True)
+
+        assert result["trades"] is trades_df
+        assert result["equity"] is equity_df
+
+    def test_include_artifacts_true_on_exception_returns_none_not_a_crash(self, monkeypatch):
+        import engine
+
+        def boom(*a, **k):
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(engine, "run_backtest", boom)
+        config = _minimal_config()
+        df = _build_synthetic_df(5)
+
+        result = _run_single({}, config, df, include_artifacts=True)
+
+        assert result["filtered"] is True
+        assert result["trades"] is None
+        assert result["equity"] is None
+
+    def test_include_artifacts_true_on_zero_trades_returns_the_real_empty_dataframes(self, monkeypatch):
+        import engine
+        empty_trades = pd.DataFrame()
+        empty_equity = pd.DataFrame()
+        monkeypatch.setattr(
+            engine, "run_backtest",
+            lambda *a, **k: (empty_trades, empty_equity, {"n_trades": 0}),
+        )
+        config = _minimal_config()
+        df = _build_synthetic_df(5)
+
+        result = _run_single({}, config, df, include_artifacts=True)
+
+        assert result["filter_reason"] == "Aucun trade"
+        assert result["trades"] is empty_trades
+        assert result["equity"] is empty_equity
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 2 — Optimizer.run(run_test_validation=...) : nouveau seam additif (ADR 0021
+# Décision 6). False saute la phase de validation TEST existante (~lignes 1044-1065) sans y
+# toucher autrement ; True (défaut) laisse tout appelant existant strictement inchangé.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestOptimizerRunTestValidationSeam:
+
+    def _config_with_train_test(self):
+        from strategies.perfect_revolution_v1 import DEFAULT_PARAMS
+        return _minimal_config(
+            mode="grid", param_ranges=[],
+            base_params=dict(DEFAULT_PARAMS),
+            train_test=TrainTestConfig(enabled=True, split_method="ratio", train_ratio=0.6),
+        )
+
+    def test_run_test_validation_false_skips_the_test_phase_entirely(self, monkeypatch):
+        df = _build_synthetic_df(30)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = self._config_with_train_test()
+        config.top_k_save = 1
+
+        opt = Optimizer(config, df)
+        all_results, _sensitivity = opt.run(run_test_validation=False)
+
+        assert all_results
+        assert "score_test" not in all_results[0]
+        windows = opt.resolved_train_test_windows
+        assert not [c for c in fake.calls if c["end_date"] == windows.test_end]
+
+    def test_run_test_validation_true_default_matches_omitting_the_argument(self, monkeypatch):
+        df = _build_synthetic_df(30)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        monkeypatch.setattr(optimizer, "compute_score", lambda *a, **k: (1.0, False, None, []))
+        config = self._config_with_train_test()
+        config.top_k_save = 1
+
+        opt_default = Optimizer(config, df)
+        results_default, _ = opt_default.run()
+
+        opt_explicit = Optimizer(config, df)
+        results_explicit, _ = opt_explicit.run(run_test_validation=True)
+
+        assert "score_test" in results_default[0]
+        assert "score_test" in results_explicit[0]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 2 — Optimizer.run(seed=...) / _run_stratified_sample() (ADR 0021 Décisions 9/11).
+# Régression review indépendante (tentative 2, finding MAJEUR) : _run_stratified_sample() tirait
+# ses combinaisons via random.choice() GLOBAL, sans aucun random.seed() nulle part dans
+# optimizer.py — non-déterministe pour tout appelant (mode="general", 50 000 < N <= 500 000)
+# n'ayant pas explicitement seedé le module random process-wide. seed=None (défaut, tout appelant
+# existant) doit laisser ce comportement historique strictement inchangé.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestStratifiedSampleSeed:
+
+    def _config_general(self, **overrides):
+        defaults = dict(
+            mode="general",
+            param_ranges=[
+                ParamRange(name="a", param_type="number", label="a", min_val=0, max_val=9, step=1),
+                ParamRange(name="b", param_type="number", label="b", min_val=0, max_val=9, step=1),
+            ],
+        )
+        defaults.update(overrides)
+        return _minimal_config(**defaults)
+
+    def test_run_without_seed_kwarg_defaults_the_instance_attribute_to_none(self, monkeypatch):
+        df = _build_synthetic_df(5)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = _minimal_config(mode="grid", param_ranges=[])
+
+        opt = Optimizer(config, df)
+        opt.run()
+
+        assert opt._search_seed is None
+
+    def test_run_seed_kwarg_sets_the_instance_attribute_before_dispatch(self, monkeypatch):
+        df = _build_synthetic_df(5)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = _minimal_config(mode="grid", param_ranges=[])
+
+        opt = Optimizer(config, df)
+        opt.run(seed=777)
+
+        assert opt._search_seed == 777
+
+    def test_same_seed_produces_identical_sampled_combos_across_two_instances(self, monkeypatch):
+        df = _build_synthetic_df(5)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = self._config_general()
+
+        opt1 = Optimizer(config, df)
+        opt1._search_seed = 42
+        results1 = opt1._run_stratified_sample(5)
+
+        opt2 = Optimizer(config, df)
+        opt2._search_seed = 42
+        results2 = opt2._run_stratified_sample(5)
+
+        assert [r["params"] for r in results1] == [r["params"] for r in results2]
+        assert len(results1) == 5
+
+    def test_different_seeds_can_produce_different_sampled_combos(self, monkeypatch):
+        """Preuve que le seed influence réellement le tirage (pas ignoré silencieusement) : sur
+        100 combinaisons possibles (10x10) et un échantillon de 5, deux seeds distincts
+        produisent, empiriquement, des ensembles de candidats différents."""
+        df = _build_synthetic_df(5)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = self._config_general()
+
+        opt1 = Optimizer(config, df)
+        opt1._search_seed = 1
+        results1 = opt1._run_stratified_sample(5)
+
+        opt2 = Optimizer(config, df)
+        opt2._search_seed = 2
+        results2 = opt2._run_stratified_sample(5)
+
+        assert [r["params"] for r in results1] != [r["params"] for r in results2]
+
+    def test_no_seed_preserves_the_historical_global_random_module_behavior(self, monkeypatch):
+        """Rétrocompatibilité stricte (comportement historique, tout appelant existant) : sans
+        seed, `_run_stratified_sample()` doit continuer à consommer le module `random` global —
+        vérifié en contrôlant son état via `random.seed()` avant l'appel, seule façon de rendre ce
+        tirage reproductible avant cette mission."""
+        import random as random_module
+        df = _build_synthetic_df(5)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = self._config_general()
+
+        random_module.seed(123)
+        opt1 = Optimizer(config, df)
+        results1 = opt1._run_stratified_sample(5)
+
+        random_module.seed(123)
+        opt2 = Optimizer(config, df)
+        results2 = opt2._run_stratified_sample(5)
+
+        assert [r["params"] for r in results1] == [r["params"] for r in results2]
+
+
+class TestReachesStratifiedSampleSingleSourceOfTruth:
+    """ADR 0021 Décision 9, review indépendante (tentative 3, finding MAJEUR) :
+    `optimizer.reaches_stratified_sample()` doit être le SEUL point de vérité consulté par
+    `run_mode4()` (ci-dessous) ET par `walk_forward.run_fold_train()` (tests/test_walk_forward.py,
+    `TestRunFoldTrainRefusesNonDeterministicSearchWithoutSeed`) — jamais deux répliques
+    indépendantes de la même condition de branchement."""
+
+    def _config(self, n_values_per_param: int, n_params: int = 4, **overrides):
+        ranges = [
+            ParamRange(
+                name=f"p{i}", param_type="number", label=f"p{i}",
+                min_val=0, max_val=n_values_per_param - 1, step=1,
+            )
+            for i in range(n_params)
+        ]
+        defaults = dict(mode="general", param_ranges=ranges)
+        defaults.update(overrides)
+        return _minimal_config(**defaults)
+
+    def test_false_for_deterministic_dispatch_modes_regardless_of_combination_count(self):
+        for mode in ("single_var", "cross_zone", "grid"):
+            config = self._config(n_values_per_param=20, mode=mode)  # 20**4 = 160 000 combos
+            assert reaches_stratified_sample(config) is False
+
+    def test_false_when_declared_combinations_are_at_or_below_the_min_threshold(self):
+        config = self._config(n_values_per_param=1, n_params=1)  # 1 combo
+        assert reaches_stratified_sample(config) is False
+
+    def test_true_when_declared_combinations_fall_strictly_inside_the_stratified_range(self):
+        config = self._config(n_values_per_param=20)  # 20**4 = 160 000, dans ]50k, 500k]
+        assert reaches_stratified_sample(config) is True
+
+    def test_false_above_the_max_threshold_progressive_grid_takes_over_instead(self):
+        config = self._config(n_values_per_param=30)  # 30**4 = 810 000 > 500 000
+        assert reaches_stratified_sample(config) is False
+
+    def test_false_when_max_combinations_is_explicitly_capped(self):
+        """`max_combinations` fait toujours dispatcher vers `run_mode3()`, jamais vers
+        `_run_stratified_sample()`, quel que soit le nombre de combinaisons déclarées."""
+        config = self._config(n_values_per_param=20, max_combinations=1000)
+        assert reaches_stratified_sample(config) is False
+
+    def test_optimizer_run_dispatch_stays_consistent_with_deterministic_dispatch_modes_constant(
+        self, monkeypatch,
+    ):
+        """Garde de non-régression structurel : si le dispatch dict interne de `Optimizer.run()`
+        divergeait un jour du module-level `DETERMINISTIC_DISPATCH_MODES` (renommage de mode,
+        ajout d'une entrée), l'assertion runtime de `run()` doit échouer immédiatement plutôt que
+        de laisser `reaches_stratified_sample()`/le garde de walk_forward.py se désynchroniser
+        silencieusement."""
+        import optimizer as optimizer_module
+        df = _build_synthetic_df(5)
+        fake = _RecordingRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        monkeypatch.setattr(
+            optimizer_module, "DETERMINISTIC_DISPATCH_MODES", frozenset({"not_a_real_mode"}),
+        )
+        config = _minimal_config(mode="grid", param_ranges=[])
+
+        with pytest.raises(AssertionError):
+            Optimizer(config, df).run()

@@ -25,15 +25,27 @@ générique verbatim).
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import json
 import re
 from typing import Optional, Tuple
 
 import pandas as pd
 
 from dataset_split import SplitBoundary
-from optimizer import NoStateReadyBoundary
+from optimizer import (
+    FilterConfig,
+    NoStateReadyBoundary,
+    Optimizer,
+    TrainTestConfig,
+    compute_score,
+    count_combinations,
+    params_hash,
+    reaches_stratified_sample,
+)
 from strategy_contracts import DailyStateReadiness, resolve_state_ready_boundary
-from validation_run import FoldDefinition, WalkForwardSpecification
+from validation_run import FoldDefinition, FoldResult, FoldSelection, WalkForwardSpecification
 
 # Identifie la sémantique du protocole Walk-Forward — géométrie, inclusivité des frontières, règle
 # terminale. Indépendante de TRAIN_TEST_SEMANTICS_VERSION ("exact-boundary-v2")/
@@ -399,3 +411,295 @@ def compute_fold_definitions(
     result = tuple(fold_definitions)
     check_no_oos_overlap(result)
     return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 2 — Optimizer TRAIN-only + sélection Top-1 + exécution TEST par fold
+# (ADR 0021 Décisions 4/6/7). Orchestration réelle : la géométrie pure ci-dessus reste inchangée
+# (Slice 1, figée) ; ce qui suit consomme ses `FoldDefinition` pour produire un `FoldResult` par
+# fold, en mémoire uniquement (persistance/agrégation/verdict scientifique hors scope, Décision
+# 12/13/15 — tranche suivante).
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class NoEligibleTrainCandidate(ValueError):
+    """Levée quand TOUS les candidats TRAIN d'un fold sont à zéro trade/filtrés (score <= 0) —
+    le fold n'a pas de `FoldSelection` possible (ADR 0021 Décision 15). Distincte du cas TEST à
+    zéro trade (`FoldResult.zero_trade_oos=True`), qui reste une observation scientifique valide,
+    jamais une erreur."""
+
+
+class FoldTestExecutionFailed(RuntimeError):
+    """Levée si l'UNIQUE exécution TEST d'un fold échoue techniquement (exception interne à
+    `engine.run_backtest()`, absorbée par `optimizer._run_single()` sous la forme
+    `filtered=True, filter_reason="Exception: ..."`, `stats={}`) — jamais traduite
+    silencieusement en `FoldResult(zero_trade_oos=True)`, qui doit rester réservé à une
+    authentique absence de trade (ADR 0021 Décision 15) : les deux cas produisent tous deux
+    `stats.get("n_trades", 0) == 0` et seraient sinon indiscernables. Symétrique à
+    `NoEligibleTrainCandidate` côté TRAIN : un échec technique se propage, il ne devient jamais
+    une observation scientifique."""
+
+
+class NonDeterministicSearchWithoutSeed(ValueError):
+    """Levée dans `run_fold_train()` quand la recherche TRAIN d'un fold atteindrait
+    `optimizer._run_stratified_sample()` (mode="general", 50 000 < candidats déclarés <= 500 000,
+    aucun `max_combinations`) SANS `fold_seed` fourni (ADR 0021 Décisions 9/11).
+
+    `_run_stratified_sample()` tire ses combinaisons via `random.choice()` — le module `random`
+    GLOBAL si aucun seed n'est transmis à `Optimizer.run()` (voir AF-V-02 Slice 2,
+    `Optimizer._search_seed`) : sans seed, deux exécutions du même fold (ou une reprise) peuvent
+    sélectionner des candidats TRAIN différents, donc un Top-1 différent — contredit la garantie
+    de déterminisme de la Décision 9 ("fold_seed... déterministe, indépendant du nombre de
+    workers"). Trouvaille de revue indépendante (tentative 2) : la Décision 9 affirme ce cas "sans
+    objet" pour les modes actuellement supportés par `optimizer.py` ("single_var/cross_zone/grid/
+    general, tous déterministes") — affirmation FACTUELLEMENT INCORRECTE pour "general" au-delà de
+    50 000 combinaisons déclarées, corrigée ici par un garde explicite (`docs/adr/` hors des
+    chemins autorisés de cette mission, jamais réécrit)."""
+
+
+def _train_search_reaches_stratified_sample(base_config) -> bool:
+    """Délègue à `optimizer.reaches_stratified_sample()` — point de vérité UNIQUE pour la
+    condition de branchement d'`optimizer.Optimizer.run()` menant à `_run_stratified_sample()`
+    (le SEUL point de hasard non-seedé de `optimizer.py`). `walk_forward.py` ne maintient plus sa
+    propre réplique de la table de dispatch/des seuils 50 000-500 000 : toute évolution
+    d'`optimizer.py` (renommage de mode, changement de seuil) se propage ici automatiquement, et
+    `Optimizer.run()` lui-même casse immédiatement (assertion runtime) si son dispatch dict
+    divergeait un jour de `optimizer.DETERMINISTIC_DISPATCH_MODES` — trouvaille de revue
+    indépendante (tentative 3, finding MAJEUR) : une réplique locale, même exacte au moment où elle
+    est écrite, ne peut pas rester synchronisée avec optimizer.py sans mécanisme de vérification."""
+    return reaches_stratified_sample(base_config)
+
+
+def run_fold_train(
+    fold: FoldDefinition,
+    base_config,
+    df,
+    progress_cb=None,
+    stop_flag_fn=None,
+    fold_seed: Optional[int] = None,
+) -> Tuple[list, dict]:
+    """Exécute la phase TRAIN-only d'UN fold (ADR 0021 Décision 6) : `Optimizer.run(
+    run_test_validation=False)`, `train_test.enabled=False` — le bloc `if tt.enabled:` de
+    `Optimizer.run()` n'est donc jamais atteint pour cet appel, `resolve_state_ready_boundary()`
+    n'est PAS rappelée ici : elle a déjà été résolue exactement une fois pour cette frontière de
+    fold par `compute_fold_definitions()` (Décision 4). Fenêtre d'exécution bornée DIRECTEMENT à
+    `[fold.train_start, fold.effective_boundary)` via `opt_start_date`/`opt_end_date` — jamais un
+    second split interne (voir `optimizer.resolve_execution_window()`, AF-V-02 Slice 2, pour le
+    mode ISO-8601 complet qui rend cette borne EXCLUSIVE exacte à la seconde, plutôt que le mode
+    "YYYY-MM-DD" historique). `max_rows` de `base_config` est neutralisé (`None`) sur cette copie
+    de configuration : `resolve_execution_window()` applique `max_rows` APRÈS le filtrage par
+    dates et tronquerait silencieusement cette fenêtre si `base_config` en héritait un (ex. preset
+    `quick_validation_mode`) — la fenêtre TRAIN documentée ci-dessus doit rester exacte quel que
+    soit le `base_config` fourni par l'appelant (review indépendante, tentative 1).
+
+    `fold_seed` (ADR 0021 Décisions 9/11, review indépendante tentative 2) : transmis tel quel à
+    `Optimizer.run(seed=fold_seed)` — seede réellement `_run_stratified_sample()` quand fourni
+    (déterminisme réel, pas seulement un garde contourné). Si `fold_seed is None` ET que
+    `base_config` atteindrait `_run_stratified_sample()` (mode="general", 50 000 à 500 000
+    combinaisons déclarées), lève `NonDeterministicSearchWithoutSeed` AVANT tout backtest — jamais
+    une recherche TRAIN silencieusement non-reproductible.
+
+    Retourne `(all_results, sensitivity)` — même contrat que `Optimizer.run()`, `all_results`
+    déjà trié par score TRAIN décroissant."""
+    if fold_seed is None and _train_search_reaches_stratified_sample(base_config):
+        active_ranges = [pr for pr in base_config.param_ranges if pr.enabled]
+        raise NonDeterministicSearchWithoutSeed(
+            f"{fold.fold_id} : base_config.mode='general' sur "
+            f"{count_combinations(active_ranges)} candidats déclarés atteindrait "
+            "optimizer._run_stratified_sample() (tirage random.choice() non-seedé) sans "
+            "fold_seed — non-déterministe, refusé (ADR 0021 Décisions 9/11). Fournir un "
+            "fold_seed entier à execute_walk_forward_fold()/run_fold_train(), ou changer le "
+            "search space pour sortir de cette plage (<=50 000 ou >500 000 combinaisons, toutes "
+            "deux déterministes)."
+        )
+    train_config = dataclasses.replace(
+        base_config,
+        train_test=TrainTestConfig(enabled=False),
+        opt_start_date=fold.train_start,
+        opt_end_date=fold.effective_boundary,
+        max_rows=None,
+    )
+    optimizer = Optimizer(train_config, df)
+    return optimizer.run(
+        progress_cb=progress_cb, stop_flag_fn=stop_flag_fn, run_test_validation=False,
+        seed=fold_seed,
+    )
+
+
+def _search_space_hash(param_ranges) -> str:
+    """Hash stable du search space déclaré pour un fold — même convention que
+    `optimizer.params_hash()` (md5 tronqué, JSON trié) mais appliquée aux `ParamRange`
+    (dataclasses, pas des `dict`) plutôt qu'à un jeu de paramètres résolu."""
+    serialized = json.dumps(
+        [dataclasses.asdict(pr) for pr in param_ranges], sort_keys=True, ensure_ascii=False,
+    )
+    return hashlib.md5(serialized.encode()).hexdigest()[:12]
+
+
+def select_fold_top1(
+    fold: FoldDefinition,
+    all_results: list,
+    base_config,
+    fold_seed: Optional[int] = None,
+) -> FoldSelection:
+    """Sélection TRAIN Top-1 d'un fold (ADR 0021 Décision 6) : `all_results[0]` (meilleur score
+    TRAIN, déjà trié par `Optimizer.run()`) devient `FoldSelection.selected_params`. "Éligible" =
+    score TRAIN > 0 (candidat non filtré/zéro-trade — même convention que `run_mode1()`..
+    `run_mode4()` dans `optimizer.py`) : si AUCUN candidat n'est éligible, lève
+    `NoEligibleTrainCandidate` (Décision 15) — rien à sélectionner, jamais une `FoldSelection`
+    construite sur un candidat filtré. `train_candidates_unique` compte les hash de paramètres
+    DISTINCTS parmi TOUS les candidats évalués (pas seulement les éligibles) — une recherche
+    multi-passes (ex. mode "general") peut réévaluer la même combinaison plusieurs fois."""
+    eligible = [r for r in all_results if r["score"] > 0]
+    if not eligible:
+        raise NoEligibleTrainCandidate(
+            f"{fold.fold_id} : aucun candidat TRAIN éligible parmi "
+            f"{len(all_results)} évalué(s) (tous à zéro trade/filtrés) — impossible de "
+            "construire une FoldSelection (ADR 0021 Décision 15)."
+        )
+    best = all_results[0]
+    unique_hashes = {params_hash(r["params"]) for r in all_results}
+    return FoldSelection(
+        fold_id=fold.fold_id,
+        selected_params=dict(best["params"]),
+        selected_params_hash=params_hash(best["params"]),
+        score_train=best["score"],
+        rank_in_train=1,
+        train_candidates_evaluated=len(all_results),
+        train_candidates_unique=len(unique_hashes),
+        train_candidates_eligible=len(eligible),
+        search_space_hash=_search_space_hash(base_config.param_ranges),
+        algorithm=base_config.mode,
+        fold_seed=fold_seed,
+    )
+
+
+_UNFILTERED_TEST_SCORING = FilterConfig(
+    min_trades=0, max_drawdown_pct=float("inf"), min_profit_factor=0.0,
+    max_consecutive_losses=2**31 - 1, min_win_rate=0.0,
+)
+"""`FilterConfig` neutralisé (AF-V-02 Slice 2, review indépendante tentative 2, finding BLOQUANT) :
+les seuils d'éligibilité de `base_config.filters` (`min_trades`/`max_drawdown_pct`/
+`min_profit_factor`/`max_consecutive_losses`/`min_win_rate`) sont une convention TRAIN (garder/
+écarter un candidat avant sélection). Appliqués tels quels à l'UNIQUE exécution TEST d'un fold via
+`optimizer._run_single()` -> `compute_score()` -> `is_filtered_out()`, ils collapsaient
+silencieusement `score_test` à 0.0 dès qu'un seuil TRAIN était franchi — même avec des trades réels
+et des métriques saines (`n_trades>0`, PF/win-rate corrects) : exactement le signal d'overfitting
+que Walk-Forward existe pour révéler. `run_fold_test()` recalcule `score_test` avec cette instance
+neutralisée (toute condition de `is_filtered_out()` devient triviale) à partir des MÊMES `stats`
+déjà produites par l'unique exécution TEST (aucun second backtest) — `score_test` reflète ainsi
+TOUJOURS le score pondéré réel de `compute_score()`, jamais un 0.0 emprunté à un filtre TRAIN sans
+rapport (ADR 0021 Décision 13 : "FoldResult ne porte que des faits mesurés")."""
+
+
+def run_fold_test(
+    fold: FoldDefinition,
+    selection: FoldSelection,
+    base_config,
+    df,
+) -> FoldResult:
+    """Exécute EXACTEMENT une fois la phase TEST du fold (ADR 0021 Décision 6), sur
+    `[fold.effective_boundary, fold.effective_test_end)`, `end_boundary="exclusive"` pour TOUT
+    fold y compris le dernier (Décision 4 — plus d'exception terminale). Réutilise
+    `optimizer._run_single()` telle quelle via un import LOCAL (mirroring le propre import local
+    `from engine import run_backtest` de `_run_single()` elle-même) — ne lie jamais `_run_single`/
+    `run_backtest` dans l'espace de noms module de `walk_forward` (invariant Slice 1 préservé :
+    `walk_forward` reste découplé d'`engine.py`).
+
+    Zéro trade TEST (ADR 0021 Décision 15) : observation scientifique valide, jamais une erreur —
+    `zero_trade_oos=True`, `n_trades=0`, `net_ret_pct=0`,
+    `profit_factor=win_rate=expectancy=None`. `expectancy` = PnL net moyen par trade
+    (`trades["resultat_net"].mean()`, Décision 6) ; `forced_closes` = trades clôturés de force en
+    fin de fenêtre (`raison_sortie == "fin-donnees"`, Décision 14) ; `coverage_bars` = nombre de
+    barres du DataFrame source dont `time_paris` tombe dans `[effective_boundary,
+    effective_test_end)` — mesuré indépendamment du moteur (jamais déduit de `equity`, dont la
+    longueur dépend du warmup interne, non spécifiée par cette mission).
+
+    `score_test` (review indépendante tentative 2, finding BLOQUANT) : recalculé via
+    `compute_score()` avec `_UNFILTERED_TEST_SCORING` — INDÉPENDANT de l'éligibilité TRAIN
+    (`base_config.filters`), jamais silencieusement mis à 0.0 par un seuil TRAIN franchi alors que
+    les trades/métriques TEST sont réels et sains. Voir docstring de `_UNFILTERED_TEST_SCORING`.
+
+    Lève `FoldTestExecutionFailed` si cette exécution TEST échoue techniquement (exception interne
+    à `run_backtest()`, `filter_reason` préfixé par `"Exception:"` — voir `optimizer._run_single()`)
+    : un échec technique sur l'UNIQUE exécution TEST du fold ne doit jamais être confondu avec un
+    authentique zéro-trade, les deux produisant identiquement `stats.get("n_trades", 0) == 0`."""
+    from optimizer import _run_single as _optimizer_run_single
+
+    test_result = _optimizer_run_single(
+        selection.selected_params, base_config, df,
+        fold.effective_boundary, fold.effective_test_end,
+        end_boundary="exclusive", include_artifacts=True,
+    )
+    if test_result["filtered"] and (test_result["filter_reason"] or "").startswith("Exception:"):
+        raise FoldTestExecutionFailed(
+            f"{fold.fold_id} : l'exécution TEST a échoué techniquement "
+            f"({test_result['filter_reason']}) — jamais traduite en zero_trade_oos=True "
+            "(ADR 0021 Décision 15)."
+        )
+    stats = test_result["stats"]
+    trades = test_result["trades"]
+    n_trades = stats.get("n_trades", 0)
+    zero_trade = n_trades == 0
+
+    if zero_trade:
+        expectancy = None
+        forced_closes = 0
+        score_test = test_result["score"]
+    else:
+        expectancy = float(trades["resultat_net"].mean())
+        forced_closes = int((trades["raison_sortie"] == "fin-donnees").sum())
+        # Recalcul INDÉPENDANT de l'éligibilité TRAIN, à partir des MÊMES `stats` (aucun second
+        # backtest) — voir _UNFILTERED_TEST_SCORING et le finding BLOQUANT qu'il corrige.
+        score_test, _, _, _ = compute_score(
+            stats, base_config.score_weights, _UNFILTERED_TEST_SCORING,
+            params=selection.selected_params, param_ranges=base_config.param_ranges,
+        )
+
+    ts_boundary = pd.Timestamp(fold.effective_boundary)
+    ts_test_end = pd.Timestamp(fold.effective_test_end)
+    coverage_bars = int(
+        ((df["time_paris"] >= ts_boundary) & (df["time_paris"] < ts_test_end)).sum()
+    )
+
+    return FoldResult(
+        fold_id=fold.fold_id,
+        definition=fold,
+        selection=selection,
+        n_trades=n_trades,
+        net_ret_pct=0 if zero_trade else stats.get("net_ret_pct", 0.0),
+        max_dd_pct=stats.get("max_dd_pct"),
+        profit_factor=stats.get("profit_factor"),
+        win_rate=stats.get("win_rate"),
+        expectancy=expectancy,
+        score_test=score_test,
+        zero_trade_oos=zero_trade,
+        forced_closes=forced_closes,
+        coverage_bars=coverage_bars,
+    )
+
+
+def execute_walk_forward_fold(
+    fold: FoldDefinition,
+    base_config,
+    df,
+    progress_cb=None,
+    stop_flag_fn=None,
+    fold_seed: Optional[int] = None,
+) -> FoldResult:
+    """Orchestration complète d'UN fold (ADR 0021 Décisions 6/7) : TRAIN-only ->
+    sélection Top-1 -> EXACTEMENT une exécution TEST. Isolation TEST structurelle (Décision 7) :
+    garantie par ce séquencement lui-même — aucun code ci-dessous ne rappelle `run_fold_train()`
+    après `select_fold_top1()`, pas par un verrou objet (même dette assumée que
+    `ValidationRun`/`DatasetSplitPlan`, voir docstring de `validation_run.py`).
+
+    `fold_seed` est transmis À LA FOIS à `run_fold_train()` (seede réellement la recherche TRAIN
+    si `_run_stratified_sample()` est atteinte, ou déclenche `NonDeterministicSearchWithoutSeed`
+    si elle l'est sans seed — ADR 0021 Décisions 9/11) et à `select_fold_top1()` (métadonnée
+    `FoldSelection.fold_seed`)."""
+    all_results, _sensitivity = run_fold_train(
+        fold, base_config, df, progress_cb=progress_cb, stop_flag_fn=stop_flag_fn,
+        fold_seed=fold_seed,
+    )
+    selection = select_fold_top1(fold, all_results, base_config, fold_seed=fold_seed)
+    return run_fold_test(fold, selection, base_config, df)
