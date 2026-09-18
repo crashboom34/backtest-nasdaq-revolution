@@ -201,6 +201,29 @@ class ForbiddenGitCommandError(ValueError):
     ou `check_scope_files()` — jamais une commande interdite exécutée silencieusement."""
 
 
+class HumanGateResolutionRefused(ValueError):
+    """Levée par `AutopilotSupervisor.resolve_human_gate()` quand la résolution ne peut être
+    appliquée en toute sécurité (mission finalisation reprise 2026-09-18) — jamais une transition
+    forcée malgré un refus, jamais un contournement de `requires_clean_worktree`."""
+
+
+def _unattributable_paths(dirty_paths: List[str], allowed_paths) -> List[str]:
+    """Chemins "sales" qui ne relèvent PAS du scope déclaré d'une mission (`mission.allowed_paths`)
+    — utilisé par `resolve_human_gate()` pour distinguer le travail légitimement en cours de la
+    mission interrompue (attribuable) d'une contamination étrangère (jamais résolue à l'aveugle).
+    Une correspondance EXACTE ou un chemin sous un préfixe de répertoire déclaré (ex.
+    `.autopilot/canary/`) compte comme attribuable."""
+    allowed = [p.replace("\\", "/") for p in allowed_paths]
+
+    def _covered(path: str) -> bool:
+        normalized = path.replace("\\", "/")
+        return any(
+            normalized == a or normalized.startswith(a.rstrip("/") + "/") for a in allowed
+        )
+
+    return sorted(p for p in dirty_paths if not _covered(p))
+
+
 class FakeGitOps:
     """Doublure pour les tests/dry-run — n'exécute JAMAIS de commande Git réelle. Applique
     exactement les mêmes gardes `git_safety` qu'une implémentation réelle (`GitOps`) le ferait —
@@ -216,6 +239,10 @@ class FakeGitOps:
         self._commit_count = 0
         self._last_commit_message: Optional[str] = None
         self._last_commit_sha: Optional[str] = None
+        # Finalisation reprise (2026-09-18) : chemins "sales" simulés, pour tester la
+        # reconnaissance du travail attribuable à une mission (`resolve_human_gate()`) — vide par
+        # défaut, cohérent avec `is_worktree_clean()` retournant `True` par défaut.
+        self.simulated_dirty_paths: List[str] = []
 
     def add(self, paths: List[str]) -> None:
         reason = git_safety.check_git_command(["git", "add", "--", *paths])
@@ -254,8 +281,13 @@ class FakeGitOps:
 
     def is_worktree_clean(self) -> bool:
         # Doublure : aucune opération de fichier réelle n'a lieu en dehors de ce que l'Autopilot
-        # lui-même simule via `add()`/`commit()` — toujours "propre" du point de vue de ce factice.
-        return True
+        # lui-même simule via `add()`/`commit()` — "propre" ssi aucun chemin sale simulé.
+        return not self.simulated_dirty_paths
+
+    def dirty_paths(self) -> List[str]:
+        """Chemins actuellement "sales" — simulés pour les tests (`resolve_human_gate()`,
+        finalisation reprise 2026-09-18) ; jamais un accès disque réel dans cette doublure."""
+        return list(self.simulated_dirty_paths)
 
 
 DeveloperFn = Callable[..., dict]
@@ -774,6 +806,74 @@ class AutopilotSupervisor:
             target,
             stop_reason=f"BLOCKED_SAFETY résolu (cause {category!r} revérifiée) — reprise contrôlée.",
             blocked_reason_category=None, resume_to_phase=None,
+        )
+
+    # ── Résolution contrôlée de HUMAN_GATE_REQUIRED (finalisation reprise 2026-09-18) ────────
+
+    def resolve_human_gate(
+        self, resume_to: AutopilotState, operational_cause_resolved: str,
+    ) -> AutopilotState:
+        """Résolution EXPLICITE, tracée et testée d'un `HUMAN_GATE_REQUIRED` dont la cause
+        OPÉRATIONNELLE (jamais scientifique) est corrigée — jamais une simple réédition du
+        fichier d'état pour forcer une transition. Reprend DIRECTEMENT vers `resume_to` (validé
+        contre `ALLOWED_TRANSITIONS`) — jamais un redémarrage `PLANNING` qui perdrait la
+        progression réelle déjà accomplie. `pending_findings` scientifique n'est JAMAIS touché
+        ici : tout finding non résolu reste tel quel, transmis à la prochaine invocation réelle
+        du Developer/Reviewer selon la phase de reprise.
+
+        Refuse (lève `HumanGateResolutionRefused`, JAMAIS une transition partielle) si : la phase
+        courante n'est pas `HUMAN_GATE_REQUIRED` ; `resume_to` n'est pas une cible autorisée
+        depuis cet état ; la mission persistée est introuvable dans la file (jamais résolu à
+        l'aveugle sans pouvoir vérifier son scope déclaré) ; le worktree porte des modifications
+        NON ATTRIBUABLES au scope déclaré de cette mission (`mission.allowed_paths`) — dans ce
+        dernier cas, une contamination étrangère reste bloquée jusqu'à investigation humaine,
+        `requires_clean_worktree` n'est ni contourné ni désactivé globalement par cette méthode."""
+        current = self._current_phase()
+        if current != AutopilotState.HUMAN_GATE_REQUIRED:
+            raise HumanGateResolutionRefused(
+                f"résolution refusée : phase courante {current.value!r}, pas HUMAN_GATE_REQUIRED "
+                "— jamais appliquée hors de cet état."
+            )
+        if resume_to not in ALLOWED_TRANSITIONS.get(AutopilotState.HUMAN_GATE_REQUIRED, ()):
+            raise HumanGateResolutionRefused(
+                f"résolution refusée : cible {resume_to.value!r} non autorisée depuis "
+                "HUMAN_GATE_REQUIRED."
+            )
+        record = self._current_record()
+        mission = self._mission_by_id(record.mission_id) if record is not None else None
+        if mission is None:
+            raise HumanGateResolutionRefused(
+                f"résolution refusée : mission {(record.mission_id if record else None)!r} "
+                "introuvable dans la file — jamais résolu à l'aveugle sans pouvoir vérifier son "
+                "scope déclaré."
+            )
+        dirty = self._git_ops.dirty_paths()
+        unattributable = _unattributable_paths(dirty, mission.allowed_paths)
+        if unattributable:
+            raise HumanGateResolutionRefused(
+                f"résolution refusée : modification(s) non attribuables au scope déclaré de "
+                f"{mission.id} ({sorted(mission.allowed_paths)}) détectée(s) dans le worktree : "
+                f"{unattributable} — jamais résolu tant qu'elles ne sont pas identifiées "
+                "(étrangères ou hors scope) ; requires_clean_worktree n'est jamais désactivé."
+            )
+        return self._transition(
+            resume_to,
+            stop_reason=(
+                f"HUMAN_GATE_REQUIRED résolu — cause opérationnelle corrigée : "
+                f"{operational_cause_resolved}. Reprise vers {resume_to.value}, tout finding "
+                "scientifique non résolu préservé tel quel."
+            ),
+            blocked_reason_category=None,
+            # Finalisation reprise — bug réel confirmé par la revue indépendante de cette
+            # mission : sans ceci, `attempt_count`/`diagnostic_attempted` restaient à leur valeur
+            # DÉJÀ ÉPUISÉE d'avant la correction (ex. 5 tentatives, diagnostic déjà tenté) — un
+            # SEUL échec suivant sur la phase reprise, même transitoire et sans le moindre rapport
+            # avec la cause opérationnelle désormais corrigée, réescaladait IMMÉDIATEMENT vers
+            # HUMAN_GATE_REQUIRED sans la moindre retentative réelle. La phase reprise mérite un
+            # budget de tentatives authentiquement frais — jamais hérité de la séquence épuisée
+            # qui a précédé la correction (les findings scientifiques, eux, restent intouchés :
+            # `pending_findings` n'apparaît jamais dans ces `updates`).
+            attempt_count=0, diagnostic_attempted=False,
         )
 
     # ── Échecs / diagnostic / escalade (mission §7/§8/§13) ───────────────────────────────────

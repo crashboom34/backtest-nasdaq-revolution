@@ -928,3 +928,90 @@ def test_ensure_utf8_stdio_tolerates_a_stream_without_reconfigure():
 def test_main_rejects_an_unknown_command():
     with pytest.raises(SystemExit):
         main(["this-command-does-not-exist"])
+
+
+def test_cmd_resolve_human_gate_resumes_a_real_supervisor_past_an_operational_human_gate(tmp_path, monkeypatch):
+    """Finalisation reprise (2026-09-18) : `autopilot resolve-human-gate --resume-to REVIEWING
+    --note "..."` doit reprendre RÉELLEMENT (via `_build_real_supervisor()`, jamais une doublure)
+    un `HUMAN_GATE_REQUIRED` dont la cause opérationnelle est corrigée, en reconnaissant le
+    travail non commité (`git status --porcelain`) comme attribuable au scope déclaré de la
+    mission persistée — jamais en rééditant `current_state.json` à la main."""
+    import argparse
+
+    import scripts.autopilot.cli as cli_module
+    from scripts.autopilot.mission_queue import Mission, save_missions
+    from scripts.autopilot.state_machine import AutopilotState, AutopilotStateRecord, AutopilotStateStore
+
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(id="M1", title="x", status="PLANNED", prompt_file="m1.md", allowed_paths=("optimizer.py",)),
+    ])
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(cli_module, "STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "MISSIONS_PATH", missions_path)
+    monkeypatch.setattr(cli_module, "LOCK_PATH", tmp_path / "autopilot.lock")
+    monkeypatch.setattr(cli_module, "STOP_SIGNAL_PATH", tmp_path / "stop.signal")
+    monkeypatch.setattr(cli_module, "AUTOPILOT_DIR", tmp_path)
+    (tmp_path / "m1.md").write_text("prompt factice", encoding="utf-8")
+
+    store = AutopilotStateStore(state_path)
+    store.save(AutopilotStateRecord(phase=AutopilotState.HUMAN_GATE_REQUIRED.value, mission_id="M1"))
+
+    def fake_run(argv, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")
+        if argv == ["git", "status", "--porcelain"]:
+            return _fake_result(stdout=" M optimizer.py\n")  # attribuable au scope déclaré de M1
+        return _fake_result()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+
+    exit_code = cli_module.cmd_resolve_human_gate(
+        argparse.Namespace(resume_to="REVIEWING", note="prompt claude -p transmis par stdin")
+    )
+
+    assert exit_code == 0
+    reloaded = store.load()
+    assert reloaded.phase == AutopilotState.REVIEWING.value
+    assert not tmp_path.joinpath("autopilot.lock").exists()  # libéré après la résolution
+
+
+def test_cmd_resolve_human_gate_returns_nonzero_and_never_transitions_on_foreign_changes(tmp_path, monkeypatch):
+    """Symétrique : une modification hors scope ne doit jamais être résolue, même via la vraie
+    commande CLI — code de sortie non nul, état laissé strictement inchangé."""
+    import argparse
+
+    import scripts.autopilot.cli as cli_module
+    from scripts.autopilot.mission_queue import Mission, save_missions
+    from scripts.autopilot.state_machine import AutopilotState, AutopilotStateRecord, AutopilotStateStore
+
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(id="M1", title="x", status="PLANNED", prompt_file="m1.md", allowed_paths=("optimizer.py",)),
+    ])
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(cli_module, "STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "MISSIONS_PATH", missions_path)
+    monkeypatch.setattr(cli_module, "LOCK_PATH", tmp_path / "autopilot.lock")
+    monkeypatch.setattr(cli_module, "STOP_SIGNAL_PATH", tmp_path / "stop.signal")
+    monkeypatch.setattr(cli_module, "AUTOPILOT_DIR", tmp_path)
+    (tmp_path / "m1.md").write_text("prompt factice", encoding="utf-8")
+
+    store = AutopilotStateStore(state_path)
+    store.save(AutopilotStateRecord(phase=AutopilotState.HUMAN_GATE_REQUIRED.value, mission_id="M1"))
+
+    def fake_run(argv, **kwargs):
+        if argv == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return _fake_result(stdout="master\n")
+        if argv == ["git", "status", "--porcelain"]:
+            return _fake_result(stdout=" M optimizer.py\n M AGENTS.md\n")  # AGENTS.md hors scope
+        return _fake_result()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+
+    exit_code = cli_module.cmd_resolve_human_gate(
+        argparse.Namespace(resume_to="REVIEWING", note="peu importe")
+    )
+
+    assert exit_code == 1
+    assert store.load().phase == AutopilotState.HUMAN_GATE_REQUIRED.value

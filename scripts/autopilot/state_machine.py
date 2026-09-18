@@ -112,7 +112,16 @@ ALLOWED_TRANSITIONS: dict = {
         AutopilotState.CORRECTING, AutopilotState.PLANNING, AutopilotState.PUSHING,
         AutopilotState.STOPPED,
     ),
-    AutopilotState.HUMAN_GATE_REQUIRED: (AutopilotState.STOPPED, AutopilotState.PLANNING),
+    # Finalisation reprise (2026-09-18) : `resolve_human_gate()` (supervisor.py) peut reprendre
+    # directement vers la phase où l'escalade a eu lieu — jamais un simple redémarrage PLANNING
+    # qui perdrait la progression réelle déjà accomplie (ex. une correction scientifique déjà
+    # appliquée et testée avant qu'un bug purement OPÉRATIONNEL, désormais corrigé, n'ait fait
+    # échouer la review qui devait la valider). Une résolution EXPLICITE, tracée, testée — jamais
+    # une simple réédition du JSON d'état pour forcer la transition.
+    AutopilotState.HUMAN_GATE_REQUIRED: (
+        AutopilotState.STOPPED, AutopilotState.PLANNING, AutopilotState.DEVELOPING,
+        AutopilotState.TESTING, AutopilotState.REVIEWING, AutopilotState.CORRECTING,
+    ),
     # Finalisation V1.1 (§2.E) : reprise CONTRÔLÉE — `_handle_blocked_safety()` ne transitionne
     # vers l'une de ces cibles QUE si la cause précise catégorisée (`blocked_reason_category`) a
     # été revérifiée comme réellement résolue (ex. worktree redevenu propre, espace disque

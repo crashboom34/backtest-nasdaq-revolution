@@ -251,6 +251,28 @@ class RealGitOps:
             return False  # incapable de vérifier -> prudence, jamais supposer "propre"
         return status.strip() == ""
 
+    def dirty_paths(self) -> List[str]:
+        """Chemins RÉELLEMENT modifiés/non suivis (`git status --porcelain`) — finalisation
+        reprise (2026-09-18), utilisé par `resolve_human_gate()` pour distinguer le travail
+        attribuable au scope déclaré d'une mission interrompue d'une contamination étrangère.
+        Un renommage ("R  old -> new") ne retient que le chemin NEW (celui qui porte le contenu
+        final). Prudence si le statut est illisible : renvoie un marqueur qui ne pourra jamais
+        être couvert par un scope déclaré, jamais une liste vide qui laisserait croire à tort à un
+        worktree propre."""
+        try:
+            status = self._run(["git", "status", "--porcelain"])
+        except RuntimeError:
+            return ["<statut Git illisible>"]
+        paths: List[str] = []
+        for line in status.splitlines():
+            if not line.strip():
+                continue
+            path_part = line[3:]
+            if " -> " in path_part:
+                path_part = path_part.split(" -> ", 1)[1]
+            paths.append(path_part.strip().strip('"'))
+        return paths
+
     def commit(self, message: str) -> str:
         # `check_scope_files()` en `add()` ne valide que les chemins PASSÉS à cet appel — pas
         # l'index Git réel au moment du commit, qui peut déjà porter un contenu étranger/protégé
@@ -529,6 +551,28 @@ def cmd_stop(_args: argparse.Namespace) -> int:
     store = AutopilotStateStore(STATE_PATH)
     if store.load() is not None:
         store.update(stop_reason="arrêt demandé par l'utilisateur (autopilot stop)")
+    return 0
+
+
+def cmd_resolve_human_gate(args: argparse.Namespace) -> int:
+    """Résolution EXPLICITE, tracée d'un `HUMAN_GATE_REQUIRED` dont la cause OPÉRATIONNELLE
+    (jamais scientifique) est corrigée (finalisation reprise, 2026-09-18) — jamais une simple
+    réédition du fichier d'état pour forcer une transition. Acquiert le verrou le temps de la
+    résolution (jamais concurrente à une vraie boucle), le libère ensuite — `autopilot start`/
+    `resume` restent responsables de relancer la boucle réelle après cette résolution."""
+    supervisor = _build_real_supervisor()
+    if not supervisor.acquire_lock():
+        print("Autopilot : impossible de résoudre — une instance semble déjà en cours (verrou présent).")
+        return 1
+    try:
+        resume_to = AutopilotState(args.resume_to)
+        new_state = supervisor.resolve_human_gate(resume_to, args.note)
+    except ValueError as exc:  # AutopilotState invalide OU HumanGateResolutionRefused (sous-classe)
+        print(f"Autopilot : résolution refusée — {exc}")
+        return 1
+    finally:
+        supervisor.release_lock()
+    print(f"Autopilot : HUMAN_GATE_REQUIRED résolu, phase reprise : {new_state.value}.")
     return 0
 
 
@@ -913,9 +957,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     subparsers.add_parser("status")
     subparsers.add_parser("stop")
 
+    resolve_gate = subparsers.add_parser("resolve-human-gate")
+    resolve_gate.add_argument(
+        "--resume-to", type=str, required=True, dest="resume_to",
+        help=(
+            "Phase de reprise EXPLICITE (ex. REVIEWING, CORRECTING, TESTING, DEVELOPING) — "
+            "validée contre ALLOWED_TRANSITIONS[HUMAN_GATE_REQUIRED], jamais un redémarrage "
+            "PLANNING implicite qui perdrait la progression déjà accomplie."
+        ),
+    )
+    resolve_gate.add_argument(
+        "--note", type=str, required=True, dest="note",
+        help="Description de la cause OPÉRATIONNELLE corrigée (traçabilité, jamais une décision scientifique).",
+    )
+
     args = parser.parse_args(argv)
     handlers = {
         "start": cmd_start, "status": cmd_status, "stop": cmd_stop, "resume": cmd_resume,
+        "resolve-human-gate": cmd_resolve_human_gate,
     }
     return handlers[args.command](args)
 

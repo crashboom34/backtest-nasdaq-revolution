@@ -26,7 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.autopilot.mission_queue import Mission, save_missions
 from scripts.autopilot.quota_detector import FailureCategory
 from scripts.autopilot.state_machine import AutopilotState, AutopilotStateRecord, AutopilotStateStore
-from scripts.autopilot.supervisor import AutopilotSupervisor, FakeGitOps, SingleInstanceLock, StopSignal
+from scripts.autopilot.supervisor import (
+    AutopilotSupervisor, FakeGitOps, HumanGateResolutionRefused, SingleInstanceLock, StopSignal,
+)
 
 
 def _one_mission_queue(tmp_path):
@@ -1342,3 +1344,209 @@ def test_forbidden_git_command_never_reaches_the_real_runner(tmp_path):
         git_ops.push(force=True)
     assert git_ops.forced_push_attempted is True
     assert git_ops.pushed is False
+
+
+def _human_gate_setup(tmp_path, allowed_paths=("optimizer.py", "walk_forward.py"), pending_findings=()):
+    """Construit un superviseur déjà à HUMAN_GATE_REQUIRED pour une mission M1 dont le scope
+    déclaré est `allowed_paths` — mirroring le scénario réel (AF-V-02 Slice 2 escaladé par des
+    échecs RÉPÉTÉS de reviewer_fn, purement opérationnels, jamais scientifiques)."""
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(
+            id="M1", title="Mission scientifique", status="PLANNED", prompt_file="m1.md",
+            allowed_paths=allowed_paths,
+        ),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    state_store.save(AutopilotStateRecord(
+        phase=AutopilotState.HUMAN_GATE_REQUIRED.value, mission_id="M1",
+        pending_findings=tuple(pending_findings),
+        stop_reason="échec répété (opérationnel) — plafond max_attempts atteint",
+    ))
+    return supervisor, git_ops, state_store
+
+
+def test_resolve_human_gate_resumes_to_the_specified_phase_when_worktree_matches_mission_scope(tmp_path):
+    """Finalisation reprise (2026-09-18) : une résolution EXPLICITE d'un Human Gate dont la cause
+    est purement OPÉRATIONNELLE (jamais scientifique) doit reprendre DIRECTEMENT vers la phase où
+    l'escalade a eu lieu (ex. REVIEWING) — jamais un redémarrage PLANNING qui perdrait la
+    progression déjà accomplie — et jamais bloquée par un worktree "sale" qui correspond
+    exactement au scope déclaré de LA MÊME mission (travail attribuable, pas une contamination)."""
+    supervisor, git_ops, state_store = _human_gate_setup(tmp_path)
+    git_ops.simulated_dirty_paths = ["optimizer.py", "walk_forward.py"]  # == scope déclaré de M1
+
+    final_state = supervisor.resolve_human_gate(
+        AutopilotState.REVIEWING, "prompt claude -p transmis par stdin, plus de crash argv Windows",
+    )
+
+    assert final_state == AutopilotState.REVIEWING
+    record = state_store.load()
+    assert record.phase == AutopilotState.REVIEWING.value
+    assert "cause opérationnelle corrigée" in record.stop_reason
+    assert record.blocked_reason_category is None
+
+
+def test_resolve_human_gate_preserves_pending_scientific_findings_untouched(tmp_path):
+    """Les findings scientifiques NON RÉSOLUS ne doivent jamais être perdus par la résolution
+    d'une cause purement opérationnelle — transmis tels quels à la prochaine invocation réelle."""
+    supervisor, git_ops, state_store = _human_gate_setup(
+        tmp_path, pending_findings=("corriger le calcul de expectancy",),
+    )
+    git_ops.simulated_dirty_paths = ["optimizer.py"]
+
+    supervisor.resolve_human_gate(AutopilotState.CORRECTING, "bug opérationnel corrigé")
+
+    record = state_store.load()
+    assert list(record.pending_findings) == ["corriger le calcul de expectancy"]
+
+
+def test_resolve_human_gate_refuses_when_not_currently_at_human_gate(tmp_path):
+    supervisor, git_ops, state_store = _human_gate_setup(tmp_path)
+    state_store.save(AutopilotStateRecord(phase=AutopilotState.DEVELOPING.value, mission_id="M1"))
+
+    with pytest.raises(HumanGateResolutionRefused):
+        supervisor.resolve_human_gate(AutopilotState.REVIEWING, "peu importe")
+
+    assert state_store.load().phase == AutopilotState.DEVELOPING.value  # jamais modifié
+
+
+def test_resolve_human_gate_refuses_an_illegal_resume_target(tmp_path):
+    """`COMPLETED` n'est jamais une cible légale depuis HUMAN_GATE_REQUIRED — jamais une
+    résolution qui ferait croire qu'une mission a terminé sans être réellement passée par
+    COMMITTING/PUSHING."""
+    supervisor, git_ops, state_store = _human_gate_setup(tmp_path)
+    git_ops.simulated_dirty_paths = ["optimizer.py"]
+
+    with pytest.raises(HumanGateResolutionRefused):
+        supervisor.resolve_human_gate(AutopilotState.COMPLETED, "peu importe")
+
+    assert state_store.load().phase == AutopilotState.HUMAN_GATE_REQUIRED.value
+
+
+def test_resolve_human_gate_refuses_when_mission_no_longer_in_the_queue(tmp_path):
+    """La mission a disparu/été renommée dans missions.json entre l'escalade et la tentative de
+    résolution — jamais résolu à l'aveugle sans pouvoir revérifier son scope déclaré."""
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [])  # M1 n'existe plus
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    git_ops.simulated_dirty_paths = ["optimizer.py"]
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    state_store.save(AutopilotStateRecord(phase=AutopilotState.HUMAN_GATE_REQUIRED.value, mission_id="M1"))
+
+    with pytest.raises(HumanGateResolutionRefused):
+        supervisor.resolve_human_gate(AutopilotState.REVIEWING, "peu importe")
+
+    assert state_store.load().phase == AutopilotState.HUMAN_GATE_REQUIRED.value
+
+
+def test_resolve_human_gate_refuses_when_the_worktree_has_foreign_unattributable_changes(tmp_path):
+    """Régression — exigence explicite de la mission finalisation reprise : "bloque uniquement
+    les modifications étrangères ou non attribuables". Un fichier hors du scope déclaré de la
+    mission (ex. un autre fichier scientifique, ou pire un fichier protégé) ne doit JAMAIS être
+    silencieusement toléré au prétexte qu'une résolution de Human Gate est en cours —
+    `requires_clean_worktree` n'est jamais contourné."""
+    supervisor, git_ops, state_store = _human_gate_setup(
+        tmp_path, allowed_paths=("optimizer.py", "walk_forward.py"),
+    )
+    git_ops.simulated_dirty_paths = ["optimizer.py", "un_fichier_etranger_non_lie.py"]
+
+    with pytest.raises(HumanGateResolutionRefused) as exc_info:
+        supervisor.resolve_human_gate(AutopilotState.REVIEWING, "peu importe")
+
+    assert "un_fichier_etranger_non_lie.py" in str(exc_info.value)
+    assert state_store.load().phase == AutopilotState.HUMAN_GATE_REQUIRED.value  # jamais résolu
+
+
+def test_resolve_human_gate_never_touches_requires_clean_worktree_globally(tmp_path):
+    """La résolution ne doit jamais désactiver `requires_clean_worktree` pour la mission
+    elle-même ni pour aucune autre — vérifié en confirmant que le champ déclaré sur la Mission
+    reste `True` après une résolution réussie (aucun mécanisme de cette méthode ne le modifie,
+    jamais un flag global muté)."""
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(
+            id="M1", title="x", status="PLANNED", prompt_file="m1.md",
+            allowed_paths=("optimizer.py",), requires_clean_worktree=True,
+        ),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    git_ops.simulated_dirty_paths = ["optimizer.py"]
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    state_store.save(AutopilotStateRecord(phase=AutopilotState.HUMAN_GATE_REQUIRED.value, mission_id="M1"))
+
+    supervisor.resolve_human_gate(AutopilotState.REVIEWING, "peu importe")
+
+    from scripts.autopilot.mission_queue import load_missions
+    reloaded = load_missions(missions_path)
+    assert reloaded[0].requires_clean_worktree is True
+
+
+def test_resolve_human_gate_resets_the_retry_budget_for_the_resumed_phase(tmp_path):
+    """Régression — bug réel confirmé par la revue indépendante de cette mission : sans
+    réinitialiser `attempt_count`/`diagnostic_attempted`, un Human Gate atteint après épuisement
+    de `max_attempts` (ex. 5 tentatives, diagnostic déjà tenté) laissait le compteur DÉJÀ épuisé
+    après résolution — un SEUL échec suivant, même transitoire et sans rapport avec la cause
+    opérationnelle corrigée, réescaladait IMMÉDIATEMENT vers HUMAN_GATE_REQUIRED sans la moindre
+    retentative réelle. La résolution doit donner à la phase reprise un budget de tentatives
+    RÉELLEMENT frais, jamais hérité de la séquence épuisée qui a précédé la correction."""
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(
+            id="M1", title="x", status="PLANNED", prompt_file="m1.md",
+            allowed_paths=("optimizer.py",), max_attempts=3,
+        ),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    git_ops.simulated_dirty_paths = ["optimizer.py"]
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+
+    review_calls = {"count": 0}
+
+    def flaky_once_reviewer(mission):
+        review_calls["count"] += 1
+        if review_calls["count"] == 1:
+            # Échec transitoire, SANS RAPPORT avec la cause opérationnelle déjà corrigée.
+            return {"success": False, "raw_output": "InternalToolError: échec isolé sans rapport"}
+        return {"success": True, "blocking_findings": [], "summary": "clean", "reviewed_files": ["optimizer.py"]}
+
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=flaky_once_reviewer, git_ops=git_ops, lock=lock,
+        branch="master",
+    )
+    # Simule l'état réel observé : 5 tentatives déjà épuisées, diagnostic déjà tenté, avant que la
+    # cause opérationnelle (désormais corrigée) n'ait fait escalader vers HUMAN_GATE_REQUIRED.
+    state_store.save(AutopilotStateRecord(
+        phase=AutopilotState.HUMAN_GATE_REQUIRED.value, mission_id="M1",
+        attempt_count=5, diagnostic_attempted=True,
+        stop_reason="échec répété (opérationnel) — plafond max_attempts atteint",
+    ))
+
+    resumed = supervisor.resolve_human_gate(AutopilotState.REVIEWING, "bug opérationnel corrigé")
+    assert resumed == AutopilotState.REVIEWING
+    record = state_store.load()
+    assert record.attempt_count == 0
+    assert record.diagnostic_attempted is False
+
+    # Un run_one_step() sur REVIEWING invoque flaky_once_reviewer() : échec transitoire sur cette
+    # PREMIÈRE tentative post-résolution — ne doit JAMAIS réescalader immédiatement.
+    final_state = supervisor.run_one_step()
+    assert final_state != AutopilotState.HUMAN_GATE_REQUIRED
+    assert review_calls["count"] == 1
