@@ -1566,6 +1566,125 @@ def test_resolve_human_gate_resets_the_retry_budget_for_the_resumed_phase(tmp_pa
     assert review_calls["count"] == 1
 
 
+def test_resolve_human_gate_also_resolves_a_blocked_safety_dirty_worktree_against_the_same_missions_own_scope(tmp_path):
+    """Régression réelle (poursuite AlphaForge, 2026-09-20) — scénario reproduit en production :
+    une résolution `unreviewed_files` d'un `BLOCKED_SAFETY` persisté par du code ANTÉRIEUR (sans
+    `resume_to_phase` fiable) retombe sur le repli `PLANNING`, qui ré-sélectionne la mission
+    DÉJÀ en cours et se re-bloque en `BLOCKED_SAFETY`/`dirty_worktree` contre son PROPRE travail
+    légitime (déjà testé, déjà revu) — `_handle_planning()` n'a qu'un contrôle global
+    `is_worktree_clean()`, jamais attribué à une mission. `resolve_human_gate()`, déjà prouvé sûr
+    pour HUMAN_GATE_REQUIRED, doit pouvoir résoudre ce cas EXACTEMENT de la même façon (même
+    garde d'attribution), sans redémarrer la mission depuis DEVELOPING et sans jamais contourner
+    `requires_clean_worktree` pour une contamination réellement étrangère."""
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(
+            id="AF-V-02-SLICE-4", title="x", status="PLANNED", prompt_file="m1.md",
+            allowed_paths=("walk_forward.py", "tests/test_walk_forward.py"),
+            requires_clean_worktree=True,
+        ),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    git_ops.simulated_dirty_paths = ["walk_forward.py", "tests/test_walk_forward.py"]
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    # État réel observé : BLOCKED_SAFETY/dirty_worktree/resume_to_phase=PLANNING, preuves de
+    # TESTING/REVIEWING déjà réelles et non perdues (jamais réinitialisées par cette résolution).
+    state_store.save(AutopilotStateRecord(
+        phase=AutopilotState.BLOCKED_SAFETY.value, mission_id="AF-V-02-SLICE-4",
+        blocked_reason_category="dirty_worktree", resume_to_phase=AutopilotState.PLANNING.value,
+        review_status="5 finding(s) sur 2 lot(s), 2 fichier(s) couverts",
+        tests_status="1325 passed",
+        reviewed_files=("tests/test_walk_forward.py", "walk_forward.py"),
+        artifacts=("tests/test_walk_forward.py", "walk_forward.py"),
+    ))
+
+    final_state = supervisor.resolve_human_gate(
+        AutopilotState.PRE_COMMIT_CHECK,
+        "dirty_worktree ré-attribué au travail déjà testé/revu de AF-V-02-SLICE-4 lui-même, "
+        "jamais une contamination étrangère",
+    )
+
+    assert final_state == AutopilotState.PRE_COMMIT_CHECK
+    record = state_store.load()
+    assert record.phase == AutopilotState.PRE_COMMIT_CHECK.value
+    assert record.blocked_reason_category is None
+    # Preuves déjà réelles jamais perdues — pas un redémarrage DEVELOPING à vide.
+    assert record.tests_status == "1325 passed"
+    assert list(record.reviewed_files) == ["tests/test_walk_forward.py", "walk_forward.py"]
+
+
+def test_resolve_human_gate_still_refuses_a_blocked_safety_with_foreign_unattributable_changes(tmp_path):
+    """Même en élargissant `resolve_human_gate()` à `BLOCKED_SAFETY`, une contamination
+    réellement étrangère au scope déclaré de la mission reste bloquée — jamais un contournement
+    global de `requires_clean_worktree`."""
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(
+            id="M1", title="x", status="PLANNED", prompt_file="m1.md",
+            allowed_paths=("walk_forward.py",), requires_clean_worktree=True,
+        ),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    git_ops.simulated_dirty_paths = ["walk_forward.py", "un_fichier_etranger_non_lie.py"]
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    state_store.save(AutopilotStateRecord(
+        phase=AutopilotState.BLOCKED_SAFETY.value, mission_id="M1",
+        blocked_reason_category="dirty_worktree", resume_to_phase=AutopilotState.PLANNING.value,
+    ))
+
+    with pytest.raises(HumanGateResolutionRefused) as exc_info:
+        supervisor.resolve_human_gate(AutopilotState.PRE_COMMIT_CHECK, "peu importe")
+
+    assert "un_fichier_etranger_non_lie.py" in str(exc_info.value)
+    assert state_store.load().phase == AutopilotState.BLOCKED_SAFETY.value  # jamais résolu
+
+
+@pytest.mark.parametrize("dangerous_target", [AutopilotState.COMMITTING, AutopilotState.PUSHING, AutopilotState.READY])
+def test_resolve_human_gate_refuses_to_jump_a_blocked_safety_straight_to_committing_pushing_or_ready(tmp_path, dangerous_target):
+    """BLOCKER trouvé par la revue indépendante (poursuite AlphaForge, 2026-09-20) —
+    `ALLOWED_TRANSITIONS[BLOCKED_SAFETY]` inclut `COMMITTING`/`PUSHING`/`READY`, mais ces cibles
+    ne sont sûres, dans la boucle normale, qu'APRÈS que `_handle_blocked_safety()` a revérifié la
+    cause précise catégorisée (ex. `unreviewed_files` exige `dirty ⊆ record.reviewed_files`,
+    jamais recontrôlé par `_handle_committing()` lui-même). `resolve_human_gate()` ne fait
+    qu'une vérification d'ATTRIBUTION (scope de la mission), jamais la vérification catégorielle
+    complète — l'accepter à l'identique aurait permis de committer/pousser du code jamais
+    confirmé revu. Doit toujours refuser, quel que soit le scope attribuable."""
+    missions_path = tmp_path / "missions.json"
+    save_missions(missions_path, [
+        Mission(
+            id="M1", title="x", status="PLANNED", prompt_file="m1.md",
+            allowed_paths=("walk_forward.py",), requires_clean_worktree=True,
+        ),
+    ])
+    state_store = AutopilotStateStore(tmp_path / "state.json")
+    git_ops = FakeGitOps()
+    git_ops.simulated_dirty_paths = ["walk_forward.py"]  # entièrement attribuable
+    lock = SingleInstanceLock(tmp_path / "autopilot.lock")
+    supervisor = AutopilotSupervisor(
+        state_store=state_store, missions_path=missions_path, developer_fn=_ok_developer,
+        tester_fn=_ok_tester, reviewer_fn=_ok_reviewer, git_ops=git_ops, lock=lock, branch="master",
+    )
+    state_store.save(AutopilotStateRecord(
+        phase=AutopilotState.BLOCKED_SAFETY.value, mission_id="M1",
+        blocked_reason_category="unreviewed_files", resume_to_phase=AutopilotState.PLANNING.value,
+    ))
+
+    with pytest.raises(HumanGateResolutionRefused):
+        supervisor.resolve_human_gate(dangerous_target, "peu importe")
+
+    assert state_store.load().phase == AutopilotState.BLOCKED_SAFETY.value  # jamais résolu
+
+
 def test_a_ready_authorized_next_mission_chains_automatically_without_stopping(tmp_path):
     """Vérification (mission « poursuite AlphaForge », point 5) — pas une correction : le
     superviseur ne doit JAMAIS s'arrêter entre deux missions quand la suivante est `PLANNED` et sa

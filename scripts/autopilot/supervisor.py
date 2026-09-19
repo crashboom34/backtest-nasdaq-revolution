@@ -207,6 +207,25 @@ class HumanGateResolutionRefused(ValueError):
     forcée malgré un refus, jamais un contournement de `requires_clean_worktree`."""
 
 
+# Poursuite AlphaForge (2026-09-20) : revue indépendante — BLOCKER confirmé et corrigé. Élargir
+# `resolve_human_gate()` à `BLOCKED_SAFETY` ne doit JAMAIS hériter tel quel de
+# `ALLOWED_TRANSITIONS[BLOCKED_SAFETY]`, qui inclut `COMMITTING`/`PUSHING`/`READY` — des cibles
+# atteignables depuis `BLOCKED_SAFETY` par la boucle normale UNIQUEMENT après que
+# `_handle_blocked_safety()` a revérifié la cause précise (ex. `unreviewed_files` exige
+# `dirty ⊆ record.reviewed_files`, jamais recontrôlé par `_handle_committing()` lui-même — la
+# garde de couverture de revue vit exclusivement dans `_handle_pre_commit_check()`). L'unique
+# vérification faite ici est l'attribution au scope déclaré de la mission (`allowed_paths`),
+# jamais la vérification catégorielle complète d'une cause `BLOCKED_SAFETY` — insuffisant pour
+# garantir qu'un commit/push resterait sûr. Cible restreinte à un sous-ensemble PROUVÉ sûr :
+# strictement le même que `HUMAN_GATE_REQUIRED`, plus `PRE_COMMIT_CHECK` qui revérifie
+# intégralement la couverture de revue avant de committer quoi que ce soit.
+_BLOCKED_SAFETY_RESOLVABLE_TARGETS = (
+    AutopilotState.STOPPED, AutopilotState.PLANNING, AutopilotState.DEVELOPING,
+    AutopilotState.TESTING, AutopilotState.REVIEWING, AutopilotState.CORRECTING,
+    AutopilotState.PRE_COMMIT_CHECK,
+)
+
+
 def _unattributable_paths(dirty_paths: List[str], allowed_paths) -> List[str]:
     """Chemins "sales" qui ne relèvent PAS du scope déclaré d'une mission (`mission.allowed_paths`)
     — utilisé par `resolve_human_gate()` pour distinguer le travail légitimement en cours de la
@@ -876,31 +895,52 @@ class AutopilotSupervisor:
     def resolve_human_gate(
         self, resume_to: AutopilotState, operational_cause_resolved: str,
     ) -> AutopilotState:
-        """Résolution EXPLICITE, tracée et testée d'un `HUMAN_GATE_REQUIRED` dont la cause
-        OPÉRATIONNELLE (jamais scientifique) est corrigée — jamais une simple réédition du
-        fichier d'état pour forcer une transition. Reprend DIRECTEMENT vers `resume_to` (validé
-        contre `ALLOWED_TRANSITIONS`) — jamais un redémarrage `PLANNING` qui perdrait la
-        progression réelle déjà accomplie. `pending_findings` scientifique n'est JAMAIS touché
-        ici : tout finding non résolu reste tel quel, transmis à la prochaine invocation réelle
-        du Developer/Reviewer selon la phase de reprise.
+        """Résolution EXPLICITE, tracée et testée d'un `HUMAN_GATE_REQUIRED` OU d'un
+        `BLOCKED_SAFETY` (catégorie `dirty_worktree` typiquement) dont la cause OPÉRATIONNELLE
+        (jamais scientifique) est corrigée — jamais une simple réédition du fichier d'état pour
+        forcer une transition. Reprend DIRECTEMENT vers `resume_to` (validé contre
+        `ALLOWED_TRANSITIONS` depuis la phase courante réelle) — jamais un redémarrage `PLANNING`
+        qui perdrait la progression réelle déjà accomplie. `pending_findings` scientifique n'est
+        JAMAIS touché ici : tout finding non résolu reste tel quel, transmis à la prochaine
+        invocation réelle du Developer/Reviewer selon la phase de reprise.
+
+        Élargi à `BLOCKED_SAFETY` (poursuite AlphaForge, 2026-09-20) : bug réel confirmé en
+        conditions réelles — un `BLOCKED_SAFETY`/`dirty_worktree` peut être atteint via la
+        reprise `PLANNING` de `_handle_blocked_safety()` (résolution `unreviewed_files` d'une
+        donnée persistée par du code antérieur, sans `resume_to_phase` fiable) alors que le
+        worktree "sale" est en réalité le travail LÉGITIME, déjà testé et déjà revu, de LA MÊME
+        mission déjà en cours — `_handle_planning()` ne le sait pas car son propre contrôle
+        `is_worktree_clean()` est global, jamais attribué à une mission. Même garde
+        d'attribution que pour `HUMAN_GATE_REQUIRED`, jamais un contournement supplémentaire de
+        `requires_clean_worktree`.
 
         Refuse (lève `HumanGateResolutionRefused`, JAMAIS une transition partielle) si : la phase
-        courante n'est pas `HUMAN_GATE_REQUIRED` ; `resume_to` n'est pas une cible autorisée
-        depuis cet état ; la mission persistée est introuvable dans la file (jamais résolu à
-        l'aveugle sans pouvoir vérifier son scope déclaré) ; le worktree porte des modifications
-        NON ATTRIBUABLES au scope déclaré de cette mission (`mission.allowed_paths`) — dans ce
-        dernier cas, une contamination étrangère reste bloquée jusqu'à investigation humaine,
-        `requires_clean_worktree` n'est ni contourné ni désactivé globalement par cette méthode."""
+        courante n'est ni `HUMAN_GATE_REQUIRED` ni `BLOCKED_SAFETY` ; `resume_to` n'est pas une
+        cible autorisée depuis cette phase courante — pour `BLOCKED_SAFETY`, restreinte à
+        `_BLOCKED_SAFETY_RESOLVABLE_TARGETS` (jamais `COMMITTING`/`PUSHING`/`READY` : ces cibles
+        ne sont sûres, dans la boucle normale, qu'APRÈS que `_handle_blocked_safety()` a revérifié
+        la cause précise catégorisée — cette méthode ne fait qu'une vérification d'attribution,
+        jamais la vérification catégorielle complète) ; la mission persistée est introuvable dans
+        la file (jamais résolu à l'aveugle sans pouvoir vérifier son scope déclaré) ; le worktree
+        porte des modifications NON ATTRIBUABLES au scope déclaré de cette mission
+        (`mission.allowed_paths`) — dans ce dernier cas, une contamination étrangère reste
+        bloquée jusqu'à investigation humaine, `requires_clean_worktree` n'est ni contourné ni
+        désactivé globalement par cette méthode."""
         current = self._current_phase()
-        if current != AutopilotState.HUMAN_GATE_REQUIRED:
+        resolvable_phases = (AutopilotState.HUMAN_GATE_REQUIRED, AutopilotState.BLOCKED_SAFETY)
+        if current not in resolvable_phases:
             raise HumanGateResolutionRefused(
-                f"résolution refusée : phase courante {current.value!r}, pas HUMAN_GATE_REQUIRED "
-                "— jamais appliquée hors de cet état."
+                f"résolution refusée : phase courante {current.value!r}, ni HUMAN_GATE_REQUIRED "
+                "ni BLOCKED_SAFETY — jamais appliquée hors de ces états."
             )
-        if resume_to not in ALLOWED_TRANSITIONS.get(AutopilotState.HUMAN_GATE_REQUIRED, ()):
+        legal_targets = (
+            _BLOCKED_SAFETY_RESOLVABLE_TARGETS if current == AutopilotState.BLOCKED_SAFETY
+            else ALLOWED_TRANSITIONS.get(current, ())
+        )
+        if resume_to not in legal_targets:
             raise HumanGateResolutionRefused(
                 f"résolution refusée : cible {resume_to.value!r} non autorisée depuis "
-                "HUMAN_GATE_REQUIRED."
+                f"{current.value}."
             )
         record = self._current_record()
         mission = self._mission_by_id(record.mission_id) if record is not None else None
@@ -922,7 +962,7 @@ class AutopilotSupervisor:
         return self._transition(
             resume_to,
             stop_reason=(
-                f"HUMAN_GATE_REQUIRED résolu — cause opérationnelle corrigée : "
+                f"{current.value} résolu — cause opérationnelle corrigée : "
                 f"{operational_cause_resolved}. Reprise vers {resume_to.value}, tout finding "
                 "scientifique non résolu préservé tel quel."
             ),
