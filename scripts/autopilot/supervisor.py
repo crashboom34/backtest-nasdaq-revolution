@@ -676,7 +676,14 @@ class AutopilotSupervisor:
                         "revus absente ou vide ne doit jamais permettre un commit/push "
                         "(finalisation sécurité point 4.4)."
                     ),
+                    # Finalisation « poursuite AlphaForge » (2026-09-20) : bug réel confirmé — sans
+                    # `resume_to_phase` ici, `_handle_blocked_safety()` retombait sur son repli
+                    # PLANNING, qui redémarre la SÉLECTION de mission — dangereux pour une mission
+                    # `requires_clean_worktree=True` déjà en cours (rebloque immédiatement sur
+                    # `dirty_worktree` contre son PROPRE travail légitime). Reprendre vers
+                    # PRE_COMMIT_CHECK lui-même, jamais un redémarrage.
                     blocked_reason_category="unreviewed_files",
+                    resume_to_phase=AutopilotState.PRE_COMMIT_CHECK.value,
                 )
             unreviewed = sorted(set(record.artifacts) - set(record.reviewed_files))
             if unreviewed:
@@ -687,6 +694,7 @@ class AutopilotSupervisor:
                         f"indépendante : {unreviewed} (mission finalisation V1.1 §2.B)."
                     ),
                     blocked_reason_category="unreviewed_files",
+                    resume_to_phase=AutopilotState.PRE_COMMIT_CHECK.value,
                 )
         return self._transition(AutopilotState.COMMITTING, next_action="commit atomique")
 
@@ -823,10 +831,26 @@ class AutopilotSupervisor:
             return AutopilotState.BLOCKED_SAFETY
         category = record.blocked_reason_category
         resolved = False
+        refreshed_artifacts: Optional[tuple] = None
         if category == "dirty_worktree":
             resolved = self._git_ops.is_worktree_clean()
         elif category == "disk_space":
             resolved = git_safety.check_disk_space() is None
+        elif category == "unreviewed_files":
+            # Finalisation « poursuite AlphaForge » (2026-09-20) : bug réel confirmé —
+            # `record.artifacts` peut devenir STALE (référencer des fichiers qui ne sont plus
+            # réellement modifiés, ex. committés séparément entre-temps par un autre commit) sans
+            # qu'aucun nouveau DEVELOPING/CORRECTING n'ait tourné pour le rafraîchir. Revérifie
+            # contre le diff RÉEL actuel (`dirty_paths()`, jamais la vieille liste recyclée telle
+            # quelle) : résolu UNIQUEMENT si tout ce qui est RÉELLEMENT sur le point d'être
+            # committé est déjà couvert par la review — jamais une résolution qui tolérerait un
+            # fichier réellement non revu. Rafraîchit `artifacts` vers cette liste réelle pour que
+            # `_handle_pre_commit_check()` ne re-bloque pas immédiatement sur les mêmes entrées
+            # obsolètes.
+            real_dirty = set(self._git_ops.dirty_paths())
+            resolved = real_dirty <= set(record.reviewed_files)
+            if resolved:
+                refreshed_artifacts = tuple(sorted(real_dirty))
         if not resolved:
             return AutopilotState.BLOCKED_SAFETY  # cause toujours présente -> reste bloqué
         target: Optional[AutopilotState] = None
@@ -839,11 +863,13 @@ class AutopilotSupervisor:
                 target = None
         if target is None:
             target = AutopilotState.PLANNING
-        return self._transition(
-            target,
-            stop_reason=f"BLOCKED_SAFETY résolu (cause {category!r} revérifiée) — reprise contrôlée.",
-            blocked_reason_category=None, resume_to_phase=None,
-        )
+        updates = {
+            "stop_reason": f"BLOCKED_SAFETY résolu (cause {category!r} revérifiée) — reprise contrôlée.",
+            "blocked_reason_category": None, "resume_to_phase": None,
+        }
+        if refreshed_artifacts is not None:
+            updates["artifacts"] = refreshed_artifacts
+        return self._transition(target, **updates)
 
     # ── Résolution contrôlée de HUMAN_GATE_REQUIRED (finalisation reprise 2026-09-18) ────────
 

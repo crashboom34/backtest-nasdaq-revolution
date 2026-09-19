@@ -1721,3 +1721,47 @@ def test_blocked_safety_on_low_disk_space_during_testing_resolves_once_space_is_
     disk_state["low"] = False
     final_state = supervisor.run_until({AutopilotState.NEXT_MISSION})
     assert final_state == AutopilotState.NEXT_MISSION
+
+
+def test_stale_unreviewed_artifacts_resolve_once_the_extra_file_is_no_longer_really_dirty(tmp_path):
+    """Régression — bug réel confirmé en conditions réelles (mission « poursuite AlphaForge ») :
+    `record.artifacts` peut référencer un fichier capturé par un `git status` PASSÉ (ex. un fichier
+    édité manuellement en parallèle pendant que la mission était bloquée, puis committé séparément
+    entre-temps) sans qu'aucun nouveau DEVELOPING/CORRECTING n'ait tourné pour rafraîchir cette
+    liste. `_handle_pre_commit_check()` bloquait alors indéfiniment sur un fichier qui n'est PLUS
+    réellement modifié — jamais résolu automatiquement avant ce correctif (`unreviewed_files`
+    n'avait même pas de `resume_to_phase`, retombant dangereusement sur un redémarrage PLANNING).
+    Doit désormais se résoudre dès que le diff RÉEL actuel est entièrement couvert par la review,
+    en rafraîchissant `artifacts` vers cette liste réelle — jamais en tolérant un fichier
+    authentiquement non revu."""
+    supervisor, git_ops, state_store = _make_supervisor(tmp_path)
+    supervisor.acquire_lock()
+    state_store.save(AutopilotStateRecord(
+        phase=AutopilotState.BLOCKED_SAFETY.value, mission_id="M1", branch="master",
+        # "external_file.md" a été committé séparément entre-temps — plus réellement dirty.
+        artifacts=("dummy.py", "external_file.md"), reviewed_files=("dummy.py",),
+        blocked_reason_category="unreviewed_files", resume_to_phase=AutopilotState.PRE_COMMIT_CHECK.value,
+    ))
+    git_ops.simulated_dirty_paths = ["dummy.py"]  # external_file.md n'est plus dans le diff réel
+
+    final_state = supervisor.run_until({AutopilotState.NEXT_MISSION, AutopilotState.BLOCKED_SAFETY}, max_steps=20)
+
+    assert final_state == AutopilotState.NEXT_MISSION
+    assert git_ops.committed is True
+
+
+def test_unreviewed_artifacts_stay_blocked_while_a_genuinely_unreviewed_file_is_still_dirty(tmp_path):
+    """Symétrique : si le fichier non revu est ENCORE réellement modifié, jamais résolu
+    automatiquement — une vraie violation de scope reste bloquée indéfiniment sans intervention."""
+    supervisor, git_ops, state_store = _make_supervisor(tmp_path)
+    supervisor.acquire_lock()
+    state_store.save(AutopilotStateRecord(
+        phase=AutopilotState.BLOCKED_SAFETY.value, mission_id="M1", branch="master",
+        artifacts=("dummy.py", "sneaked_in.py"), reviewed_files=("dummy.py",),
+        blocked_reason_category="unreviewed_files", resume_to_phase=AutopilotState.PRE_COMMIT_CHECK.value,
+    ))
+    git_ops.simulated_dirty_paths = ["dummy.py", "sneaked_in.py"]  # toujours réellement dirty
+
+    for _ in range(5):
+        assert supervisor.run_one_step() == AutopilotState.BLOCKED_SAFETY
+    assert git_ops.committed is False
