@@ -216,6 +216,60 @@
         "écriture atomique (atomic_json_store.save_atomic()) pour chaque fichier JSON",
         "aucune reprise/skip de fold ni WalkForwardEvidence/verdict scientifique produit (hors scope, tranche suivante)"
       ]
+    },
+    {
+      "id": "AF-V-02-SLICE-5",
+      "title": "AF-V-02 Slice 5 — Reprise (resume) d'un run Walk-Forward interrompu (Décision 12, complément)",
+      "status": "PLANNED",
+      "prompt_file": "prompts/af-v02-slice-5.md",
+      "depends_on": [
+        "AF-V-02-SLICE-4"
+      ],
+      "allowed_paths": [
+        "walk_forward.py",
+        "tests/test_walk_forward.py"
+      ],
+      "forbidden_paths": [
+        "engine.py",
+        "optimizer.py",
+        "optimization_store.py",
+        "compute_split_dates",
+        "strategy_contracts.py",
+        "dataset_split.py",
+        "validation_run.py",
+        "strategies/",
+        "app.py",
+        "nasdaq_3m.csv",
+        "app_corrupted_backup.py",
+        "docs/adr/"
+      ],
+      "targeted_tests": [
+        "tests/test_walk_forward.py"
+      ],
+      "regression_tests": [],
+      "risk_level": "high",
+      "max_attempts": 3,
+      "max_budget_usd": 20.0,
+      "requires_clean_worktree": true,
+      "scientific_contracts": [
+        "ADR-0021-decision-12"
+      ],
+      "human_gate_conditions": [
+        "modification de FINAL_HOLDOUT",
+        "modification de la stratégie étalon Perfect Revolution V1",
+        "conflit scientifique non résoluble sur la décision SKIP/REPLAY_TEST/REDO par fold",
+        "besoin réel de modifier optimizer.py/optimization_store.py au-delà d'une réutilisation en lecture de leur mécanisme existant",
+        "extension du contrat déjà figé de FoldResult/FoldSelection/FoldDefinition/AggregateResult/WalkForwardRunOutcome/persist_walk_forward_run()/build_walk_forward_manifest() non strictement additive"
+      ],
+      "completion_evidence": [
+        "tests ciblés verts",
+        "suite complète verte (régression complète imposée par risk_level=high)",
+        "revue indépendante sans finding BLOQUANT/MAJEUR",
+        "un run interrompu repris saute réellement les folds complets (aucune ré-exécution), rejoue le TEST des folds à FoldSelection déjà figée, refait entièrement les folds absents/incomplets",
+        "un fingerprint divergent est explicitement refusé, jamais traité comme SKIP silencieux",
+        "agrégat recalculé intégralement depuis l'ensemble des folds (sautés + nouveaux), jamais partiel",
+        "aucun WalkForwardEvidence/verdict scientifique produit (hors scope, tranche suivante)"
+      ]
     }
   ]
 }

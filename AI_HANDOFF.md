@@ -1937,3 +1937,91 @@ complète revérifiée dans un worktree d'intégration dédié) sur `origin/mast
 manifest/state/fold/aggregate, `oos_trades.csv`/`oos_equity.csv`) — à spécifier avec la même
 rigueur (prompt dédié citant les décisions ADR réelles, jamais un contenu supposé) avant mise en
 file, une fois la forme exacte de l'orchestrateur de Slice 3 examinée.
+
+## 28. AF-V-02 Slice 4 — Persistance disque Walk-Forward, crise d'espace disque réelle, et un catch-22 de reprise trouvé et corrigé (2026-09-19/20)
+
+Suite directe de §27, même autorisation permanente. **Tranche déterminée sans deviner depuis le
+numéro** : dérivée de la docstring réelle de `run_walk_forward()` (Slice 3) elle-même — « aucune
+persistance disque, aucune reprise : ADR 0021 Décision 12 hors scope » — et de l'ADR 0021 Décision
+12. Nouveau `.autopilot/prompts/af-v02-slice-4.md`, nouvelle entrée `missions.json`
+(`depends_on=["AF-V-02-SLICE-3"]`).
+
+**Crise réelle d'espace disque pendant l'exécution** (`C:` descendu à 1,34–1,4 Go libres) —
+périmètre explicitement exclu par l'utilisateur (« ne prends pas en compte l'espace ») mais dont
+l'EFFET sur l'Autopilot devait être corrigé : des échecs `pytest` réels causés par le manque
+d'espace ont été mal classifiés comme des échecs de code répétés, escaladant à tort vers
+`HUMAN_GATE_REQUIRED` (confondant une cause opérationnelle avec un problème scientifique). Corrigé
+par un contrôle `git_safety.check_disk_space()` ajouté en tête de `_handle_testing()` (bloque
+proprement en `BLOCKED_SAFETY`/`disk_space` AVANT d'invoquer `tester_fn`, jamais après coup) — ce
+qui a révélé un second bug préexistant : 40 tests du superviseur lisaient le VRAI disque hôte,
+jamais isolés (fixture `autouse` ajoutée dans `tests/test_autopilot_supervisor.py`). Espace
+recouvré naturellement à 2,6 Go+ avant la fin de la mission (1308/1308 tests verts). 19 échecs
+`EodhdStorageError` réels, non liés, dans un module de stockage de marché totalement indépendant
+ont été identifiés comme 100 % attribuables à la même pénurie externe et documentés sans être
+« corrigés » artificiellement — conformément à la consigne explicite de ne pas ouvrir de chantier
+de stockage.
+
+**Bug réel confirmé et corrigé — reprise automatique absente après une pause externe** :
+l'utilisateur a signalé qu'une fois la limite de dépenses Claude réinitialisée, l'Autopilot ne se
+relançait jamais seul. Root-cause à deux volets : (1) la tâche planifiée Windows
+`AlphaForgeAutopilot` n'avait qu'un déclencheur `AtLogOn`, jamais de reprise périodique — corrigé
+par un second déclencheur répétant `resume.ps1` toutes les 30 minutes (~10 ans, limite pratique du
+schéma XML de Task Scheduler — `[TimeSpan]::MaxValue` produit une durée hors limites), sûr par
+construction (verrou fichier réacquis à chaque tentative, aucun Human Gate jamais auto-résolu,
+aucun plafond jamais relevé) ; `scripts/autopilot/install_task.ps1` mis à jour pour toute
+installation future. (2) la classification disque ci-dessus, qui transformait une pause purement
+opérationnelle en un blocage d'apparence scientifique.
+
+**Catch-22 de reprise trouvé et corrigé en conditions réelles, commit `8375dc9`** — chaîne
+d'événements réelle, jamais reproduite en synthèse a priori :
+1. `_handle_pre_commit_check()`/`_handle_blocked_safety()` ont d'abord gagné une résolution
+   automatique de la catégorie `unreviewed_files` (revérifie les chemins réellement sales contre
+   `record.reviewed_files`, rafraîchit `record.artifacts` si résolu) — corrigeant un blocage
+   permanent causé par des `record.artifacts` périmés référençant deux fichiers déjà committés
+   séparément (`.autopilot/README.md`/`install_task.ps1`, édités directement pendant que Slice 4
+   était en pause). Commit `2fcfccd`, revue indépendante propre.
+2. La reprise périodique (30 min) suivante a exécuté ce nouveau code sur un enregistrement
+   `BLOCKED_SAFETY`/`unreviewed_files` PERSISTÉ AVANT ce correctif — donc sans `resume_to_phase`
+   fiable (le code antérieur ne le renseignait pas pour cette catégorie). La résolution a donc
+   correctement reconnu la catégorie comme résolue, mais est retombée sur le repli `PLANNING` par
+   défaut faute de cible fiable.
+3. `_handle_planning()` a alors re-sélectionné la mission `AF-V-02-SLICE-4`, déjà en cours, et
+   s'est re-bloqué en `BLOCKED_SAFETY`/`dirty_worktree` — son contrôle `is_worktree_clean()` étant
+   global, jamais attribué à une mission, il a lu le travail LÉGITIME déjà testé (1325 tests) et
+   déjà revu de Slice 4 comme une contamination. Un état qui ne pouvait plus jamais se résoudre
+   seul (le worktree restant, par construction, « sale » tant que Slice 4 n'était pas committée).
+
+**Corrigé en élargissant, plutôt qu'en reconstruisant, le mécanisme `resolve_human_gate()`** déjà
+existant (finalisation §26) pour accepter `BLOCKED_SAFETY` comme phase courante résolvable, en plus
+de `HUMAN_GATE_REQUIRED`, avec la même garde d'attribution (`_unattributable_paths()` contre
+`mission.allowed_paths`). **Revue indépendante d'une première version a trouvé un vrai BLOCKER** :
+hériter tel quel d'`ALLOWED_TRANSITIONS[BLOCKED_SAFETY]` aurait permis d'atteindre directement
+`COMMITTING`/`PUSHING`/`READY` — des cibles sûres dans la boucle normale UNIQUEMENT après que
+`_handle_blocked_safety()` revérifie la cause catégorielle précise (ex. `unreviewed_files` exige
+`dirty ⊆ reviewed_files`, jamais recontrôlé par `_handle_committing()` lui-même), ce qui aurait pu
+committer/pousser du code jamais confirmé revu. Corrigé en restreignant les cibles atteignables
+depuis `BLOCKED_SAFETY` via cette méthode à un sous-ensemble prouvé sûr (identique à
+`HUMAN_GATE_REQUIRED`, plus `PRE_COMMIT_CHECK` qui revérifie intégralement la couverture de revue).
+Seconde revue indépendante : SAFE TO COMMIT. Commit réel `8375dc9`, poussé et intégré
+(fast-forward, régression complète revérifiée) sur `origin/master`.
+
+**Résolution réelle du blocage et achèvement de Slice 4** : `resolve_human_gate(resume_to=
+PRE_COMMIT_CHECK, ...)` appliqué via la CLI pour la mission réellement bloquée, reprise réussie
+jusqu'à `COMPLETED`. Suite complète verte (1325/1325). Review indépendante réelle : 2 lots, 2
+fichiers couverts, 5 findings non bloquants. Commit réel
+`3e4e1ad0f3a22ebefc69d06abd78cd1f6d1ed32b`, poussé sur `origin/autopilot/permanent` puis intégré
+(fast-forward, régression complète 1332/1332 revérifiée dans le worktree d'intégration dédié) sur
+`origin/master`.
+
+**Dossier principal et `business-b2b/`** : intégralement préservés tout du long (jamais touchés).
+
+**Prochaine tranche déjà cadrée et mise en file** : Slice 5, dérivée du dernier paragraphe de
+Décision 12 lui-même et de la docstring réelle de `persist_walk_forward_run()`/
+`build_walk_forward_manifest()` (Slice 4) — « aucune logique de reprise ne le relit encore (tranche
+suivante) » / « reste entièrement à la charge de la tranche de reprise future (hors scope Slice 4)
+». Portée : décision SKIP/REPLAY_TEST/REDO par fold à la reprise, réutilisation des candidats TRAIN
+déjà exécutés d'un fold interrompu (investiguer d'abord la réutilisation du mécanisme déjà existant
+d'`optimizer.py`/`optimization_store.py` avant d'en inventer un nouveau), agrégat recalculé
+intégralement. Explicitement hors scope : `WalkForwardEvidence`/verdict scientifique (Décision 13,
+tranche séparée ultérieure), Monte-Carlo/Parameter Stability, intégration `app.py`. Voir
+`.autopilot/prompts/af-v02-slice-5.md` pour le détail complet.
