@@ -27,15 +27,31 @@ $Action = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$ResumeScript`"" `
     -WorkingDirectory $RepoRoot
 
-$Trigger = New-ScheduledTaskTrigger -AtLogOn
+# Finalisation "poursuite AlphaForge" (2026-09-19) : un déclenchement SEUL "à la connexion" ne
+# rattrape jamais automatiquement une reprise après une pause d'ATTENTE externe (limite de
+# dépenses Claude, indisponibilité réseau) — `RestartCount`/`RestartInterval` ci-dessous ne
+# couvrent qu'un ÉCHEC/crash du process lui-même, jamais une sortie propre en WAITING_FOR_CLAUDE/
+# WAITING_FOR_EXTERNAL_RESOURCE. Bug réel confirmé : une fois la limite de dépenses réinitialisée,
+# rien ne relançait l'Autopilot sans intervention manuelle. Second déclencheur : répète
+# `resume.ps1` toutes les 30 minutes, indéfiniment (~10 ans, limite pratique du schéma XML de
+# Task Scheduler) — sûr par construction : `cmd_resume` réacquiert le verrou fichier avant tout
+# travail réel (une instance déjà active fait simplement échouer l'acquisition et sort aussitôt,
+# `MultipleInstances=IgnoreNew` ci-dessous ajoute une seconde couche), ne force jamais un
+# HUMAN_GATE_REQUIRED (aucun handler n'existe pour lui dans `run_one_step()`, resterait un no-op
+# jusqu'à une résolution explicite `autopilot resolve-human-gate`), et ne relève ni ne réinitialise
+# jamais un budget/plafond — si la cause externe persiste, la tentative périodique échoue et
+# re-parque exactement comme avant, sans effet de bord.
+$LogonTrigger = New-ScheduledTaskTrigger -AtLogOn
+$RepeatingTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 30) -RepetitionDuration (New-TimeSpan -Days 3650)
 
 $Settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) `
     -ExecutionTimeLimit (New-TimeSpan -Hours 12)
 
-Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings `
-    -Description "Reprend AlphaForge Autopilot au logon de l'utilisateur courant (jamais SYSTEM, jamais un autre compte)." `
+Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger @($LogonTrigger, $RepeatingTrigger) -Settings $Settings `
+    -Description "Reprend AlphaForge Autopilot au logon de l'utilisateur courant, puis revérifie automatiquement toutes les 30 minutes (jamais SYSTEM, jamais un autre compte)." `
     -User $env:USERNAME
 
 Write-Host "Tâche '$TaskName' installée (déclenchement : à la connexion de $env:USERNAME)."

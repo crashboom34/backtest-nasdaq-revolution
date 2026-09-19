@@ -226,12 +226,33 @@ modèle `claude-haiku-4-5`). Une mission peut définir `max_budget_usd` pour aju
 .\scripts\autopilot\resume.ps1     # reprise réelle (reconcilie l'état avec le dépôt avant de reprendre)
 ```
 
-Tâche planifiée Windows (déclenchement à la connexion, jamais SYSTEM, jamais un autre compte) :
+Tâche planifiée Windows (déclenchement à la connexion **et** répété toutes les 30 minutes,
+indéfiniment — voir « Reprise automatique » ci-dessous ; jamais SYSTEM, jamais un autre compte) :
 
 ```powershell
 .\scripts\autopilot\install_task.ps1
 .\scripts\autopilot\uninstall_task.ps1
 ```
+
+### Reprise automatique après une pause d'attente externe (2026-09-19)
+
+Bug réel confirmé : `WAITING_FOR_CLAUDE`/`WAITING_FOR_EXTERNAL_RESOURCE` sont des états d'ATTENTE
+passifs — rien ne les revérifie de lui-même. Avant ce correctif, la tâche planifiée ne se
+déclenchait qu'à la connexion : une fois une limite de dépenses Claude réinitialisée (ou une
+panne réseau résolue), rien ne relançait l'Autopilot sans une invocation manuelle de
+`autopilot resume`. La tâche porte désormais un SECOND déclencheur, répétant `resume.ps1` toutes
+les 30 minutes indéfiniment, en plus du déclenchement à la connexion — sûr par construction,
+jamais une nouvelle protection contournée :
+
+- Une instance déjà active fait simplement échouer l'acquisition du verrou fichier et sort
+  aussitôt (`MultipleInstances=IgnoreNew` de Task Scheduler ajoute une seconde couche).
+- Un `HUMAN_GATE_REQUIRED` n'a aucun handler dans `run_one_step()` — une tentative périodique le
+  laisse strictement inchangé, jamais résolu automatiquement (seule
+  `autopilot resolve-human-gate` explicite le peut).
+- Aucun plafond n'est jamais relevé ni réinitialisé par cette tentative périodique — si la cause
+  externe persiste, elle échoue et re-parque exactement comme avant, sans effet de bord.
+- Un `BLOCKED_SAFETY` (`dirty_worktree`/`disk_space`) est également revérifié à chaque tentative
+  (`_handle_blocked_safety()`, déjà existant) — profite de la même cadence.
 
 ## Fichiers de ce dossier
 

@@ -31,6 +31,20 @@ from scripts.autopilot.supervisor import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _default_sufficient_disk_space(monkeypatch):
+    """Isolation de test — bug réel confirmé en conditions réelles (mission « poursuite
+    AlphaForge ») : `git_safety.check_disk_space()` vérifie le VRAI disque hôte
+    (`shutil.disk_usage()`), jamais isolé par `tmp_path`/`FakeGitOps`. Une machine réellement sous
+    le seuil de sécurité (2 Go) fait échouer TOUTE la suite Autopilot qui traverse
+    BOOTSTRAPPING/TESTING/PRE_COMMIT_CHECK — reproduit empiriquement (40 tests en échec sur cette
+    machine au moment où son disque est passé sous 2 Go) — jamais un test dont le résultat dépend
+    de l'espace disque réel de la machine qui l'exécute. Espace suffisant par défaut pour tous les
+    tests de ce fichier ; les tests dédiés au comportement `disk_space` repatchent explicitement
+    cette même fonction dans leur propre corps (le patch le plus récent prévaut pour ce test)."""
+    monkeypatch.setattr("scripts.autopilot.git_safety.check_disk_space", lambda *a, **k: None)
+
+
 def _one_mission_queue(tmp_path):
     path = tmp_path / "missions.json"
     save_missions(path, [
@@ -1630,3 +1644,80 @@ def test_a_fresh_start_from_a_previously_completed_state_notices_a_newly_queued_
     assert record.mission_id == "M2"
     reloaded = load_missions(missions_path)
     assert {m.id: m.status for m in reloaded} == {"M1": "DONE", "M2": "DONE"}
+
+
+def test_low_disk_space_during_testing_blocks_safely_instead_of_being_misread_as_a_test_failure(
+    tmp_path, monkeypatch,
+):
+    """Régression — bug réel confirmé en conditions réelles (mission « poursuite AlphaForge ») :
+    `check_disk_space()` n'était vérifié qu'à `BOOTSTRAPPING`/`PRE_COMMIT_CHECK`, jamais à
+    `TESTING` — un espace disque réellement insuffisant a fait échouer deux tests Autopilot SANS
+    RAPPORT avec la mission en cours (Slice 4), signature répétée identique, escaladant à tort
+    vers `HUMAN_GATE_REQUIRED` (« changement d'approche nécessaire ») alors que la VRAIE cause est
+    purement environnementale et DÉJÀ correctement gérée ailleurs par
+    `BLOCKED_SAFETY`/catégorie `disk_space` — qui se résout tout seul dès que l'espace disque
+    redevient suffisant (`_handle_blocked_safety()`, déjà existant et re-vérifié automatiquement
+    par la tâche planifiée Windows toutes les 30 minutes). `tester_fn` ne doit JAMAIS être appelé
+    tant que le disque est insuffisant — jamais un test réel gaspillé/mal classé pour cette cause."""
+    import scripts.autopilot.git_safety as git_safety_module
+
+    tester_calls = {"count": 0}
+
+    def counting_tester(mission):
+        tester_calls["count"] += 1
+        return {"success": True, "summary": "3 passed"}
+
+    monkeypatch.setattr(
+        git_safety_module, "check_disk_space",
+        lambda *a, **k: "espace disque insuffisant : 1.36 Go libres < seuil 2.0 Go (mission §9 — BLOCKED_SAFETY).",
+    )
+
+    supervisor, git_ops, state_store = _make_supervisor(tmp_path, tester_fn=counting_tester)
+    supervisor.acquire_lock()
+    # État avancé directement à TESTING (jamais via BOOTSTRAPPING, qui a son PROPRE garde disque
+    # déjà testé séparément) — isole précisément le garde ajouté à TESTING par ce correctif.
+    state_store.save(AutopilotStateRecord(
+        phase=AutopilotState.TESTING.value, mission_id="M1", branch="master",
+    ))
+
+    final_state = supervisor.run_one_step()
+
+    assert final_state == AutopilotState.BLOCKED_SAFETY
+    record = state_store.load()
+    assert record.blocked_reason_category == "disk_space"
+    assert record.resume_to_phase == AutopilotState.TESTING.value
+    assert tester_calls["count"] == 0  # jamais appelé, jamais gaspillé/mal classé
+
+
+def test_blocked_safety_on_low_disk_space_during_testing_resolves_once_space_is_freed(tmp_path, monkeypatch):
+    """Complète le test précédent : une fois l'espace disque redevenu suffisant, la reprise doit
+    réellement continuer vers TESTING (jamais un effacement d'état, jamais un Human Gate) — la
+    même mécanique déjà testée pour `dirty_worktree`, ici appliquée à `disk_space` déclenché
+    depuis TESTING plutôt que BOOTSTRAPPING."""
+    import scripts.autopilot.git_safety as git_safety_module
+
+    disk_state = {"low": True}
+
+    def toggleable_disk_check(*a, **k):
+        if disk_state["low"]:
+            return "espace disque insuffisant : 1.36 Go libres < seuil 2.0 Go (mission §9 — BLOCKED_SAFETY)."
+        return None
+
+    monkeypatch.setattr(git_safety_module, "check_disk_space", toggleable_disk_check)
+
+    supervisor, git_ops, state_store = _make_supervisor(tmp_path)
+    supervisor.acquire_lock()
+    state_store.save(AutopilotStateRecord(
+        phase=AutopilotState.TESTING.value, mission_id="M1", branch="master",
+    ))
+
+    blocked = supervisor.run_one_step()
+    assert blocked == AutopilotState.BLOCKED_SAFETY
+    assert state_store.load().blocked_reason_category == "disk_space"
+
+    still_blocked = supervisor.run_one_step()
+    assert still_blocked == AutopilotState.BLOCKED_SAFETY  # toujours sale, jamais forcé
+
+    disk_state["low"] = False
+    final_state = supervisor.run_until({AutopilotState.NEXT_MISSION})
+    assert final_state == AutopilotState.NEXT_MISSION

@@ -567,6 +567,22 @@ class AutopilotSupervisor:
         mission, blocked = self._resolve_mission_or_block(record)
         if blocked is not None:
             return blocked
+        # Finalisation « poursuite AlphaForge » (2026-09-19) : bug réel confirmé en conditions
+        # réelles — `check_disk_space()` n'était vérifié qu'à `BOOTSTRAPPING`/`PRE_COMMIT_CHECK`,
+        # jamais ici. Un espace disque réellement insuffisant a fait échouer des tests SANS RAPPORT
+        # avec la mission en cours, avec une signature répétée identique, escaladant à tort vers
+        # HUMAN_GATE_REQUIRED (« changement d'approche nécessaire ») alors que la vraie cause est
+        # purement environnementale — déjà correctement gérée par BLOCKED_SAFETY/catégorie
+        # `disk_space`, qui se résout tout seul dès que l'espace redevient suffisant
+        # (`_handle_blocked_safety()`, déjà existant, revérifié automatiquement par la tâche
+        # planifiée Windows toutes les 30 minutes). `tester_fn` n'est jamais appelé tant que le
+        # disque est insuffisant — jamais un test réel gaspillé/mal classé pour cette cause.
+        disk_reason = git_safety.check_disk_space()
+        if disk_reason:
+            return self._transition(
+                AutopilotState.BLOCKED_SAFETY, stop_reason=disk_reason,
+                blocked_reason_category="disk_space", resume_to_phase=AutopilotState.TESTING.value,
+            )
         result = self._invoke_safely(self._tester_fn, mission, label="tester_fn")
         if not result.get("success", False):
             attempt = record.attempt_count + 1
