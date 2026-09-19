@@ -30,12 +30,17 @@ import hashlib
 import json
 import re
 import statistics
-from typing import Optional, Tuple
+from pathlib import Path
+from typing import Optional, Tuple, Union
 
 import pandas as pd
 
+from atomic_json_store import save_atomic
 from dataset_split import SplitBoundary
+from market_data.backtest_manifest import load_backtest_manifest
 from optimizer import (
+    STATE_READINESS_SEMANTICS_VERSION,
+    TRAIN_TEST_SEMANTICS_VERSION,
     FilterConfig,
     NoStateReadyBoundary,
     Optimizer,
@@ -600,38 +605,20 @@ TOUJOURS le score pondéré réel de `compute_score()`, jamais un 0.0 emprunté 
 rapport (ADR 0021 Décision 13 : "FoldResult ne porte que des faits mesurés")."""
 
 
-def run_fold_test(
+def _run_fold_test_core(
     fold: FoldDefinition,
     selection: FoldSelection,
     base_config,
     df,
-) -> FoldResult:
-    """Exécute EXACTEMENT une fois la phase TEST du fold (ADR 0021 Décision 6), sur
-    `[fold.effective_boundary, fold.effective_test_end)`, `end_boundary="exclusive"` pour TOUT
-    fold y compris le dernier (Décision 4 — plus d'exception terminale). Réutilise
-    `optimizer._run_single()` telle quelle via un import LOCAL (mirroring le propre import local
-    `from engine import run_backtest` de `_run_single()` elle-même) — ne lie jamais `_run_single`/
-    `run_backtest` dans l'espace de noms module de `walk_forward` (invariant Slice 1 préservé :
-    `walk_forward` reste découplé d'`engine.py`).
-
-    Zéro trade TEST (ADR 0021 Décision 15) : observation scientifique valide, jamais une erreur —
-    `zero_trade_oos=True`, `n_trades=0`, `net_ret_pct=0`,
-    `profit_factor=win_rate=expectancy=None`. `expectancy` = PnL net moyen par trade
-    (`trades["resultat_net"].mean()`, Décision 6) ; `forced_closes` = trades clôturés de force en
-    fin de fenêtre (`raison_sortie == "fin-donnees"`, Décision 14) ; `coverage_bars` = nombre de
-    barres du DataFrame source dont `time_paris` tombe dans `[effective_boundary,
-    effective_test_end)` — mesuré indépendamment du moteur (jamais déduit de `equity`, dont la
-    longueur dépend du warmup interne, non spécifiée par cette mission).
-
-    `score_test` (review indépendante tentative 2, finding BLOQUANT) : recalculé via
-    `compute_score()` avec `_UNFILTERED_TEST_SCORING` — INDÉPENDANT de l'éligibilité TRAIN
-    (`base_config.filters`), jamais silencieusement mis à 0.0 par un seuil TRAIN franchi alors que
-    les trades/métriques TEST sont réels et sains. Voir docstring de `_UNFILTERED_TEST_SCORING`.
-
-    Lève `FoldTestExecutionFailed` si cette exécution TEST échoue techniquement (exception interne
-    à `run_backtest()`, `filter_reason` préfixé par `"Exception:"` — voir `optimizer._run_single()`)
-    : un échec technique sur l'UNIQUE exécution TEST du fold ne doit jamais être confondu avec un
-    authentique zéro-trade, les deux produisant identiquement `stats.get("n_trades", 0) == 0`."""
+) -> Tuple[FoldResult, "pd.DataFrame", "pd.DataFrame"]:
+    """Cœur partagé de `run_fold_test()`/`execute_walk_forward_fold_with_artifacts()` (extrait en
+    AF-V-02 Slice 4, mécanique pure — comportement identique à l'ancien corps de `run_fold_test()`,
+    voir sa docstring pour le détail scientifique complet) : exécute EXACTEMENT une fois la phase
+    TEST du fold et retourne `(FoldResult, trades, equity)`. `run_fold_test()` (Slice 2, signature
+    et comportement externes inchangés) ignore les deux derniers éléments ;
+    `execute_walk_forward_fold_with_artifacts()` (Slice 4) les capture pour la persistance disque
+    (`oos_trades.csv`/`oos_equity.csv`) — dans les deux cas, un seul backtest réel par fold,
+    jamais deux."""
     from optimizer import _run_single as _optimizer_run_single
 
     test_result = _optimizer_run_single(
@@ -647,6 +634,7 @@ def run_fold_test(
         )
     stats = test_result["stats"]
     trades = test_result["trades"]
+    equity = test_result["equity"]
     n_trades = stats.get("n_trades", 0)
     zero_trade = n_trades == 0
 
@@ -680,7 +668,7 @@ def run_fold_test(
         ((df["time_paris"] >= ts_boundary) & (df["time_paris"] < ts_test_end)).sum()
     )
 
-    return FoldResult(
+    fold_result = FoldResult(
         fold_id=fold.fold_id,
         definition=fold,
         selection=selection,
@@ -698,6 +686,47 @@ def run_fold_test(
         gross_loss=gross_loss,
         n_win=n_win,
     )
+    return fold_result, trades, equity
+
+
+def run_fold_test(
+    fold: FoldDefinition,
+    selection: FoldSelection,
+    base_config,
+    df,
+) -> FoldResult:
+    """Exécute EXACTEMENT une fois la phase TEST du fold (ADR 0021 Décision 6), sur
+    `[fold.effective_boundary, fold.effective_test_end)`, `end_boundary="exclusive"` pour TOUT
+    fold y compris le dernier (Décision 4 — plus d'exception terminale). Réutilise
+    `optimizer._run_single()` telle quelle via un import LOCAL (mirroring le propre import local
+    `from engine import run_backtest` de `_run_single()` elle-même) — ne lie jamais `_run_single`/
+    `run_backtest` dans l'espace de noms module de `walk_forward` (invariant Slice 1 préservé :
+    `walk_forward` reste découplé d'`engine.py`).
+
+    Zéro trade TEST (ADR 0021 Décision 15) : observation scientifique valide, jamais une erreur —
+    `zero_trade_oos=True`, `n_trades=0`, `net_ret_pct=0`,
+    `profit_factor=win_rate=expectancy=None`. `expectancy` = PnL net moyen par trade
+    (`trades["resultat_net"].mean()`, Décision 6) ; `forced_closes` = trades clôturés de force en
+    fin de fenêtre (`raison_sortie == "fin-donnees"`, Décision 14) ; `coverage_bars` = nombre de
+    barres du DataFrame source dont `time_paris` tombe dans `[effective_boundary,
+    effective_test_end)` — mesuré indépendamment du moteur (jamais déduit de `equity`, dont la
+    longueur dépend du warmup interne, non spécifiée par cette mission).
+
+    `score_test` (review indépendante tentative 2, finding BLOQUANT) : recalculé via
+    `compute_score()` avec `_UNFILTERED_TEST_SCORING` — INDÉPENDANT de l'éligibilité TRAIN
+    (`base_config.filters`), jamais silencieusement mis à 0.0 par un seuil TRAIN franchi alors que
+    les trades/métriques TEST sont réels et sains. Voir docstring de `_UNFILTERED_TEST_SCORING`.
+
+    Lève `FoldTestExecutionFailed` si cette exécution TEST échoue techniquement (exception interne
+    à `run_backtest()`, `filter_reason` préfixé par `"Exception:"` — voir `optimizer._run_single()`)
+    : un échec technique sur l'UNIQUE exécution TEST du fold ne doit jamais être confondu avec un
+    authentique zéro-trade, les deux produisant identiquement `stats.get("n_trades", 0) == 0`.
+
+    AF-V-02 Slice 4 : le corps de cette fonction a été extrait tel quel dans `_run_fold_test_core()`
+    (mécanique pure) — signature et valeur de retour de `run_fold_test()` elle-même restent
+    strictement inchangées, comportement inchangé pour tout appelant existant."""
+    fold_result, _trades, _equity = _run_fold_test_core(fold, selection, base_config, df)
+    return fold_result
 
 
 def execute_walk_forward_fold(
@@ -875,3 +904,274 @@ def build_aggregate_result(fold_results: Tuple[FoldResult, ...]) -> AggregateRes
         median_fold_score_test=median_fold_score_test,
         worst_fold_id=worst_fold_id,
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 4 — Persistance disque des artefacts Walk-Forward (Décision 12, ÉCRITURE SEULE).
+# Consomme un `WalkForwardRunOutcome` déjà obtenu (Slice 3, inchangée) ; n'est JAMAIS appelée
+# automatiquement par `run_walk_forward()` (qui reste un orchestrateur EN MÉMOIRE pur) — un
+# appelant explicite invoque `persist_walk_forward_run()` après coup. Aucune reprise (le
+# `state.json` produit ici n'est jamais relu pour sauter un fold), aucun `WalkForwardEvidence`/
+# `validation_run.json`/verdict scientifique (Décision 13, tranche séparée ultérieure).
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@dataclasses.dataclass(frozen=True)
+class FoldArtifacts:
+    """Bundle purement local à `walk_forward.py` (jamais dans `validation_run.py` : ce n'est ni
+    une `Specification` ni une `Evidence` typée, juste de la plomberie de persistance) — tout ce
+    qu'`execute_walk_forward_fold_with_artifacts()` produit EN PLUS du `FoldResult` déjà existant,
+    nécessaire pour écrire `train_candidates.csv`/`oos_trades.csv`/`oos_equity.csv` (Décision 12)
+    sans jamais relancer de second backtest : `train_candidates` est le `all_results` déjà retourné
+    par `run_fold_train()` (une entrée par candidat TRAIN évalué, contrat `Optimizer.run()`
+    inchangé) ; `test_trades`/`test_equity` sont les DataFrames réels de l'UNIQUE exécution TEST du
+    fold (`_run_fold_test_core()`), vides (jamais `None`) pour un fold `zero_trade_oos=True`.
+
+    `fold_id` (review indépendante, tentative 2, finding PLAUSIBLE) : `persist_walk_forward_run()`
+    associait `fold_results`/`fold_artifacts` par SEULE position de tuple (longueurs vérifiées,
+    jamais l'identité) — un appelant qui construirait ces deux tuples dans un ordre divergent
+    écrirait silencieusement les `trades`/`equity` d'un fold sous le répertoire d'un AUTRE fold.
+    Porter `fold_id` ici permet à `persist_walk_forward_run()` de vérifier explicitement cette
+    correspondance et de lever une erreur claire plutôt que d'associer silencieusement les mauvais
+    artefacts."""
+
+    fold_id: str
+    train_candidates: list
+    test_trades: "pd.DataFrame"
+    test_equity: "pd.DataFrame"
+
+
+def execute_walk_forward_fold_with_artifacts(
+    fold: FoldDefinition,
+    base_config,
+    df,
+    progress_cb=None,
+    stop_flag_fn=None,
+    fold_seed: Optional[int] = None,
+) -> Tuple[FoldResult, FoldArtifacts]:
+    """Variante additive d'`execute_walk_forward_fold()` (Slice 2, JAMAIS modifiée — même
+    signature, même comportement, toujours utilisable telle quelle par tout appelant qui n'a pas
+    besoin des artefacts bruts) : même orchestration TRAIN -> Top-1 -> EXACTEMENT une exécution
+    TEST, mais retourne EN PLUS un `FoldArtifacts` capturé au même site d'exécution — jamais un
+    second backtest pour produire cette capture (`_run_fold_test_core()` est le même cœur partagé
+    que `run_fold_test()`, un seul appel réel à `optimizer._run_single()` par fold).
+
+    Choix d'implémentation (ADR 0021 Décision 12, mission Slice 4, section 27) : plutôt que
+    d'ajouter un paramètre `capture_test_artifacts` à `execute_walk_forward_fold()` elle-même (ce
+    qui rendrait son type de retour conditionnel au flag, un anti-motif), cette fonction NOUVELLE
+    duplique les deux lignes d'orchestration TRAIN/sélection (`run_fold_train()` +
+    `select_fold_top1()`, déjà testées indépendamment Slice 2) plutôt que de risquer de
+    déstabiliser `execute_walk_forward_fold()` — dette mineure assumée (deux lignes), jamais
+    `execute_walk_forward_fold()` elle-même n'est touchée.
+
+    `fold_seed` (review indépendante, tentative 2, finding PLAUSIBLE) : transmis tel quel, exactement
+    comme `execute_walk_forward_fold()` — cette fonction ne dérive JAMAIS elle-même de `fold_seed`
+    via `_derive_fold_seed()`. Un futur appelant qui persiste un run produit par `run_walk_forward()`
+    (`master_seed`/`validation_run_id` donnés) est responsable de dériver le MÊME `fold_seed` par
+    fold (`_derive_fold_seed(spec.master_seed, validation_run_id, fold.fold_index)`) que celui que
+    `run_walk_forward()` a réellement utilisé en interne pour ce fold — sinon les artefacts persistés
+    ne correspondraient pas au fingerprint `master_seed` enregistré dans `manifest.json`. Cette
+    orchestration bout-en-bout (future intégration `app.py`) est explicitement hors scope de cette
+    tranche (voir mission)."""
+    all_results, _sensitivity = run_fold_train(
+        fold, base_config, df, progress_cb=progress_cb, stop_flag_fn=stop_flag_fn,
+        fold_seed=fold_seed,
+    )
+    selection = select_fold_top1(fold, all_results, base_config, fold_seed=fold_seed)
+    fold_result, trades, equity = _run_fold_test_core(fold, selection, base_config, df)
+    return fold_result, FoldArtifacts(
+        fold_id=fold.fold_id, train_candidates=all_results, test_trades=trades, test_equity=equity,
+    )
+
+
+_MANIFEST_FILENAME = "manifest.json"
+_STATE_FILENAME = "state.json"
+_AGGREGATE_FILENAME = "aggregate.json"
+_FOLDS_DIRNAME = "folds"
+
+
+def _fold_dir(output_dir: Union[str, Path], fold_id: str) -> Path:
+    return Path(output_dir) / _FOLDS_DIRNAME / fold_id
+
+
+def build_walk_forward_manifest(
+    spec: WalkForwardSpecification,
+    base_config,
+    data_manifest_path: Union[str, Path],
+) -> dict:
+    """Construit le contenu (dict JSON-sérialisable) de `manifest.json` (ADR 0021 Décision 12) —
+    fingerprint de reprise, JAMAIS encore relu par une logique de reprise (hors scope Slice 4).
+
+    Référence au `data_manifest.json` existant `data_manifest_path` (`market_data.
+    backtest_manifest.load_backtest_manifest()`, JAMAIS un git SHA/snapshot recalculé
+    indépendamment ici) — lève `ValueError` immédiatement si ce fichier est absent/illisible,
+    avant tout calcul ou écriture (`persist_walk_forward_run()` échoue donc AVANT toute écriture
+    disque dans ce cas). `search_space`/`scoring`/`filters` proviennent de `base_config`
+    (`OptimizationConfig` réel utilisé pour le run TRAIN de tous les folds, Décision 4 : un seul
+    search space partagé) — jamais de `WalkForwardSpecification`, qui ne porte que `base_params`
+    (readiness), pas le search space de l'Optimizer."""
+    manifest = load_backtest_manifest(data_manifest_path)
+    if manifest is None:
+        raise ValueError(
+            f"data_manifest_path={data_manifest_path!r} introuvable ou illisible — le fingerprint "
+            "de reprise Walk-Forward (ADR 0021 Décision 12) doit référencer un data_manifest.json "
+            "réel, jamais un git SHA/snapshot recalculé indépendamment ici."
+        )
+    return {
+        "walk_forward_semantics_version": WALK_FORWARD_SEMANTICS_VERSION,
+        "train_test_semantics_version": TRAIN_TEST_SEMANTICS_VERSION,
+        "state_readiness_semantics_version": STATE_READINESS_SEMANTICS_VERSION,
+        "master_seed": spec.master_seed,
+        "verdict_policy_id": spec.verdict_policy_id,
+        "specification": dataclasses.asdict(spec),
+        "search_space": [dataclasses.asdict(pr) for pr in base_config.param_ranges],
+        "scoring": dataclasses.asdict(base_config.score_weights),
+        "filters": dataclasses.asdict(base_config.filters),
+        "strategy_name": base_config.strategy_name,
+        "strategy_module": base_config.strategy_module,
+        "data_manifest_path": str(Path(data_manifest_path)),
+        "data_manifest": {
+            "snapshot_id": manifest.snapshot_id,
+            "content_hash": manifest.content_hash,
+            "git_commit": manifest.git_commit,
+            "provider": manifest.provider,
+            "instrument": manifest.instrument,
+            "strategy_version": manifest.strategy_version,
+        },
+    }
+
+
+def _train_candidates_to_dataframe(train_candidates: list) -> "pd.DataFrame":
+    """Aplatit `train_candidates` (contrat `Optimizer.run()` — une entrée par candidat TRAIN
+    évalué : `score`/`params`/`stats`/`filtered`/`filter_reason`) en une ligne par candidat pour
+    `train_candidates.csv` : colonnes des paramètres testés + `score`/`filtered`/`filter_reason`/
+    `n_trades` (extrait de `stats`, `None` si absent — ex. candidat filtré par exception)."""
+    rows = []
+    for candidate in train_candidates:
+        row = dict(candidate["params"])
+        row["score"] = candidate["score"]
+        row["filtered"] = candidate["filtered"]
+        row["filter_reason"] = candidate["filter_reason"]
+        row["n_trades"] = candidate["stats"].get("n_trades")
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def persist_walk_forward_run(
+    outcome: WalkForwardRunOutcome,
+    fold_artifacts: Tuple[FoldArtifacts, ...],
+    aggregate: Optional[AggregateResult],
+    spec: WalkForwardSpecification,
+    base_config,
+    data_manifest_path: Union[str, Path],
+    output_dir: Union[str, Path],
+) -> Path:
+    """Persiste sur disque les artefacts BRUTS d'un `WalkForwardRunOutcome` déjà obtenu (ADR 0021
+    Décision 12, ÉCRITURE SEULE) — jamais appelée automatiquement par `run_walk_forward()`
+    lui-même (qui reste un orchestrateur EN MÉMOIRE pur, Slice 3, inchangé) : un appelant explicite
+    invoque cette fonction APRÈS avoir obtenu son `WalkForwardRunOutcome` (et, séparément,
+    `fold_artifacts` — un `FoldArtifacts` par `FoldResult`, MÊME ORDRE, produit par
+    `execute_walk_forward_fold_with_artifacts()`, jamais par un second backtest).
+
+    Structure écrite sous `output_dir` (paramétrable par l'appelant, jamais un chemin codé en dur
+    sous `results/` — voir `optimization_store.get_job_dir()` pour la convention établie ailleurs
+    dans ce dépôt) :
+    - `manifest.json` (`build_walk_forward_manifest()`) ;
+    - `state.json` — PUREMENT DESCRIPTIF ici (liste des `fold_id` déjà écrits) : aucune logique de
+      reprise ne le relit encore (tranche suivante) ;
+    - `folds/fold_NNN/{definition,selection,test_result}.json` — sérialisation directe
+      (`dataclasses.asdict()`) de `FoldDefinition`/`FoldSelection`/`FoldResult` ;
+    - `folds/fold_NNN/{train_candidates,oos_trades,oos_equity}.csv` ;
+    - `aggregate.json` (`dataclasses.asdict()` d'`AggregateResult`) si `aggregate is not None`.
+
+    **Décision `tested.json`/`selection.json`** (mission Slice 4, section 27, choix explicitement
+    laissé à l'implémentation — précisé en review indépendante tentative 3, la justification
+    "redondance" de la tentative 2 lisait mal la convention établie du dépôt) : ailleurs dans ce
+    dépôt (`optimization_store.py::load_tested_hashes()`/`save_tested_hashes()`), `tested.json`
+    désigne un ensemble de hashs de candidats déjà évalués, écrit de façon INCRÉMENTALE PENDANT
+    qu'un TRAIN est en cours, pour permettre à une reprise de sauter les candidats déjà exécutés
+    sans les rejouer — exactement le mécanisme que Décision 12 évoque pour "un TRAIN interrompu
+    réutilise les candidats déjà exécutés". Cette fonction-ci (`persist_walk_forward_run()`) ne
+    peut structurellement PAS produire ce fichier avec ce sens : elle persiste un
+    `WalkForwardRunOutcome` déjà COMPLET (TRAIN déjà entièrement terminé pour chaque fold), de
+    façon post-hoc, en un seul appel — jamais pendant qu'un TRAIN tourne encore. Écrire ici un
+    `tested.json` "statique" (snapshot final des hashs, plutôt qu'un flux incrémental pendant
+    l'exécution) n'apporterait aucune capacité de reprise réelle et serait de toute façon
+    intégralement reconstructible depuis `train_candidates.csv` déjà écrit. Choix retenu :
+    **aucun fichier `tested.json` n'est écrit dans cette tranche** — le mécanisme incrémental
+    réel (instrumentation de la boucle TRAIN elle-même, hors de `persist_walk_forward_run()`)
+    reste entièrement à la charge de la tranche de reprise future (hors scope Slice 4), jamais
+    simulé ici par un format parallèle qui n'en aurait que l'apparence.
+
+    Toute écriture JSON passe par `atomic_json_store.save_atomic()` (jamais un `open()`/
+    `json.dump()` direct) — seule garantie d'atomicité exigée par la mission (Décision 12 ne la
+    demande que pour les fichiers JSON). Les CSV utilisent `pandas.DataFrame.to_csv()` direct
+    (écriture non atomique, volontairement — le dépôt n'a pas de convention CSV atomique unique
+    à répliquer ici : `optimization_store.py` écrit ses CSV en `csv.DictWriter` incrémental,
+    `market_data/derived.py` écrit les siens en tmp+`os.replace()` ; aucun des deux n'est le
+    format tabulaire par fold visé ici). Lève `ValueError` si `len(fold_artifacts)
+    != len(outcome.fold_results)`, ou si un `fold_artifacts[i].fold_id` ne correspond pas à
+    `outcome.fold_results[i].fold_id` (review indépendante tentative 2, finding PLAUSIBLE :
+    l'appariement par seule position de tuple, sans vérifier l'identité, écrirait silencieusement
+    les `trades`/`equity` d'un fold sous le répertoire d'un AUTRE fold en cas d'ordre divergent) —
+    un `FoldArtifacts` par `FoldResult`, MÊME ORDRE, MÊME `fold_id`, jamais réassociés autrement.
+    Lève `ValueError` (voir `build_walk_forward_manifest()`) AVANT toute écriture disque si
+    `data_manifest_path` est introuvable/illisible."""
+    if len(fold_artifacts) != len(outcome.fold_results):
+        raise ValueError(
+            f"fold_artifacts ({len(fold_artifacts)} élément(s)) et outcome.fold_results "
+            f"({len(outcome.fold_results)} élément(s)) doivent avoir la même longueur, dans le "
+            "même ordre — un FoldArtifacts par FoldResult, jamais réassociés autrement."
+        )
+    for fold_result, artifacts in zip(outcome.fold_results, fold_artifacts):
+        if artifacts.fold_id != fold_result.fold_id:
+            raise ValueError(
+                f"fold_artifacts et outcome.fold_results divergent à la même position : "
+                f"FoldArtifacts.fold_id={artifacts.fold_id!r} != "
+                f"FoldResult.fold_id={fold_result.fold_id!r} — jamais associés silencieusement "
+                "sur la seule position de tuple (ordre attendu identique)."
+            )
+
+    # build_walk_forward_manifest() échoue ici, AVANT toute écriture disque, si data_manifest_path
+    # est introuvable/illisible (voir sa docstring).
+    manifest_data = build_walk_forward_manifest(spec, base_config, data_manifest_path)
+
+    output_path = Path(output_dir)
+    save_atomic(output_path / _MANIFEST_FILENAME, manifest_data, "walk_forward_manifest")
+
+    for fold_result, artifacts in zip(outcome.fold_results, fold_artifacts):
+        fold_dir = _fold_dir(output_path, fold_result.fold_id)
+        # Créé explicitement (review indépendante, finding MAJEUR) : les trois `.to_csv()`
+        # ci-dessous ne créent jamais leur répertoire parent elles-mêmes — sans cette ligne,
+        # leur succès dépendrait implicitement du fait que les `save_atomic()` JSON qui les
+        # précèdent aient déjà créé `fold_dir` via leur propre `mkdir()` interne, un couplage
+        # d'ordre non documenté qu'un futur réordonnancement casserait silencieusement.
+        fold_dir.mkdir(parents=True, exist_ok=True)
+        save_atomic(
+            fold_dir / "definition.json", dataclasses.asdict(fold_result.definition),
+            "walk_forward_fold_definition",
+        )
+        save_atomic(
+            fold_dir / "selection.json", dataclasses.asdict(fold_result.selection),
+            "walk_forward_fold_selection",
+        )
+        save_atomic(
+            fold_dir / "test_result.json", dataclasses.asdict(fold_result),
+            "walk_forward_fold_test_result",
+        )
+        _train_candidates_to_dataframe(artifacts.train_candidates).to_csv(
+            fold_dir / "train_candidates.csv", index=False,
+        )
+        artifacts.test_trades.to_csv(fold_dir / "oos_trades.csv", index=False)
+        artifacts.test_equity.to_csv(fold_dir / "oos_equity.csv", index=False)
+
+    state_data = {"completed_fold_ids": [fr.fold_id for fr in outcome.fold_results]}
+    save_atomic(output_path / _STATE_FILENAME, state_data, "walk_forward_state")
+
+    if aggregate is not None:
+        save_atomic(
+            output_path / _AGGREGATE_FILENAME, dataclasses.asdict(aggregate),
+            "walk_forward_aggregate",
+        )
+
+    return output_path

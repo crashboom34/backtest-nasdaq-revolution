@@ -167,9 +167,11 @@
     {
       "id": "AF-V-02-SLICE-4",
       "title": "AF-V-02 Slice 4 — Persistance disque des artefacts Walk-Forward (Décision 12, écriture seule)",
-      "status": "PLANNED",
+      "status": "DONE",
       "prompt_file": "prompts/af-v02-slice-4.md",
-      "depends_on": ["AF-V-02-SLICE-3"],
+      "depends_on": [
+        "AF-V-02-SLICE-3"
+      ],
       "allowed_paths": [
         "walk_forward.py",
         "validation_run.py",

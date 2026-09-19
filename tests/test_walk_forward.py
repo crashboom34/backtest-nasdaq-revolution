@@ -14,9 +14,12 @@ Optimizer/TEST OOS/persistence — voir walk_forward.py pour le détail du déco
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
+import json
 import os
 import sys
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -37,6 +40,7 @@ from walk_forward import (
     WALK_FORWARD_SEMANTICS_VERSION,
     DatasetTooShortForWalkForward,
     FinalHoldoutOverlapError,
+    FoldArtifacts,
     FoldTestExecutionFailed,
     InsufficientWarmupHistory,
     NoEligibleTrainCandidate,
@@ -45,6 +49,7 @@ from walk_forward import (
     UnsupportedWalkForwardGeometry,
     WalkForwardSemanticsMismatch,
     build_aggregate_result,
+    build_walk_forward_manifest,
     build_walk_forward_specification,
     check_no_final_holdout_overlap,
     check_no_oos_overlap,
@@ -52,6 +57,8 @@ from walk_forward import (
     compute_fold_definitions,
     detect_partial_tail,
     execute_walk_forward_fold,
+    execute_walk_forward_fold_with_artifacts,
+    persist_walk_forward_run,
     run_fold_test,
     run_fold_train,
     run_walk_forward,
@@ -61,6 +68,8 @@ from walk_forward import (
 import walk_forward as walk_forward_module
 import optimizer
 from optimizer import (
+    STATE_READINESS_SEMANTICS_VERSION,
+    TRAIN_TEST_SEMANTICS_VERSION,
     FilterConfig,
     NoStateReadyBoundary,
     OptimizationConfig,
@@ -71,6 +80,7 @@ from optimizer import (
     compute_score,
     params_hash,
 )
+from market_data.backtest_manifest import build_backtest_manifest, save_backtest_manifest
 
 _BASE_PARAMS = {"or_start_h": 15, "or_start_m": 30, "ema_trend_len": 120}
 
@@ -1996,3 +2006,461 @@ class TestRunWalkForwardOrchestration:
         assert len(outcome.fold_results) >= 2
         assert fake.initial_capitals, "au moins un backtest attendu"
         assert fake.initial_capitals == [expected_initial_capital] * len(fake.initial_capitals)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 4 — Persistance disque des artefacts Walk-Forward (Décision 12, écriture seule).
+# `execute_walk_forward_fold()`/`run_fold_test()` restent inchangées (Slice 2, tests ci-dessus) ;
+# `execute_walk_forward_fold_with_artifacts()` est une fonction NOUVELLE, additive, qui délègue
+# au même cœur interne (`_run_fold_test_core()`) — un seul backtest réel par fold, jamais deux.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _write_test_data_manifest(tmp_path, **overrides):
+    defaults = dict(
+        provider="mt5", instrument="US100", provider_symbol="US100Cash",
+        source_timeframe="M3", snapshot_id="snap-wf-slice4", content_hash="hash-wf-slice4",
+        git_commit="deadbeefcafe", strategy_version="perfect_revolution_v1",
+    )
+    defaults.update(overrides)
+    manifest = build_backtest_manifest(**defaults)
+    path = tmp_path / "data_manifest.json"
+    save_backtest_manifest(path, manifest)
+    return path, manifest
+
+
+def _execute_persistable_fold(monkeypatch, df, fold, config=None):
+    fake = _ScoreByParamRunBacktest()
+    import engine
+    monkeypatch.setattr(engine, "run_backtest", fake)
+    _patch_score_by_net_ret(monkeypatch)
+    config = config or _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+    fold_result, artifacts = execute_walk_forward_fold_with_artifacts(fold, config, df)
+    return fold_result, artifacts, config, fake
+
+
+class TestExecuteWalkForwardFoldWithArtifacts:
+    """Nouvelle fonction additive (Slice 4) — même orchestration que
+    `execute_walk_forward_fold()` (jamais modifiée), capture en plus les DataFrames TEST bruts
+    pour la persistance disque, sans jamais déclencher un second backtest."""
+
+    def test_returns_a_fold_result_and_fold_artifacts(self, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fold_result, artifacts, _config, fake = _execute_persistable_fold(monkeypatch, df, fold)
+
+        assert isinstance(fold_result, FoldResult)
+        assert isinstance(artifacts, FoldArtifacts)
+        assert len(fake.calls) == 4  # 3 candidats TRAIN + 1 TEST — jamais un second backtest
+        assert len(artifacts.train_candidates) == 3
+        assert list(artifacts.test_trades["resultat_net"]) == [10.0]
+        assert list(artifacts.test_equity["capital"]) == pytest.approx([10_001.4])
+
+    def test_does_not_add_a_backtest_call_compared_to_execute_walk_forward_fold(self, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        import engine
+
+        fake_a = _ScoreByParamRunBacktest()
+        monkeypatch.setattr(engine, "run_backtest", fake_a)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+        execute_walk_forward_fold(fold, config, df)
+        assert len(fake_a.calls) == 4
+
+        fake_b = _ScoreByParamRunBacktest()
+        monkeypatch.setattr(engine, "run_backtest", fake_b)
+        execute_walk_forward_fold_with_artifacts(fold, config, df)
+        assert len(fake_b.calls) == 4
+
+    def test_run_fold_test_behaviour_is_unchanged_after_the_extraction(self, monkeypatch):
+        """Régression non-fonctionnelle : `run_fold_test()` doit toujours renvoyer un SEUL
+        `FoldResult` (jamais un tuple) après l'extraction de `_run_fold_test_core()`."""
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        config = _minimal_optimizer_config()
+        selection = _fold_selection(fold)
+
+        result = run_fold_test(fold, selection, config, df)
+
+        assert isinstance(result, FoldResult)
+
+
+class TestBuildWalkForwardManifest:
+    """`build_walk_forward_manifest()` — fingerprint de reprise (ADR 0021 Décision 12) : les
+    trois versions de sémantique, le search space/scoring/filtres réels de `base_config`, et une
+    référence explicite au `data_manifest.json` existant, jamais un git SHA recalculé
+    indépendamment (`build_backtest_manifest(git_commit=...)` fixe ici une valeur non-plausible
+    pour prouver l'absence de recalcul)."""
+
+    def test_includes_search_space_scoring_and_filters_from_base_config(self, tmp_path):
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        config = _minimal_optimizer_config(
+            mode="grid", param_ranges=_param_ranges_3_values(),
+            score_weights=ScoreWeights(profit_factor=9.0), filters=FilterConfig(min_trades=5),
+        )
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+
+        data = build_walk_forward_manifest(spec, config, manifest_path)
+
+        assert data["search_space"] == [dataclasses.asdict(pr) for pr in config.param_ranges]
+        assert data["scoring"]["profit_factor"] == 9.0
+        assert data["filters"]["min_trades"] == 5
+        assert data["strategy_name"] == config.strategy_name
+        assert data["strategy_module"] == config.strategy_module
+
+    def test_raises_before_any_use_if_data_manifest_is_unreadable(self, tmp_path):
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        config = _minimal_optimizer_config()
+
+        with pytest.raises(ValueError):
+            build_walk_forward_manifest(spec, config, tmp_path / "does_not_exist.json")
+
+
+class TestPersistWalkForwardRun:
+    """`persist_walk_forward_run()` (ADR 0021 Décision 12, écriture seule) — structure
+    `manifest.json`/`state.json`/`folds/fold_NNN/*.json`/`*.csv`/`aggregate.json`. Jamais de
+    reprise, jamais de `WalkForwardEvidence`/verdict scientifique (hors scope, tranche
+    suivante)."""
+
+    def _one_fold_run(self, monkeypatch, df=None):
+        df = df if df is not None else _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fold_result, artifacts, config, _fake = _execute_persistable_fold(monkeypatch, df, fold)
+        outcome = WalkForwardRunOutcome(fold_results=(fold_result,), stopped_early=False)
+        aggregate = build_aggregate_result((fold_result,))
+        return outcome, (artifacts,), aggregate, config
+
+    def test_manifest_json_carries_the_three_semantics_versions(self, tmp_path, monkeypatch):
+        outcome, artifacts, aggregate, config = self._one_fold_run(monkeypatch)
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M", master_seed=42)
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+
+        persist_walk_forward_run(
+            outcome, artifacts, aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        data = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+        assert data["walk_forward_semantics_version"] == WALK_FORWARD_SEMANTICS_VERSION
+        assert data["train_test_semantics_version"] == TRAIN_TEST_SEMANTICS_VERSION
+        assert data["state_readiness_semantics_version"] == STATE_READINESS_SEMANTICS_VERSION
+        assert data["master_seed"] == 42
+        assert data["verdict_policy_id"] is None
+
+    def test_manifest_json_references_the_existing_data_manifest_without_recomputing_git_sha(
+        self, tmp_path, monkeypatch,
+    ):
+        outcome, artifacts, aggregate, config = self._one_fold_run(monkeypatch)
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(
+            tmp_path, git_commit="not-a-real-git-sha-99", snapshot_id="snap-xyz",
+        )
+        output_dir = tmp_path / "walk_forward"
+
+        persist_walk_forward_run(
+            outcome, artifacts, aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        data = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+        assert data["data_manifest"]["git_commit"] == "not-a-real-git-sha-99"
+        assert data["data_manifest"]["snapshot_id"] == "snap-xyz"
+        assert data["data_manifest_path"] == str(manifest_path)
+
+    def test_missing_data_manifest_path_raises_before_any_write(self, tmp_path, monkeypatch):
+        outcome, artifacts, aggregate, config = self._one_fold_run(monkeypatch)
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        output_dir = tmp_path / "walk_forward"
+
+        with pytest.raises(ValueError):
+            persist_walk_forward_run(
+                outcome, artifacts, aggregate, spec, config,
+                tmp_path / "does_not_exist.json", output_dir,
+            )
+        assert not output_dir.exists()
+
+    def test_state_json_lists_completed_fold_ids_in_order(self, tmp_path, monkeypatch):
+        df = _build_synthetic_wf_df(260)
+        fold0 = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+            index=0, is_last=False,
+        )
+        fold1 = _wf_fold(
+            train_start=df["time_paris"].iloc[50].isoformat(),
+            boundary=df["time_paris"].iloc[150].isoformat(),
+            test_end=df["time_paris"].iloc[200].isoformat(),
+            index=1, is_last=True,
+        )
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0)
+        r1, a1, _c1, _f1 = _execute_persistable_fold(monkeypatch, df, fold1, config=config)
+        outcome = WalkForwardRunOutcome(fold_results=(r0, r1), stopped_early=False)
+        aggregate = build_aggregate_result((r0, r1))
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+
+        persist_walk_forward_run(
+            outcome, (a0, a1), aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        state = json.loads((output_dir / "state.json").read_text(encoding="utf-8"))
+        assert state["completed_fold_ids"] == [fold0.fold_id, fold1.fold_id]
+
+    def test_fold_definition_and_selection_json_deserialize_to_real_values(
+        self, tmp_path, monkeypatch,
+    ):
+        outcome, artifacts, aggregate, config = self._one_fold_run(monkeypatch)
+        fold_result = outcome.fold_results[0]
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+
+        persist_walk_forward_run(
+            outcome, artifacts, aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        fold_dir = output_dir / "folds" / fold_result.fold_id
+        definition = json.loads((fold_dir / "definition.json").read_text(encoding="utf-8"))
+        assert definition == dataclasses.asdict(fold_result.definition)
+        selection = json.loads((fold_dir / "selection.json").read_text(encoding="utf-8"))
+        assert selection == dataclasses.asdict(fold_result.selection)
+        test_result = json.loads((fold_dir / "test_result.json").read_text(encoding="utf-8"))
+        assert test_result["fold_id"] == fold_result.fold_id
+        assert test_result["score_test"] == pytest.approx(fold_result.score_test)
+        assert test_result["n_trades"] == fold_result.n_trades
+
+    def test_aggregate_json_deserializes_to_the_real_aggregate_result(
+        self, tmp_path, monkeypatch,
+    ):
+        outcome, artifacts, aggregate, config = self._one_fold_run(monkeypatch)
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+
+        persist_walk_forward_run(
+            outcome, artifacts, aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        data = json.loads((output_dir / "aggregate.json").read_text(encoding="utf-8"))
+        assert data == dataclasses.asdict(aggregate)
+
+    def test_aggregate_json_is_not_written_when_aggregate_is_none(self, tmp_path, monkeypatch):
+        outcome, artifacts, _aggregate, config = self._one_fold_run(monkeypatch)
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+
+        persist_walk_forward_run(
+            outcome, artifacts, None, spec, config, manifest_path, output_dir,
+        )
+
+        assert not (output_dir / "aggregate.json").exists()
+
+    def test_train_candidates_csv_contains_the_real_evaluated_candidates(
+        self, tmp_path, monkeypatch,
+    ):
+        outcome, artifacts, aggregate, config = self._one_fold_run(monkeypatch)
+        fold_result = outcome.fold_results[0]
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+
+        persist_walk_forward_run(
+            outcome, artifacts, aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        csv_path = output_dir / "folds" / fold_result.fold_id / "train_candidates.csv"
+        candidates = pd.read_csv(csv_path)
+        assert len(candidates) == 3
+        assert sorted(candidates["ema_trend_len"].tolist()) == [100, 120, 140]
+        best_row = candidates.loc[candidates["ema_trend_len"] == 140]
+        assert best_row["score"].iloc[0] == pytest.approx(1.4)
+
+    def test_oos_trades_and_equity_csv_contain_the_real_test_rows(self, tmp_path, monkeypatch):
+        outcome, artifacts, aggregate, config = self._one_fold_run(monkeypatch)
+        fold_result = outcome.fold_results[0]
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+
+        persist_walk_forward_run(
+            outcome, artifacts, aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        fold_dir = output_dir / "folds" / fold_result.fold_id
+        trades = pd.read_csv(fold_dir / "oos_trades.csv")
+        equity = pd.read_csv(fold_dir / "oos_equity.csv")
+        assert trades["resultat_net"].tolist() == [10.0]
+        assert equity["capital"].tolist() == pytest.approx([10_001.4])
+
+    def test_zero_trade_oos_fold_produces_empty_but_valid_csvs(self, tmp_path, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        import engine
+        empty_trades, empty_equity = pd.DataFrame(), pd.DataFrame()
+        real_trades = pd.DataFrame([{"resultat_net": 5.0, "raison_sortie": "target"}])
+        real_equity = pd.DataFrame([{"date": "x", "capital": 10_005.0}])
+        calls = {"count": 0}
+
+        def fake_run_backtest(df_, strategy, params, **kwargs):
+            # 1er appel = candidat TRAIN unique (param_ranges=[] par défaut) : doit être
+            # éligible (score > 0) pour que select_fold_top1() produise une FoldSelection.
+            # 2e appel = l'UNIQUE exécution TEST du fold, volontairement zéro-trade.
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return real_trades, real_equity, {"n_trades": 1, "net_ret_pct": 1.0}
+            return empty_trades, empty_equity, {"n_trades": 0}
+
+        monkeypatch.setattr(engine, "run_backtest", fake_run_backtest)
+        _patch_score_by_net_ret(monkeypatch)
+        config = _minimal_optimizer_config()
+        fold_result, artifacts = execute_walk_forward_fold_with_artifacts(fold, config, df)
+        assert fold_result.zero_trade_oos is True
+        outcome = WalkForwardRunOutcome(fold_results=(fold_result,), stopped_early=False)
+        aggregate = build_aggregate_result((fold_result,))
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+
+        persist_walk_forward_run(
+            outcome, (artifacts,), aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        fold_dir = output_dir / "folds" / fold_result.fold_id
+        trades_path = fold_dir / "oos_trades.csv"
+        equity_path = fold_dir / "oos_equity.csv"
+        assert trades_path.is_file()
+        assert equity_path.is_file()
+        # DataFrame vide SANS schéma de colonnes (même convention que le reste de la suite pour
+        # une observation zéro-trade, ex. TestRunFoldTest) — to_csv() écrit un fichier vide, sans
+        # exception : "pas d'erreur", jamais un pd.read_csv() qui suppose des colonnes réelles.
+        assert trades_path.read_text(encoding="utf-8").strip() == ""
+        assert equity_path.read_text(encoding="utf-8").strip() == ""
+
+    def test_every_json_file_is_written_through_save_atomic(self, tmp_path, monkeypatch):
+        """Test de câblage — jamais un open()/json.dump() direct qui contournerait l'écriture
+        atomique (ADR 0021 Décision 12)."""
+        outcome, artifacts, aggregate, config = self._one_fold_run(monkeypatch)
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+
+        real_save_atomic = walk_forward_module.save_atomic
+        calls = []
+
+        def spy(path, data, kind):
+            calls.append(Path(path))
+            return real_save_atomic(path, data, kind)
+
+        monkeypatch.setattr(walk_forward_module, "save_atomic", spy)
+
+        persist_walk_forward_run(
+            outcome, artifacts, aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        json_files_on_disk = sorted(str(p) for p in output_dir.rglob("*.json"))
+        json_files_via_save_atomic = sorted(str(p) for p in calls)
+        assert json_files_on_disk == json_files_via_save_atomic
+        assert len(calls) == 1 + 1 + 1 + 3  # manifest + state + aggregate + 3 par fold (1 fold)
+
+    def test_csv_writes_do_not_implicitly_depend_on_a_preceding_json_write_creating_the_dir(
+        self, tmp_path, monkeypatch,
+    ):
+        """Régression review indépendante (finding MAJEUR) : `to_csv()` ne crée jamais son
+        répertoire parent lui-même — si `persist_walk_forward_run()` comptait implicitement sur
+        le `mkdir()` interne d'un `save_atomic()` JSON précédent pour que `fold_dir` existe déjà
+        au moment des trois écritures CSV, un `save_atomic` qui ne crée plus ce répertoire (stub
+        ci-dessous, simulant un réordonnancement futur où les CSV seraient écrits avant tout JSON)
+        ferait échouer les CSV avec un `FileNotFoundError` — jamais toléré ici."""
+        outcome, artifacts, aggregate, config = self._one_fold_run(monkeypatch)
+        fold_result = outcome.fold_results[0]
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        output_dir.mkdir(parents=True)  # seul répertoire pré-existant — jamais `folds/fold_NNN/`.
+
+        def save_atomic_without_mkdir(path, data, kind):
+            path = Path(path)
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            return path
+
+        monkeypatch.setattr(walk_forward_module, "save_atomic", save_atomic_without_mkdir)
+
+        persist_walk_forward_run(
+            outcome, artifacts, aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        fold_dir = output_dir / "folds" / fold_result.fold_id
+        assert (fold_dir / "oos_trades.csv").is_file()
+        assert (fold_dir / "oos_equity.csv").is_file()
+        assert (fold_dir / "train_candidates.csv").is_file()
+
+    def test_fold_artifacts_length_must_match_fold_results_length(self, tmp_path, monkeypatch):
+        outcome, artifacts, aggregate, config = self._one_fold_run(monkeypatch)
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+
+        with pytest.raises(ValueError):
+            persist_walk_forward_run(
+                outcome, (), aggregate, spec, config, manifest_path, output_dir,
+            )
+
+    def test_fold_artifacts_out_of_order_relative_to_fold_results_is_rejected(
+        self, tmp_path, monkeypatch,
+    ):
+        """Régression review indépendante (tentative 2, finding PLAUSIBLE) : l'appariement
+        `fold_results`/`fold_artifacts` par seule position de tuple, sans vérifier l'identité,
+        écrirait silencieusement les trades/equity d'un fold sous le répertoire d'un AUTRE fold
+        si l'appelant les fournissait dans un ordre divergent — doit être rejeté explicitement."""
+        df = _build_synthetic_wf_df(260)
+        fold0 = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+            index=0, is_last=False,
+        )
+        fold1 = _wf_fold(
+            train_start=df["time_paris"].iloc[50].isoformat(),
+            boundary=df["time_paris"].iloc[150].isoformat(),
+            test_end=df["time_paris"].iloc[200].isoformat(),
+            index=1, is_last=True,
+        )
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0)
+        r1, a1, _c1, _f1 = _execute_persistable_fold(monkeypatch, df, fold1, config=config)
+        outcome = WalkForwardRunOutcome(fold_results=(r0, r1), stopped_early=False)
+        aggregate = build_aggregate_result((r0, r1))
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+
+        with pytest.raises(ValueError):
+            persist_walk_forward_run(
+                # a1/a0 volontairement inversés par rapport à r0/r1.
+                outcome, (a1, a0), aggregate, spec, config, manifest_path, output_dir,
+            )
