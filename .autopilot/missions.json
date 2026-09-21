@@ -384,6 +384,65 @@
         "script v1 et son artefact déjà réel sur disque intacts, jamais modifiés/supprimés",
         "script v2 réellement exécuté dans le worktree permanent, artefact réel produit et vérifié"
       ]
+    },
+    {
+      "id": "AF-V-02-SLICE-8",
+      "title": "AF-V-02 Slice 8 — Assemblage ValidationRun Walk-Forward (build_walk_forward_validation_run)",
+      "status": "PLANNED",
+      "prompt_file": "prompts/af-v02-slice-8.md",
+      "depends_on": [
+        "AF-V-02-SLICE-7"
+      ],
+      "allowed_paths": [
+        "walk_forward.py",
+        "tests/test_walk_forward.py"
+      ],
+      "forbidden_paths": [
+        "engine.py",
+        "optimizer.py",
+        "optimization_store.py",
+        "compute_split_dates",
+        "strategy_contracts.py",
+        "dataset_split.py",
+        "validation_run.py",
+        "validation_oos.py",
+        "strategies/",
+        "app.py",
+        "nasdaq_3m.csv",
+        "app_corrupted_backup.py",
+        "docs/adr/",
+        "scripts/create_walk_forward_validation_split_plan.py",
+        "scripts/create_walk_forward_validation_split_plan_v2.py",
+        "tests/test_create_walk_forward_validation_split_plan.py",
+        "tests/test_create_walk_forward_validation_split_plan_v2.py"
+      ],
+      "targeted_tests": [
+        "tests/test_walk_forward.py"
+      ],
+      "regression_tests": [],
+      "risk_level": "high",
+      "max_attempts": 3,
+      "max_budget_usd": 20.0,
+      "requires_clean_worktree": true,
+      "scientific_contracts": [
+        "ADR-0021-decision-13",
+        "ADR-0021-decision-8"
+      ],
+      "human_gate_conditions": [
+        "modification de FINAL_HOLDOUT",
+        "modification de la stratégie étalon Perfect Revolution V1",
+        "nécessité réelle de modifier validation_run.py/validation_oos.py/dataset_split.py au-delà de la seule lecture",
+        "extension du contrat déjà figé de WalkForwardRunOutcome/AggregateResult/WalkForwardSpecification/DatasetSplitPlan/ValidationRun non strictement additive"
+      ],
+      "completion_evidence": [
+        "tests ciblés verts",
+        "suite complète verte (régression complète imposée par risk_level=high)",
+        "revue indépendante sans finding BLOQUANT/MAJEUR",
+        "build_walk_forward_validation_run() produit une ValidationRun correcte (validation_type, split_plan_id, dataset_snapshot_id, specification, evidence)",
+        "aucune persistance disque effectuée par la fonction elle-même, prouvé par test",
+        "round-trip réel build_validation_run()/save_validation_run()/load_validation_run() vérifié sur disque",
+        "run_walk_forward()/resume_walk_forward_run()/persist_walk_forward_run() inchangées"
+      ]
     }
   ]
 }
