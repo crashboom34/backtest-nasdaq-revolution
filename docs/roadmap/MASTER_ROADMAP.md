@@ -171,6 +171,18 @@ posés dans `DOMAIN_MODEL.md` (aucun concept mal placé des deux côtés).
 | **GATE CHAMPION** | `ValidationEvidence` (niveau GATE V) + `ValidationPolicyVersion` explicite + provenance complète (`DatasetVersion`/`StrategyDefinition`/`git_sha`/seed). Passage par `E-PRECISION` comme condition supplémentaire = **PROPOSED TARGET GATE, non tranché** — pas une règle déjà appliquée | Promotion au statut `CHAMPION` |
 | **GATE PORTFOLIO** | Au moins 2 `StrategyDefinition` ayant chacune franchi `GATE CHAMPION` (indépendamment de leur origine — `F` ou `D`) | Mécanique de capital partagé |
 
+**Action séparée ajoutée au plan `GATE V` (2026-09-21, décision explicite de l'utilisateur)** :
+`AF-V-01` (OOS) reste `DONE` mais `performance-inconclusive` (`n_trades=0`) — cette évidence est
+**conservée telle quelle**, jamais relancée ni réutilisée silencieusement (`FINAL_HOLDOUT` déjà
+consulté une fois, voir `AI_HANDOFF.md` pour l'historique de cet accès). Une **preuve OOS externe
+fraîche** — nouvelle période, suffisamment longue pour ne pas rester `n_trades=0`, un **nouveau**
+`DatasetSnapshot` distinct de celui déjà utilisé, et un accès `FINAL_HOLDOUT` **explicitement
+autorisé** au moment voulu (jamais implicite) — est une action requise SÉPARÉE avant que `GATE V`
+puisse s'appuyer sur une contribution `OOS` réellement concluante. Aucun téléchargement de données
+payant ni aucun nouvel accès au holdout n'est autorisé par cette seule mention — cette action reste
+à planifier et autoriser explicitement le moment venu, jamais déclenchée automatiquement par
+l'Autopilot ou une future campagne `GATE V`.
+
 ---
 
 ## 5. Delivery waves
