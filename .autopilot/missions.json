@@ -447,7 +447,7 @@
     {
       "id": "AF-V-03-SLICE-1",
       "title": "AF-V-03 Slice 1 — Contrats typés MonteCarloSpecification/MonteCarloEvidence (ADR 0022)",
-      "status": "PLANNED",
+      "status": "DONE",
       "prompt_file": "prompts/af-v03-slice-1.md",
       "depends_on": [],
       "allowed_paths": [

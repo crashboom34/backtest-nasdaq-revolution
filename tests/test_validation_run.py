@@ -795,3 +795,331 @@ def test_save_and_load_round_trips_evidence_built_via_build_walk_forward_evidenc
     assert list(loaded.evidence.verdict_reasons) == list(evidence.verdict_reasons)
     assert loaded.evidence.aggregate is None
     assert list(loaded.evidence.fold_results) == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-03 Slice 1 — registre étendu avec "monte_carlo" (MonteCarloSpecification/Evidence),
+# docs/adr/0022-monte-carlo-trade-resampling-v1.md Décision 11. Uniquement la FORME typée +
+# build_monte_carlo_specification() (dérivation déterministe de master_seed, Décision 5) — aucun
+# algorithme de rééchantillonnage ici (monte_carlo.py, AF-V-03 Slice 2).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _distribution_summary(**kwargs):
+    from validation_run import MonteCarloDistributionSummary
+    kwargs.setdefault("p5", 1.0)
+    kwargs.setdefault("p25", 2.0)
+    kwargs.setdefault("p50", 3.0)
+    kwargs.setdefault("p75", 4.0)
+    kwargs.setdefault("p95", 5.0)
+    return MonteCarloDistributionSummary(**kwargs)
+
+
+def _monte_carlo_specification(**kwargs):
+    from validation_run import build_monte_carlo_specification
+    kwargs.setdefault("source_validation_run_id", "val_x")
+    kwargs.setdefault("source_trades_from_optimized_params", False)
+    kwargs.setdefault("verdict_policy_id", None)
+    return build_monte_carlo_specification(**kwargs)
+
+
+def _monte_carlo_evidence(**kwargs):
+    from validation_run import MonteCarloEvidence
+    kwargs.setdefault("n_input_trades", 12)
+    kwargs.setdefault("zero_trade_input", False)
+    kwargs.setdefault("observed_net_ret_pct", 4.2)
+    kwargs.setdefault("observed_max_dd_trade_close_basis_pct", 3.1)
+    kwargs.setdefault("observed_lag1_autocorrelation", 0.05)
+    kwargs.setdefault("observed_longest_losing_streak", 3)
+    kwargs.setdefault("sequence_risk_max_dd_trade_close_basis_pct", _distribution_summary())
+    kwargs.setdefault(
+        "sequence_risk_longest_losing_streak",
+        _distribution_summary(p5=1, p25=2, p50=3, p75=4, p95=5),
+    )
+    kwargs.setdefault("sampling_uncertainty_net_ret_pct", _distribution_summary())
+    kwargs.setdefault(
+        "sampling_uncertainty_max_dd_trade_close_basis_pct", _distribution_summary()
+    )
+    kwargs.setdefault("execution_status", "completed")
+    kwargs.setdefault("scientific_verdict", "INCONCLUSIVE")
+    kwargs.setdefault("verdict_reasons", ("aucune politique de verdict enregistrée",))
+    return MonteCarloEvidence(**kwargs)
+
+
+def test_monte_carlo_validation_type_is_registered():
+    from validation_run import VALIDATION_TYPE_MONTE_CARLO
+    assert VALIDATION_TYPE_MONTE_CARLO == "monte_carlo"
+
+
+def test_monte_carlo_distribution_summary_is_an_explicit_type_not_an_opaque_dict():
+    from validation_run import MonteCarloDistributionSummary
+    assert isinstance(_distribution_summary(), MonteCarloDistributionSummary)
+
+
+def test_monte_carlo_semantics_mismatch_is_a_value_error_subclass():
+    from validation_run import MonteCarloSemanticsMismatch
+    assert issubclass(MonteCarloSemanticsMismatch, ValueError)
+
+
+@pytest.mark.parametrize("bad_id", ["", "   ", None])
+def test_build_monte_carlo_specification_requires_a_real_source_validation_run_id(bad_id):
+    """ADR 0022 Décision 5 — ValueError immédiat, AVANT tout calcul (master_seed en dépend
+    directement), mirroring le garde-fou dataset_snapshot_id de build_validation_run()."""
+    from validation_run import build_monte_carlo_specification
+
+    with pytest.raises(ValueError):
+        build_monte_carlo_specification(
+            source_validation_run_id=bad_id, source_trades_from_optimized_params=False,
+        )
+
+
+def test_build_monte_carlo_specification_derives_the_same_master_seed_for_the_same_source_id():
+    """Déterminisme (ADR 0022 Décision 5/13) : master_seed dépend UNIQUEMENT de
+    source_validation_run_id, jamais de source_trades_from_optimized_params (variée ici pour le
+    prouver)."""
+    from validation_run import build_monte_carlo_specification
+
+    spec_a = build_monte_carlo_specification(
+        source_validation_run_id="val_same", source_trades_from_optimized_params=False,
+    )
+    spec_b = build_monte_carlo_specification(
+        source_validation_run_id="val_same", source_trades_from_optimized_params=True,
+    )
+    assert spec_a.master_seed == spec_b.master_seed
+
+
+def test_build_monte_carlo_specification_derives_different_master_seeds_for_different_source_ids():
+    """Anti "seed shopping" (finding MAJOR M4, revue scientifique indépendante) : deux
+    source_validation_run_id différents produisent des master_seed différents."""
+    from validation_run import build_monte_carlo_specification
+
+    spec_a = build_monte_carlo_specification(
+        source_validation_run_id="val_a", source_trades_from_optimized_params=False,
+    )
+    spec_b = build_monte_carlo_specification(
+        source_validation_run_id="val_b", source_trades_from_optimized_params=False,
+    )
+    assert spec_a.master_seed != spec_b.master_seed
+
+
+def test_build_monte_carlo_specification_fixes_n_simulations_and_semantics_version():
+    """ADR 0022 Décision 4/5 — n_simulations/monte_carlo_semantics_version restent des constantes
+    module, jamais des valeurs choisies par l'appelant."""
+    from validation_run import (
+        MONTE_CARLO_DEFAULT_N_SIMULATIONS,
+        MONTE_CARLO_SEMANTICS_VERSION,
+        build_monte_carlo_specification,
+    )
+
+    spec = build_monte_carlo_specification(
+        source_validation_run_id="val_x", source_trades_from_optimized_params=False,
+    )
+    assert spec.n_simulations == MONTE_CARLO_DEFAULT_N_SIMULATIONS
+    assert spec.monte_carlo_semantics_version == MONTE_CARLO_SEMANTICS_VERSION
+    assert spec.verdict_policy_id is None
+
+
+def test_build_monte_carlo_specification_does_not_accept_master_seed_as_a_free_parameter():
+    """ADR 0022 Décision 5 (correction M4, "seed shopping") — master_seed n'est jamais un
+    paramètre choisi librement par l'appelant, seulement un champ DÉRIVÉ : TypeError attendu (le
+    builder n'expose pas ce paramètre), jamais une acceptation silencieuse."""
+    from validation_run import build_monte_carlo_specification
+
+    with pytest.raises(TypeError):
+        build_monte_carlo_specification(
+            source_validation_run_id="val_x",
+            source_trades_from_optimized_params=False,
+            master_seed=42,
+        )
+
+
+def test_build_monte_carlo_specification_does_not_accept_n_simulations_as_a_free_parameter():
+    """ADR 0022 Décision 4/5 — n_simulations reste une constante module, jamais un paramètre de
+    build_monte_carlo_specification() (empêcherait un appelant de rejouer avec un nombre de
+    simulations différent en quête d'un résultat plus favorable)."""
+    from validation_run import build_monte_carlo_specification
+
+    with pytest.raises(TypeError):
+        build_monte_carlo_specification(
+            source_validation_run_id="val_x",
+            source_trades_from_optimized_params=False,
+            n_simulations=20_000,
+        )
+
+
+def test_build_validation_run_accepts_a_correct_monte_carlo_pair():
+    from validation_run import (
+        VALIDATION_TYPE_MONTE_CARLO,
+        MonteCarloEvidence,
+        MonteCarloSpecification,
+    )
+
+    run = _run(
+        validation_type=VALIDATION_TYPE_MONTE_CARLO,
+        specification=_monte_carlo_specification(),
+        evidence=_monte_carlo_evidence(),
+    )
+    assert run.validation_type == "monte_carlo"
+    assert isinstance(run.specification, MonteCarloSpecification)
+    assert isinstance(run.evidence, MonteCarloEvidence)
+
+
+def test_build_validation_run_rejects_monte_carlo_specification_with_oos_evidence():
+    from validation_run import VALIDATION_TYPE_MONTE_CARLO
+
+    with pytest.raises(ValueError):
+        _run(
+            validation_type=VALIDATION_TYPE_MONTE_CARLO,
+            specification=_monte_carlo_specification(),
+            evidence=_evidence(),
+        )
+
+
+def test_build_validation_run_rejects_oos_specification_with_monte_carlo_evidence():
+    with pytest.raises(ValueError):
+        _run(
+            validation_type="oos",
+            specification=_specification(),
+            evidence=_monte_carlo_evidence(),
+        )
+
+
+def test_build_validation_run_rejects_walk_forward_specification_with_monte_carlo_evidence():
+    with pytest.raises(ValueError):
+        _run(
+            validation_type="walk_forward",
+            specification=_walk_forward_specification(),
+            evidence=_monte_carlo_evidence(),
+        )
+
+
+def test_build_validation_run_rejects_monte_carlo_specification_with_walk_forward_evidence():
+    from validation_run import VALIDATION_TYPE_MONTE_CARLO
+
+    with pytest.raises(ValueError):
+        _run(
+            validation_type=VALIDATION_TYPE_MONTE_CARLO,
+            specification=_monte_carlo_specification(),
+            evidence=_walk_forward_evidence(),
+        )
+
+
+def test_existing_walk_forward_validation_run_construction_is_unaffected_by_monte_carlo_registration():
+    """Non-régression explicite : enregistrer "monte_carlo" ne doit rien changer aux chemins
+    "oos"/"walk_forward" déjà établis (AF-V-01/AF-V-02/AF-V-06)."""
+    run = _run(
+        validation_type="walk_forward",
+        specification=_walk_forward_specification(),
+        evidence=_walk_forward_evidence(),
+    )
+    assert run.validation_type == "walk_forward"
+
+
+def test_save_and_load_validation_run_round_trips_a_monte_carlo_run(tmp_path):
+    """Round-trip réel sur disque (build_validation_run() -> save_validation_run() ->
+    load_validation_run()) pour validation_type="monte_carlo" — préserve tous les champs, y
+    compris les MonteCarloDistributionSummary imbriqués. Comme pour Walk-Forward (voir
+    test_save_and_load_validation_run_round_trips_a_walk_forward_run), load_validation_run() ne
+    rehydrate PAS les dataclasses imbriquées au-delà de evidence_cls(**raw_evidence) — cette
+    tranche n'a pas le droit de toucher load_validation_run() (hors scope, voir mission) : les
+    MonteCarloDistributionSummary reviennent donc comme de simples dict après un aller-retour
+    JSON, jamais comme une égalité stricte d'objet. Ce test compare le CONTENU, pas l'identité de
+    type — même principe déjà documenté pour fold_results/aggregate."""
+    from dataclasses import asdict
+
+    from validation_run import VALIDATION_TYPE_MONTE_CARLO
+
+    spec = _monte_carlo_specification(source_validation_run_id="val_mc_source")
+    evidence = _monte_carlo_evidence()
+    run = _run(
+        validation_run_id="val_mc",
+        validation_type=VALIDATION_TYPE_MONTE_CARLO,
+        specification=spec,
+        evidence=evidence,
+    )
+    path = tmp_path / "mc_run.json"
+    save_validation_run(path, run)
+
+    loaded = load_validation_run(path)
+
+    assert loaded.validation_type == "monte_carlo"
+    assert loaded.specification.n_simulations == spec.n_simulations
+    assert loaded.specification.master_seed == spec.master_seed
+    assert loaded.specification.source_validation_run_id == spec.source_validation_run_id
+    assert (
+        loaded.specification.source_trades_from_optimized_params
+        == spec.source_trades_from_optimized_params
+    )
+    assert (
+        loaded.specification.monte_carlo_semantics_version
+        == spec.monte_carlo_semantics_version
+    )
+    assert loaded.specification.verdict_policy_id == spec.verdict_policy_id
+
+    assert loaded.evidence.n_input_trades == evidence.n_input_trades
+    assert loaded.evidence.zero_trade_input == evidence.zero_trade_input
+    assert loaded.evidence.observed_net_ret_pct == evidence.observed_net_ret_pct
+    assert (
+        loaded.evidence.observed_max_dd_trade_close_basis_pct
+        == evidence.observed_max_dd_trade_close_basis_pct
+    )
+    assert (
+        loaded.evidence.observed_lag1_autocorrelation
+        == evidence.observed_lag1_autocorrelation
+    )
+    assert (
+        loaded.evidence.observed_longest_losing_streak
+        == evidence.observed_longest_losing_streak
+    )
+    assert loaded.evidence.execution_status == evidence.execution_status
+    assert loaded.evidence.scientific_verdict == evidence.scientific_verdict
+    assert list(loaded.evidence.verdict_reasons) == list(evidence.verdict_reasons)
+
+    assert loaded.evidence.sequence_risk_max_dd_trade_close_basis_pct == asdict(
+        evidence.sequence_risk_max_dd_trade_close_basis_pct
+    )
+    assert loaded.evidence.sequence_risk_longest_losing_streak == asdict(
+        evidence.sequence_risk_longest_losing_streak
+    )
+    assert loaded.evidence.sampling_uncertainty_net_ret_pct == asdict(
+        evidence.sampling_uncertainty_net_ret_pct
+    )
+    assert loaded.evidence.sampling_uncertainty_max_dd_trade_close_basis_pct == asdict(
+        evidence.sampling_uncertainty_max_dd_trade_close_basis_pct
+    )
+
+
+def test_save_and_load_validation_run_round_trips_a_monte_carlo_zero_trade_run(tmp_path):
+    """zero_trade_input=True -> tous les champs de percentiles/observed_* valent None (ADR 0022
+    Décision 7) — vérifie que ce None round-trip fidèlement, distinct du cas peuplé ci-dessus."""
+    from validation_run import VALIDATION_TYPE_MONTE_CARLO
+
+    spec = _monte_carlo_specification(source_validation_run_id="val_mc_zero")
+    evidence = _monte_carlo_evidence(
+        n_input_trades=0,
+        zero_trade_input=True,
+        observed_net_ret_pct=None,
+        observed_max_dd_trade_close_basis_pct=None,
+        observed_lag1_autocorrelation=None,
+        observed_longest_losing_streak=None,
+        sequence_risk_max_dd_trade_close_basis_pct=None,
+        sequence_risk_longest_losing_streak=None,
+        sampling_uncertainty_net_ret_pct=None,
+        sampling_uncertainty_max_dd_trade_close_basis_pct=None,
+    )
+    run = _run(
+        validation_run_id="val_mc_zero",
+        validation_type=VALIDATION_TYPE_MONTE_CARLO,
+        specification=spec,
+        evidence=evidence,
+    )
+    path = tmp_path / "mc_zero_run.json"
+    save_validation_run(path, run)
+
+    loaded = load_validation_run(path)
+
+    assert loaded.evidence.zero_trade_input is True
+    assert loaded.evidence.n_input_trades == 0
+    assert loaded.evidence.observed_net_ret_pct is None
+    assert loaded.evidence.sequence_risk_max_dd_trade_close_basis_pct is None
+    assert loaded.evidence.sampling_uncertainty_net_ret_pct is None

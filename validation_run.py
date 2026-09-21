@@ -160,6 +160,7 @@ jamais un couple `dict`/`dict` générique opaque. Ce ticket introduit ce contra
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -376,6 +377,131 @@ class WalkForwardEvidence:
     verdict_reasons: Tuple[str, ...]
 
 
+VALIDATION_TYPE_MONTE_CARLO = "monte_carlo"
+"""AF-V-03 (Monte-Carlo), voir `docs/adr/0022-monte-carlo-trade-resampling-v1.md` Décision 11 —
+troisième `validation_type` enregistré après `"oos"`/`"walk_forward"`. Uniquement la forme typée
+ici (`MonteCarloSpecification`/`MonteCarloEvidence`) — l'algorithme de rééchantillonnage lui-même
+vit dans `monte_carlo.py` (AF-V-03 Slice 2), jamais dans ce module leaf."""
+
+MONTE_CARLO_SEMANTICS_VERSION = "mc-trade-resampling-v1"
+"""Versionne le protocole Monte-Carlo V1 (permutation + bootstrap i.i.d. sur trades, ADR 0022
+Décisions 2/3) — mirroring `walk_forward.WALK_FORWARD_SEMANTICS_VERSION`. Une future V2
+(bloc-bootstrap préservant l'autocorrélation) incrémenterait cette constante, jamais réutilisée
+silencieusement pour un protocole différent."""
+
+MONTE_CARLO_DEFAULT_N_SIMULATIONS = 10_000
+"""Constante module — ADR 0022 Décision 4/5 : jamais un paramètre choisi librement par l'appelant
+de `build_monte_carlo_specification()` (fermerait un canal de p-hacking à coût nul, finding
+MAJOR M4 de la revue scientifique indépendante)."""
+
+_MONTE_CARLO_MASTER_SEED_DOMAIN_TAG = "mc-v1-master"
+"""Tag de domaine SHA-256 pour la dérivation de `MonteCarloSpecification.master_seed` — ADR 0022
+Décision 5. Distinct de `_MONTE_CARLO_SEED_DOMAIN_TAG` (utilisé par `monte_carlo.py`, Slice 2,
+pour dériver les graines PAR MÉTHODE depuis `master_seed`, jamais depuis
+`source_validation_run_id` directement)."""
+
+
+class MonteCarloSemanticsMismatch(ValueError):
+    """Levée lors de la relecture d'une `MonteCarloEvidence` persistée sous une
+    `monte_carlo_semantics_version` différente de la courante — mirroring exact de
+    `walk_forward.WalkForwardSemanticsMismatch` (ADR 0021 Décision 9 / ADR 0022 Décision 9).
+    Jamais un mélange silencieux de résultats produits sous deux protocoles Monte-Carlo
+    différents."""
+
+
+@dataclass(frozen=True)
+class MonteCarloDistributionSummary:
+    """Résumé en percentiles d'une distribution simulée (`sequence_risk`/`sampling_uncertainty`,
+    ADR 0022 Décision 6) — `p5`/`p25`/`p50`/`p75`/`p95`, tous `Optional[float]` (`None` uniquement
+    pour un `MonteCarloEvidence.zero_trade_input=True`, jamais pour une distribution réellement
+    calculée). Type explicite, jamais un `dict` opaque — mirroring le principe déjà retenu partout
+    ailleurs dans ce dépôt pour toute forme de preuve typée."""
+
+    p5: Optional[float]
+    p25: Optional[float]
+    p50: Optional[float]
+    p75: Optional[float]
+    p95: Optional[float]
+
+
+@dataclass(frozen=True)
+class MonteCarloSpecification:
+    """Intention figée AVANT exécution d'un Monte-Carlo — ADR 0022 Décision 5/11. `master_seed`
+    reste un champ ordinaire de cette dataclass frozen (dette disciplinaire assumée, pas
+    structurelle — voir Décision 5), mais `build_monte_carlo_specification()` reste la SEULE
+    construction sanctionnée en pratique : elle seule dérive `master_seed` de
+    `source_validation_run_id`, jamais un entier fourni librement par l'appelant."""
+
+    n_simulations: int
+    master_seed: int
+    source_validation_run_id: str
+    source_trades_from_optimized_params: bool
+    monte_carlo_semantics_version: str
+    verdict_policy_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MonteCarloEvidence:
+    """Preuve factuelle + verdict scientifique d'un Monte-Carlo — ADR 0022 Décisions 6/7/12 :
+    uniquement des statistiques descriptives, jamais un jugement au-delà de `scientific_verdict`
+    (contraint, `UnknownVerdictPolicy` réutilisée telle quelle — jamais de politique inventée ici).
+    `zero_trade_input=True` -> tous les champs `observed_*`/percentiles valent `None` (ADR 0022
+    Décision 7, jamais une exception pour un `n_trades == 0`). `*_trade_close_basis_pct` : nom de
+    champ délibérément explicite (jamais `*_max_dd_pct` seul) — ce drawdown n'est observable
+    qu'aux points de clôture de trade, jamais comparable directement au `max_dd_pct` barre-par-barre
+    du moteur (ADR 0022 Décision 6)."""
+
+    n_input_trades: int
+    zero_trade_input: bool
+    observed_net_ret_pct: Optional[float]
+    observed_max_dd_trade_close_basis_pct: Optional[float]
+    observed_lag1_autocorrelation: Optional[float]
+    observed_longest_losing_streak: Optional[int]
+    sequence_risk_max_dd_trade_close_basis_pct: Optional[MonteCarloDistributionSummary]
+    sequence_risk_longest_losing_streak: Optional[MonteCarloDistributionSummary]
+    sampling_uncertainty_net_ret_pct: Optional[MonteCarloDistributionSummary]
+    sampling_uncertainty_max_dd_trade_close_basis_pct: Optional[MonteCarloDistributionSummary]
+    execution_status: str
+    scientific_verdict: str
+    verdict_reasons: Tuple[str, ...]
+
+
+def build_monte_carlo_specification(
+    source_validation_run_id: str,
+    source_trades_from_optimized_params: bool,
+    verdict_policy_id: Optional[str] = None,
+) -> MonteCarloSpecification:
+    """SEULE construction sanctionnée d'une `MonteCarloSpecification` (ADR 0022 Décision 5) —
+    dérive `master_seed` de façon déterministe depuis `source_validation_run_id` (SHA-256, jamais
+    un entier fourni librement par l'appelant — ferme le canal de "seed shopping", finding MAJOR
+    M4 de la revue scientifique indépendante). `n_simulations`/`monte_carlo_semantics_version` ne
+    sont PAS des paramètres : toujours fixés en interne aux constantes module
+    `MONTE_CARLO_DEFAULT_N_SIMULATIONS`/`MONTE_CARLO_SEMANTICS_VERSION` courantes.
+
+    `ValueError` immédiat si `source_validation_run_id` est absent/vide, AVANT tout calcul —
+    mirroring exact du garde-fou déjà utilisé pour `dataset_snapshot_id` dans
+    `build_validation_run()`."""
+    if not isinstance(source_validation_run_id, str) or not source_validation_run_id.strip():
+        raise ValueError(
+            "source_validation_run_id est obligatoire pour construire une "
+            "MonteCarloSpecification — master_seed en dépend directement (ADR 0022 Décision 5)."
+        )
+    master_seed = int(
+        hashlib.sha256(
+            f"{source_validation_run_id}:{_MONTE_CARLO_MASTER_SEED_DOMAIN_TAG}".encode("utf-8")
+        ).hexdigest(),
+        16,
+    )
+    return MonteCarloSpecification(
+        n_simulations=MONTE_CARLO_DEFAULT_N_SIMULATIONS,
+        master_seed=master_seed,
+        source_validation_run_id=source_validation_run_id,
+        source_trades_from_optimized_params=source_trades_from_optimized_params,
+        monte_carlo_semantics_version=MONTE_CARLO_SEMANTICS_VERSION,
+        verdict_policy_id=verdict_policy_id,
+    )
+
+
 ValidationSpecification = Union[OosValidationSpecification, WalkForwardSpecification]
 """Contrat commun explicite (tagged union, AF-V-06/AF-V-02) — étendre en ajoutant un membre par
 futur `validation_type`, jamais en élargissant un membre existant."""
@@ -412,6 +538,7 @@ class ValidationRun:
 _VALIDATION_TYPES: Dict[str, Tuple[type, type]] = {
     VALIDATION_TYPE_OOS: (OosValidationSpecification, OosValidationEvidence),
     VALIDATION_TYPE_WALK_FORWARD: (WalkForwardSpecification, WalkForwardEvidence),
+    VALIDATION_TYPE_MONTE_CARLO: (MonteCarloSpecification, MonteCarloEvidence),
 }
 """Registre explicite `validation_type -> (classe specification, classe evidence)` — voir
 docstring du module (AF-V-06). Étendre en ajoutant une entrée par futur ticket
