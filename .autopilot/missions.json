@@ -327,6 +327,63 @@
         "round-trip réel build_validation_run()/save_validation_run()/load_validation_run() vérifié sur disque",
         "aucune politique concrète de seuils PASS/FAIL introduite"
       ]
+    },
+    {
+      "id": "AF-V-02-SLICE-7",
+      "title": "AF-V-02 Slice 7 — Nouveau DatasetSplitPlan (v2) VALIDATION 54 mois / 5 folds (Décision 8, allocation utilisateur)",
+      "status": "PLANNED",
+      "prompt_file": "prompts/af-v02-slice-7.md",
+      "depends_on": [
+        "AF-V-02-SLICE-6"
+      ],
+      "allowed_paths": [
+        "scripts/create_walk_forward_validation_split_plan_v2.py",
+        "tests/test_create_walk_forward_validation_split_plan_v2.py"
+      ],
+      "forbidden_paths": [
+        "engine.py",
+        "optimizer.py",
+        "optimization_store.py",
+        "compute_split_dates",
+        "strategy_contracts.py",
+        "dataset_split.py",
+        "walk_forward.py",
+        "validation_run.py",
+        "strategies/",
+        "app.py",
+        "nasdaq_3m.csv",
+        "app_corrupted_backup.py",
+        "docs/adr/",
+        "scripts/create_walk_forward_validation_split_plan.py",
+        "tests/test_create_walk_forward_validation_split_plan.py"
+      ],
+      "targeted_tests": [
+        "tests/test_create_walk_forward_validation_split_plan_v2.py"
+      ],
+      "regression_tests": [],
+      "risk_level": "high",
+      "max_attempts": 3,
+      "max_budget_usd": 20.0,
+      "requires_clean_worktree": true,
+      "scientific_contracts": [
+        "ADR-0021-decision-8"
+      ],
+      "human_gate_conditions": [
+        "modification de FINAL_HOLDOUT",
+        "modification de la stratégie étalon Perfect Revolution V1",
+        "toute divergence entre la géométrie de fold réellement obtenue et les 5 folds/aucun reliquat déjà vérifiés dans la mission",
+        "besoin réel de modifier le script ou les tests v1 existants (jamais autorisé)",
+        "extension du contrat déjà figé de DatasetSplitPlan/SplitBoundary non strictement additive"
+      ],
+      "completion_evidence": [
+        "tests ciblés verts",
+        "suite complète verte, y compris tests/test_create_walk_forward_validation_split_plan.py (v1) inchangés (régression complète imposée par risk_level=high)",
+        "revue indépendante sans finding BLOQUANT/MAJEUR",
+        "nouveau split_plan_id distinct du plan historique ET du plan v1, FINAL_HOLDOUT identique",
+        "compute_fold_definitions() sur le nouveau plan produit exactement 5 folds, detect_partial_tail() retourne None",
+        "script v1 et son artefact déjà réel sur disque intacts, jamais modifiés/supprimés",
+        "script v2 réellement exécuté dans le worktree permanent, artefact réel produit et vérifié"
+      ]
     }
   ]
 }
