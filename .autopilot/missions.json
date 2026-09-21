@@ -443,6 +443,116 @@
         "round-trip réel build_validation_run()/save_validation_run()/load_validation_run() vérifié sur disque",
         "run_walk_forward()/resume_walk_forward_run()/persist_walk_forward_run() inchangées"
       ]
+    },
+    {
+      "id": "AF-V-03-SLICE-1",
+      "title": "AF-V-03 Slice 1 — Contrats typés MonteCarloSpecification/MonteCarloEvidence (ADR 0022)",
+      "status": "PLANNED",
+      "prompt_file": "prompts/af-v03-slice-1.md",
+      "depends_on": [],
+      "allowed_paths": [
+        "validation_run.py",
+        "tests/test_validation_run.py"
+      ],
+      "forbidden_paths": [
+        "engine.py",
+        "optimizer.py",
+        "optimization_store.py",
+        "dataset_split.py",
+        "walk_forward.py",
+        "validation_oos.py",
+        "strategy_contracts.py",
+        "strategies/",
+        "app.py",
+        "nasdaq_3m.csv",
+        "app_corrupted_backup.py",
+        "docs/adr/"
+      ],
+      "targeted_tests": [
+        "tests/test_validation_run.py"
+      ],
+      "regression_tests": [],
+      "risk_level": "high",
+      "max_attempts": 3,
+      "max_budget_usd": 20.0,
+      "requires_clean_worktree": true,
+      "scientific_contracts": [
+        "ADR-0022-monte-carlo-v1"
+      ],
+      "human_gate_conditions": [
+        "modification de FINAL_HOLDOUT",
+        "modification de la stratégie étalon Perfect Revolution V1",
+        "nécessité réelle de définir une politique concrète de seuils PASS/FAIL",
+        "extension du contrat déjà figé de WalkForwardSpecification/WalkForwardEvidence/OosValidationEvidence non strictement additive",
+        "divergence entre les champs demandés par cette mission et ceux réellement décidés par ADR 0022 Décision 11"
+      ],
+      "completion_evidence": [
+        "tests ciblés verts",
+        "suite complète verte (régression complète imposée par risk_level=high)",
+        "revue indépendante sans finding BLOQUANT/MAJEUR",
+        "build_monte_carlo_specification() dérive master_seed de façon déterministe depuis source_validation_run_id, jamais un paramètre libre",
+        "UnknownVerdictPolicy réutilisée telle quelle, jamais dupliquée",
+        "_VALIDATION_TYPES étendu par une entrée littérale, jamais une affectation a posteriori",
+        "round-trip réel build_validation_run()/save_validation_run()/load_validation_run() vérifié sur disque pour validation_type=monte_carlo",
+        "aucune modification des contrats Walk-Forward/OOS déjà en place"
+      ]
+    },
+    {
+      "id": "AF-V-03-SLICE-2",
+      "title": "AF-V-03 Slice 2 — Algorithme monte_carlo.py (permutation, bootstrap, ADR 0022)",
+      "status": "PLANNED",
+      "prompt_file": "prompts/af-v03-slice-2.md",
+      "depends_on": [
+        "AF-V-03-SLICE-1"
+      ],
+      "allowed_paths": [
+        "monte_carlo.py",
+        "tests/test_monte_carlo.py"
+      ],
+      "forbidden_paths": [
+        "engine.py",
+        "optimizer.py",
+        "optimization_store.py",
+        "dataset_split.py",
+        "walk_forward.py",
+        "validation_oos.py",
+        "validation_run.py",
+        "strategy_contracts.py",
+        "strategies/",
+        "app.py",
+        "nasdaq_3m.csv",
+        "app_corrupted_backup.py",
+        "docs/adr/"
+      ],
+      "targeted_tests": [
+        "tests/test_monte_carlo.py"
+      ],
+      "regression_tests": [],
+      "risk_level": "high",
+      "max_attempts": 3,
+      "max_budget_usd": 20.0,
+      "requires_clean_worktree": true,
+      "scientific_contracts": [
+        "ADR-0022-monte-carlo-v1"
+      ],
+      "human_gate_conditions": [
+        "modification de FINAL_HOLDOUT",
+        "modification de la stratégie étalon Perfect Revolution V1",
+        "nécessité réelle de définir une politique concrète de seuils PASS/FAIL",
+        "conflit scientifique non résoluble sur l’algorithme de permutation/bootstrap tel que décrit par ADR 0022",
+        "nécessité réelle d’importer engine.py/optimizer.py/dataset_split.py/walk_forward.py dans monte_carlo.py"
+      ],
+      "completion_evidence": [
+        "tests ciblés verts",
+        "suite complète verte (régression complète imposée par risk_level=high)",
+        "revue indépendante sans finding BLOQUANT/MAJEUR",
+        "déterminisme bit-à-bit prouvé par test",
+        "default_rng instancié au plus 2 fois (jamais un par simulation), prouvé par test",
+        "test de cohérence stricte observed_net_ret_pct vs AggregateResult.oos_net_return_pct",
+        "aucune dépendance moteur (import statique testé), aucune mention de FINAL_HOLDOUT",
+        "probability_of_ruin absent (jamais réintroduit)",
+        "scientific_verdict toujours INCONCLUSIVE sans verdict_policy_id, UnknownVerdictPolicy levée sinon"
+      ]
     }
   ]
 }
