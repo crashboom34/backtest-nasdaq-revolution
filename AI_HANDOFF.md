@@ -2146,3 +2146,63 @@ l'utilisateur réservant `HUMAN_GATE_REQUIRED`/l'arrêt aux décisions scientifi
 réellement absentes des sources, jamais à une invention silencieuse. L'Autopilot reste actif et
 réactivable dès qu'une décision d'allocation `VALIDATION` (ou une politique de verdict, ou un
 besoin app.py concret) est fournie par l'utilisateur.
+
+## 31. AF-V-02 Slice 7 — Décision d'allocation VALIDATION fournie par l'utilisateur, nouveau DatasetSplitPlan v2 (2026-09-21)
+
+**Décision explicite de l'utilisateur** (réponse directe à §30) : TRAIN macro (Discovery)
+`[2017-10-31T00:00:00+00:00, 2020-11-19T00:00:00+00:00)`, `VALIDATION` (Walk-Forward)
+`[2020-11-19T00:00:00+00:00, 2025-05-19T00:00:00+00:00)` (54 mois calendaires), `FINAL_HOLDOUT`
+inchangé. Autorisation explicite de reprendre l'enchaînement automatique sans reconfirmation entre
+slices, consommation normale des crédits Claude autorisée, `HUMAN_GATE_REQUIRED` réservé aux
+décisions scientifiques/produit réellement absentes.
+
+**Vérifié avec les fonctions calendaires réelles du dépôt AVANT mise en file** (jamais supposé) :
+`compute_fold_definitions()` avec le préréglage Rolling par défaut (`P24M`/`P6M`/`P6M`) sur cette
+zone produit EXACTEMENT 5 folds TEST non chevauchants, le dernier `test_end` tombant exactement sur
+`VALIDATION.end`/`FINAL_HOLDOUT.start` (contigu, zéro écart), `detect_partial_tail()` retourne
+`None`.
+
+**Découverte importante faite avant la mise en file** : un premier `DatasetSplitPlan`
+(`split_perfect_revolution_v1_walk_forward_v1`, `VALIDATION_MONTHS=42`, 3 folds) existait déjà —
+décidé et committé lors de Slice 1 (2026-09-15/16, §23), **jamais explicitement confirmé par
+l'utilisateur à l'époque**, jamais consommé par aucun code depuis. Artefact réel déjà présent sur
+disque dans le checkout principal (`results/dataset_splits/.../split_plan.json`, `.gitignore`,
+`created_at: 2026-09-15T05:35:40`). `DatasetSplitPlan` étant immuable, ce plan v1 et son script
+(`scripts/create_walk_forward_validation_split_plan.py`) restent **intégralement intacts, jamais
+modifiés ni supprimés** — la nouvelle décision de l'utilisateur construit un **second** plan sous
+un `split_plan_id` distinct (`split_perfect_revolution_v1_walk_forward_v2`), jamais un écrasement.
+
+**AF-V-02 Slice 7** (`.autopilot/prompts/af-v02-slice-7.md`) : nouveau
+`scripts/create_walk_forward_validation_split_plan_v2.py` +
+`tests/test_create_walk_forward_validation_split_plan_v2.py`, mirroring exact du script/tests v1
+(Slice 1), `VALIDATION_MONTHS=54`. Suite complète verte (1379/1379), y compris les tests v1
+inchangés (preuve que le plan/script v1 restent intacts). Review indépendante réelle : 1 lot, 2
+fichiers couverts, 3 findings non bloquants. Commit réel
+`88c9cf10b532a7e1b955c9161abf21d8ae2f9429`, poussé sur `origin/autopilot/permanent` puis intégré
+(fast-forward, régression complète 1379/1379 revérifiée) sur `origin/master`.
+
+**Exécution réelle du script, complétée après coup** : le worktree permanent Autopilot n'a pas
+localement le plan historique (`results/` est `.gitignore`, chaque worktree Git a son propre
+répertoire de travail non versionné, distinct du checkout principal) — la mission elle-même n'a
+donc pas pu exécuter `main()` pour de vrai dans ce worktree. Complété manuellement après la
+review : copie en LECTURE SEULE du fichier de données local `split_plan.json` historique depuis le
+checkout principal (jamais une modification du checkout principal lui-même — un simple fichier de
+données généré, `.gitignore`, au même titre que `nasdaq_3m.csv` déjà copié dans chaque worktree)
+vers le worktree permanent, puis exécution réelle de
+`python scripts/create_walk_forward_validation_split_plan_v2.py` — sortie vérifiée :
+`TRAIN=[2017-10-31,2020-11-19)`, `VALIDATION=[2020-11-19,2025-05-19)`,
+`FINAL_HOLDOUT=[2025-05-19,2026-05-20)` inchangé, plan historique non modifié. Artefact réel
+produit à `results/dataset_splits/split_perfect_revolution_v1_walk_forward_v2/split_plan.json`
+dans le worktree permanent (`.gitignore`, jamais commité — cohérent avec la convention déjà
+établie pour `results/`).
+
+**Dossier principal et `business-b2b/`** : intégralement préservés (le checkout principal n'a été
+que LU, jamais modifié).
+
+**Prochaine tranche candidate** : le câblage `walk_forward.py` -> `build_walk_forward_evidence()`
+-> `build_validation_run()` -> `save_validation_run()`, explicitement laissé hors scope par Slice 6
+faute d'un `split_plan_id` réel — désormais disponible
+(`split_perfect_revolution_v1_walk_forward_v2`). Reste à concevoir précisément (quel appelant
+fournit `research_run_id`/`strategy_name`/`strategy_params` — probablement une nouvelle fonction
+additive dans `walk_forward.py`, jamais un appel automatique depuis `run_walk_forward()`/
+`resume_walk_forward_run()` elles-mêmes).
