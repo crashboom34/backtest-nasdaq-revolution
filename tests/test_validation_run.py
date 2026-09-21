@@ -688,3 +688,110 @@ def test_save_and_load_validation_run_round_trips_a_walk_forward_run(tmp_path):
     assert loaded.evidence.scientific_verdict == run.evidence.scientific_verdict
     assert list(loaded.evidence.verdict_reasons) == list(run.evidence.verdict_reasons)
     assert list(loaded.evidence.fold_results) == list(run.evidence.fold_results)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 6 — build_walk_forward_evidence() : assemblage de la preuve + verdict
+# scientifique (ADR 0021 Décision 13). Aucune politique concrète de seuils PASS/FAIL n'existe dans
+# ce dépôt à ce jour : le verdict reste structurellement "INCONCLUSIVE" tant qu'aucune politique
+# n'est enregistrée (verdict_policy_id=None), et tout verdict_policy_id fourni sur un run complet
+# lève UnknownVerdictPolicy plutôt qu'un verdict inventé — voir mission Slice 6.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_build_walk_forward_evidence_without_policy_is_inconclusive():
+    from validation_run import WalkForwardRunOutcome, build_walk_forward_evidence
+
+    outcome = WalkForwardRunOutcome(fold_results=(), stopped_early=False)
+    evidence = build_walk_forward_evidence(outcome, aggregate=None, verdict_policy_id=None)
+
+    assert evidence.scientific_verdict == "INCONCLUSIVE"
+    assert len(evidence.verdict_reasons) > 0
+    assert evidence.execution_status == "completed"
+
+
+def test_build_walk_forward_evidence_execution_status_reflects_stopped_early():
+    from validation_run import WalkForwardRunOutcome, build_walk_forward_evidence
+
+    outcome = WalkForwardRunOutcome(fold_results=(), stopped_early=True)
+    evidence = build_walk_forward_evidence(outcome, aggregate=None, verdict_policy_id=None)
+
+    assert evidence.execution_status == "stopped_early"
+    assert evidence.scientific_verdict == "INCONCLUSIVE"
+
+
+def test_build_walk_forward_evidence_with_policy_on_complete_run_raises_unknown_verdict_policy():
+    """Aucune politique concrète n'est enregistrée dans ce dépôt — un verdict_policy_id fourni sur
+    un run complet (stopped_early=False) doit lever explicitement, jamais retomber silencieusement
+    sur INCONCLUSIVE ni inventer un verdict PASS/FAIL."""
+    from validation_run import (
+        UnknownVerdictPolicy,
+        WalkForwardRunOutcome,
+        build_walk_forward_evidence,
+    )
+
+    outcome = WalkForwardRunOutcome(fold_results=(), stopped_early=False)
+    with pytest.raises(UnknownVerdictPolicy):
+        build_walk_forward_evidence(outcome, aggregate=None, verdict_policy_id="some_policy_v1")
+
+
+def test_build_walk_forward_evidence_stopped_early_with_policy_stays_inconclusive_not_unknown_policy():
+    """Distingue explicitement ce cas du précédent (policy fournie + run COMPLET -> exception) :
+    un run interrompu (stopped_early=True) reste INCONCLUSIVE même avec un verdict_policy_id
+    fourni — jamais UnknownVerdictPolicy dans ce cas précis (ADR 0021 Décision 13, mission Slice 6
+    §1.b : le stopped_early prime sur la présence d'une politique)."""
+    from validation_run import WalkForwardRunOutcome, build_walk_forward_evidence
+
+    outcome = WalkForwardRunOutcome(fold_results=(), stopped_early=True)
+    evidence = build_walk_forward_evidence(
+        outcome, aggregate=None, verdict_policy_id="some_policy_v1",
+    )
+
+    assert evidence.scientific_verdict == "INCONCLUSIVE"
+    assert evidence.execution_status == "stopped_early"
+
+
+def test_build_walk_forward_evidence_passes_through_facts_unchanged():
+    """fold_results/aggregate sont des faits transmis tels quels — jamais recalculés ni filtrés par
+    build_walk_forward_evidence()."""
+    from validation_run import AggregateResult, WalkForwardRunOutcome, build_walk_forward_evidence
+
+    fold_results = ("sentinel_fold_result",)
+    aggregate = AggregateResult(
+        n_folds=1, n_folds_zero_trade=0, total_oos_trades=10, oos_net_return_pct=1.0,
+        oos_max_dd_pct=0.5, oos_profit_factor=1.5, oos_win_rate=0.6, oos_sharpe=None,
+        mean_fold_score_test=0.5, median_fold_score_test=0.5, worst_fold_id="fold_000",
+    )
+    outcome = WalkForwardRunOutcome(fold_results=fold_results, stopped_early=False)
+
+    evidence = build_walk_forward_evidence(outcome, aggregate=aggregate, verdict_policy_id=None)
+
+    assert evidence.fold_results == fold_results
+    assert evidence.aggregate is aggregate
+
+
+def test_save_and_load_round_trips_evidence_built_via_build_walk_forward_evidence(tmp_path):
+    """Round-trip réel sur disque (build_validation_run() -> save_validation_run() ->
+    load_validation_run()) d'une WalkForwardEvidence produite par build_walk_forward_evidence() —
+    distinct du round-trip déjà couvert plus haut, qui construit la WalkForwardEvidence à la main."""
+    from validation_run import WalkForwardRunOutcome, build_walk_forward_evidence
+
+    outcome = WalkForwardRunOutcome(fold_results=(), stopped_early=False)
+    evidence = build_walk_forward_evidence(outcome, aggregate=None, verdict_policy_id=None)
+
+    run = _run(
+        validation_run_id="val_wf_evidence",
+        validation_type="walk_forward",
+        specification=_walk_forward_specification(),
+        evidence=evidence,
+    )
+    path = tmp_path / "wf_evidence_run.json"
+    save_validation_run(path, run)
+
+    loaded = load_validation_run(path)
+
+    assert loaded.evidence.scientific_verdict == "INCONCLUSIVE"
+    assert loaded.evidence.execution_status == "completed"
+    assert list(loaded.evidence.verdict_reasons) == list(evidence.verdict_reasons)
+    assert loaded.evidence.aggregate is None
+    assert list(loaded.evidence.fold_results) == []

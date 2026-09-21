@@ -426,6 +426,16 @@ class IncoherentValidationRunError(ValueError):
     cas fichier absent/illisible/JSON invalide, qui reste tolérant (voir docstring du module)."""
 
 
+class UnknownVerdictPolicy(ValueError):
+    """Levée par `build_walk_forward_evidence()` (AF-V-02 Slice 6) quand un `verdict_policy_id`
+    non-`None` est fourni pour un run Walk-Forward COMPLET (`outcome.stopped_early is False`) —
+    ADR 0021 Décision 13, taxonomie fail-closed de la Décision 11. Aucune politique concrète de
+    seuils PASS/FAIL n'est enregistrée dans ce dépôt à ce jour : décider quels seuils
+    constitueraient un verdict scientifique valide est une décision scientifique/produit distincte,
+    hors périmètre de ce socle. Refus explicite plutôt qu'un verdict deviné ou un repli silencieux
+    sur `INCONCLUSIVE`, qui masquerait qu'une politique a été demandée mais n'existe pas."""
+
+
 def _parse_offset_aware(value: str, field_name: str) -> datetime:
     """Dupliqué intentionnellement de `dataset_split.py` (2ᵉ occurrence seulement — Rule of Three
     pas encore atteinte, pas d'extraction prématurée vers `atomic_json_store.py`)."""
@@ -467,6 +477,91 @@ def build_oos_validation_evidence(
         win_rate=win_rate,
         max_dd_pct=max_dd_pct,
     )
+
+
+def build_walk_forward_evidence(
+    outcome: WalkForwardRunOutcome,
+    aggregate: Optional[AggregateResult],
+    verdict_policy_id: Optional[str],
+) -> WalkForwardEvidence:
+    """Construit une `WalkForwardEvidence` (AF-V-02 Slice 6, ADR 0021 Décision 13) — mirroring
+    `build_oos_validation_evidence()` : reçoit des faits déjà calculés (`outcome`/`aggregate`),
+    jamais un backtest ou une géométrie de folds (ce module reste un leaf, aucun import de
+    `walk_forward.py`).
+
+    `fold_results`/`aggregate` sont transmis tels quels depuis `outcome`/`aggregate` — jamais
+    recalculés ni filtrés ici (ce sont des faits, voir docstring de `WalkForwardEvidence`).
+
+    `execution_status` : `"stopped_early"` si `outcome.stopped_early`, sinon `"completed"` —
+    exactement ces deux valeurs. Une erreur technique réelle ne produit jamais de
+    `WalkForwardEvidence` (l'exception remonte avant qu'un objet complet n'existe, Décision 13) :
+    cette fonction n'a donc rien à gérer pour ce cas.
+
+    `scientific_verdict`/`verdict_reasons` — **contrainte absolue (rappelée explicitement par la
+    mission Slice 6) : aucune politique concrète de seuils PASS/FAIL n'existe dans ce dépôt à ce
+    jour, cette fonction n'en invente aucune.** Trois règles, dans cet ordre :
+
+    1. `verdict_policy_id is None` -> toujours `"INCONCLUSIVE"` (cas normal tant qu'aucune
+       politique concrète n'existe).
+    2. `outcome.stopped_early is True` (même si `verdict_policy_id` est fourni) -> toujours
+       `"INCONCLUSIVE"`, avec une raison distincte de la précédente : l'agrégat ne couvre qu'un
+       préfixe des folds attendus — évaluer une politique de seuils calibrée pour l'ensemble
+       complet contre un sous-ensemble produirait un jugement trompeur (esprit du dernier
+       paragraphe de la Décision 13 : jamais une valeur trompeuse produite silencieusement). Ce
+       cas prime délibérément sur la règle 3 ci-dessous : un run interrompu avec une politique
+       fournie reste `INCONCLUSIVE`, jamais `UnknownVerdictPolicy` — décision de cette mission, pas
+       une déduction automatique du typage.
+    3. `verdict_policy_id` fourni ET `outcome.stopped_early is False` -> lève
+       `UnknownVerdictPolicy` (fail closed, ADR 0021 Décision 11) : aucune politique n'est encore
+       enregistrée dans ce dépôt, jamais un repli silencieux sur `INCONCLUSIVE` ni un seuil
+       inventé."""
+    execution_status = "stopped_early" if outcome.stopped_early else "completed"
+
+    if verdict_policy_id is None:
+        scientific_verdict = "INCONCLUSIVE"
+        verdict_reasons: Tuple[str, ...] = (
+            "aucune politique de verdict pré-enregistrée (verdict_policy_id=None) — ADR 0021 "
+            "Décision 13.",
+        )
+    elif outcome.stopped_early:
+        scientific_verdict = "INCONCLUSIVE"
+        verdict_reasons = (
+            "run interrompu (stopped_early=True) — l'agrégat ne couvre qu'un préfixe des folds "
+            "attendus ; évaluer une politique de seuils calibrée pour l'ensemble complet contre "
+            "un sous-ensemble produirait un jugement trompeur (ADR 0021 Décision 13, dernier "
+            "paragraphe).",
+        )
+    else:
+        raise UnknownVerdictPolicy(
+            f"verdict_policy_id={verdict_policy_id!r} fourni mais aucune politique de verdict "
+            "n'est enregistrée dans ce dépôt à ce jour — définir une politique concrète de seuils "
+            "PASS/FAIL est une décision scientifique/produit distincte, hors périmètre de ce "
+            "socle (ADR 0021 Décision 13). Refus explicite plutôt qu'un verdict deviné ou un "
+            "repli silencieux sur INCONCLUSIVE."
+        )
+
+    return WalkForwardEvidence(
+        fold_results=outcome.fold_results,
+        aggregate=aggregate,
+        execution_status=execution_status,
+        scientific_verdict=scientific_verdict,
+        verdict_reasons=verdict_reasons,
+    )
+
+
+# AF-V-02 Slice 6 — choix d'implémentation explicite (mission Slice 6, section 2, laissée à
+# trancher par cette tranche) : `walk_forward.py` n'appelle PAS encore `build_walk_forward_evidence()`
+# -> `build_validation_run()` -> `save_validation_run()` lui-même. Cette tranche expose uniquement
+# `build_walk_forward_evidence()`, testée en isolation (voir `tests/test_validation_run.py`). Raison :
+# `build_validation_run()` exige `research_run_id`/`split_plan_id`/`dataset_snapshot_id`/
+# `strategy_name`/`strategy_params`, aucun desquels n'est aujourd'hui transporté par
+# `run_walk_forward()`/`persist_walk_forward_run()` (qui ne connaissent qu'un `validation_run_id`
+# optionnel) — câbler ces identifiants dans `walk_forward.py` sans appelant réel qui les fournisse
+# serait spéculatif (même principe que l'absence de sur-ingénierie déjà appliqué ailleurs dans ce
+# module). Un futur appelant explicite (même modèle que `persist_walk_forward_run()`, jamais
+# automatique depuis `run_walk_forward()`/`resume_walk_forward_run()` elles-mêmes) reste responsable
+# d'assembler ces identifiants et d'appeler les trois fonctions dans l'ordre — hors scope de cette
+# tranche (cf. mission Slice 6, exclusion explicite de l'intégration `app.py`).
 
 
 def build_oos_validation_specification(

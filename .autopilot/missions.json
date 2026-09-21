@@ -274,7 +274,7 @@
     {
       "id": "AF-V-02-SLICE-6",
       "title": "AF-V-02 Slice 6 — WalkForwardEvidence : assemblage de la preuve + verdict scientifique (Décision 13)",
-      "status": "PLANNED",
+      "status": "DONE",
       "prompt_file": "prompts/af-v02-slice-6.md",
       "depends_on": [
         "AF-V-02-SLICE-5"
