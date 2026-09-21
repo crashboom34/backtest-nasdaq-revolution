@@ -331,7 +331,7 @@
     {
       "id": "AF-V-02-SLICE-7",
       "title": "AF-V-02 Slice 7 — Nouveau DatasetSplitPlan (v2) VALIDATION 54 mois / 5 folds (Décision 8, allocation utilisateur)",
-      "status": "PLANNED",
+      "status": "DONE",
       "prompt_file": "prompts/af-v02-slice-7.md",
       "depends_on": [
         "AF-V-02-SLICE-6"
