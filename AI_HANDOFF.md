@@ -2079,3 +2079,70 @@ unité de travail resterait, par dérivation stricte de la même liste « hors s
 `WalkForwardEvidence`/`execution_status`/`scientific_verdict`/`verdict_reasons`/
 `validation_run.json` (ADR 0021 Décision 13) — mais ne pas la cadrer/lancer sans confirmation
 explicite de l'utilisateur sur la reprise du développement autonome.
+
+## 30. AF-V-02 Slice 6 — WalkForwardEvidence achevée ; ADR 0021 (les 15 Décisions) désormais entièrement implémenté ; pause avant une décision d'allocation VALIDATION (2026-09-21)
+
+**Reprise autorisée explicitement** par l'utilisateur : « Je confirme que tu peux reprendre
+l'enchaînement automatique des unités déjà cadrées par les ADR, la roadmap et AI_HANDOFF.md. Il
+n'est plus nécessaire de me demander une autorisation entre chaque slice. » — consommation normale
+des crédits Claude autorisée, `HUMAN_GATE_REQUIRED` réservé aux seules décisions scientifiques/
+produit réellement absentes des sources.
+
+**Correction hors-bande nécessaire avant relance** : Slice 5 avait été terminée et fusionnée
+manuellement (§29, commit `525f28f`) pendant que l'Autopilot était désactivé — le flip `DONE` de
+`missions.json` et le repositionnement `COMPLETED` de l'état persisté, normalement effectués dans
+le MÊME commit que le travail par `_handle_committing()`, n'avaient jamais eu lieu via la boucle
+elle-même. Un premier `autopilot resume` aurait donc tenté de re-corriger un finding déjà résolu
+sur un worktree déjà propre (processus arrêté immédiatement dès ce constat, avant toute
+consommation réelle). Corrigé via les mêmes mécanismes que le superviseur utilise lui-même —
+jamais une transition fabriquée pour contourner une garde : `mark_mission_status()` (flip DONE de
+`AF-V-02-SLICE-5`) et `AutopilotStateStore.save()` (repositionnement à `COMPLETED`, `mission_id`
+vidé, tous les champs de progression réinitialisés) — `_handle_completed()` (déjà testé, §27) a
+ensuite revérifié la file normalement à la reprise suivante.
+
+**Réactivation de l'Autopilot** : tâche planifiée Windows `AlphaForgeAutopilot` réactivée
+(`Enable-ScheduledTask`, précédemment désactivée sur demande explicite §29) — vérifiée pointant
+vers le worktree permanent, mêmes deux déclencheurs (logon + reprise 30 min, §28), une seule
+instance (verrou fichier, vérifié absent avant chaque lancement).
+
+**AF-V-02 Slice 6 — WalkForwardEvidence** (`.autopilot/prompts/af-v02-slice-6.md`, dérivée
+strictement de la docstring déjà existante de `WalkForwardEvidence`/de l'absence totale de tout
+mécanisme de politique de verdict dans ce dépôt — `OosValidationEvidence` ne porte aucun champ de
+verdict) : `build_walk_forward_evidence(outcome, aggregate, verdict_policy_id) ->
+WalkForwardEvidence` (nouveau, `validation_run.py`, mirroring `build_oos_validation_evidence()`) —
+`execution_status` ∈ {`"completed"`, `"stopped_early"`} reflète `outcome.stopped_early` ;
+`scientific_verdict` reste TOUJOURS `"INCONCLUSIVE"` sans `verdict_policy_id` (cas normal, aucune
+politique concrète de seuils PASS/FAIL n'existe dans ce dépôt) ; reste `"INCONCLUSIVE"` même avec
+un `verdict_policy_id` fourni si `stopped_early=True` (agrégat partiel, jamais un jugement
+trompeur) ; lève `UnknownVerdictPolicy` (nouvelle exception, taxonomie Décision 11) pour tout
+`verdict_policy_id` fourni sur un run complet — **aucun seuil scientifique inventé, refus explicite
+plutôt qu'un verdict deviné**, exactement la contrainte rappelée par l'utilisateur. `walk_forward.py`
+n'appelle PAS encore ce nouveau chemin (`build_walk_forward_evidence()` -> `build_validation_run()`
+-> `save_validation_run()`) : choix documenté explicitement dans le code — `build_validation_run()`
+exige `research_run_id`/`split_plan_id`/`dataset_snapshot_id`/`strategy_name`/`strategy_params`,
+qu'aucun appelant réel ne transporte encore, câbler cela sans appelant réel serait spéculatif.
+Suite complète verte (1370/1370). Review indépendante réelle : 1 lot, 2 fichiers couverts, 1
+finding non bloquant. Commit réel `2a49b111778e0afb63b2c721118bbdd2898d3aad`, poussé sur
+`origin/autopilot/permanent` puis intégré (fast-forward, régression complète 1370/1370 revérifiée)
+sur `origin/master`.
+
+**ADR 0021 (les 15 Décisions) est désormais entièrement implémenté** (Slices 1 à 6). Avant de
+mettre en file une septième tranche, vérification explicite de ce qui reste réellement « cadré » :
+la Décision 8 de l'ADR dit elle-même, verbatim, qu'« aucune borne précise pour `VALIDATION` n'est
+fixée par cette ADR » et que « le choix exact de la durée/des bornes de `VALIDATION` (combien
+d'années réserver à Walk-Forward vs. laisser à Discovery) reste un **prérequis d'implémentation à
+trancher séparément**, pas une décision scientifique de cette ADR ». Le `DatasetSplitPlan` réel
+(`split_perfect_revolution_v1_final_holdout`) a toujours `validation: null` — aucun plan réel avec
+une zone `VALIDATION` peuplée n'existe. **Les trois candidats naturels de « tranche suivante »
+convergent tous sur cette même décision non prise** : (a) construire un nouveau
+`DatasetSplitPlan` avec `VALIDATION` peuplée (étape 0 explicitement identifiée par les
+« Conséquences » de l'ADR, bloquée sur l'allocation exacte) ; (b) une politique concrète de
+seuils PASS/FAIL (Décision 13, délibérément jamais inventée) ; (c) le câblage
+`walk_forward.py` -> `build_validation_run()` (Slice 6, bloqué sur `split_plan_id`, donc sur (a)).
+**Aucune de ces trois unités n'est « clairement définie par les documents du projet »** au même
+titre que les Slices 1 à 6 (chacune dérivable sans ambiguïté d'une décision ADR à paramètres
+concrets) — mise en file volontairement SUSPENDUE ici, conformément à l'instruction explicite de
+l'utilisateur réservant `HUMAN_GATE_REQUIRED`/l'arrêt aux décisions scientifiques/produit
+réellement absentes des sources, jamais à une invention silencieuse. L'Autopilot reste actif et
+réactivable dès qu'une décision d'allocation `VALIDATION` (ou une politique de verdict, ou un
+besoin app.py concret) est fournie par l'utilisateur.
