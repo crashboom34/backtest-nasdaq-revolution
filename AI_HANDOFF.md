@@ -2025,3 +2025,57 @@ d'`optimizer.py`/`optimization_store.py` avant d'en inventer un nouveau), agrég
 intégralement. Explicitement hors scope : `WalkForwardEvidence`/verdict scientifique (Décision 13,
 tranche séparée ultérieure), Monte-Carlo/Parameter Stability, intégration `app.py`. Voir
 `.autopilot/prompts/af-v02-slice-5.md` pour le détail complet.
+
+## 29. AF-V-02 Slice 5 — Reprise Walk-Forward achevée ; Autopilot désactivé sur demande explicite (2026-09-20/21)
+
+**L'Autopilot autonome est désactivé** : l'utilisateur a explicitement demandé son arrêt (« je ne
+veux plus l'autopilot, desactive le, j'ai l'impression qu'il utilise trop de credits »). Le
+processus alors actif (Slice 5, phase `CORRECTING`) a été arrêté immédiatement, et la tâche
+planifiée Windows `AlphaForgeAutopilot` a été **désactivée** (`Disable-ScheduledTask`, jamais
+supprimée — réversible via `Enable-ScheduledTask` + `autopilot resume`) : ses deux déclencheurs
+(logon + reprise périodique 30 min, §28) ne se déclenchent plus. Rien n'a été perdu : l'état
+persisté (`.autopilot/state/current_state.json`) et le travail réel non commité de Slice 5
+(`walk_forward.py`/`tests/test_walk_forward.py`) sont restés intacts — l'arrêt d'un process en
+cours d'exécution est un scénario déjà toléré par construction (idempotence Git, mission §3.8).
+**Toute poursuite du développement AlphaForge se fait désormais manuellement** (par un humain ou
+un agent Claude/Codex opérant directement dans ce worktree), jamais en relançant l'Autopilot sans
+nouvelle demande explicite de l'utilisateur.
+
+**Achèvement manuel de Slice 5** (travail déjà réalisé par le pipeline Developer/Reviewer de
+l'Autopilot avant son arrêt — 1363/1364 tests, 1 seul finding MAJOR de revue restait à corriger) :
+correctif appliqué manuellement, strictement dans le périmètre déjà cadré par
+`.autopilot/prompts/af-v02-slice-5.md` (`walk_forward.py`/`tests/test_walk_forward.py`
+uniquement), suivant la même discipline TDD/revue indépendante que tout le reste de cette mission.
+
+**Finding MAJOR corrigé** : aucun test n'exerçait `resume_walk_forward_run()` avec
+`spec.master_seed` réellement défini pour vérifier que `fold_seed` (ADR 0021 Décision 9) est bien
+propagé au chemin `RESUME_ACTION_REDO` (`_redo_fold_reusing_train_candidates()`) — une régression
+sur ce calcul (mauvais paramètre, ordre inversé, `fold.fold_id` au lieu de `fold.fold_index`)
+n'aurait fait échouer aucun test existant. Nouveau test
+`test_redo_propagates_the_same_fold_seed_run_walk_forward_would_have_produced` : compare le
+`fold_seed` effectivement transmis lors d'un REDO après interruption à celui qu'un
+`run_walk_forward()` non interrompu, sur le même `validation_run_id`/`fold_index`, aurait produit
+— **passe du premier coup** contre le code déjà écrit (aucun bug réel, seulement un trou de
+couverture, désormais comblé). Design du test confirmé non tautologique par une seconde revue
+indépendante : la formule SHA-256 de `run_walk_forward()` (référence de comparaison) est déjà
+ancrée indépendamment par un test sibling préexistant
+(`test_no_cross_fold_feedback_base_config_and_seed_independent_of_prior_result`).
+
+**Résultat réel, seconde revue indépendante comprise** : aucun autre BLOCKER/MAJOR trouvé sur
+l'ensemble du diff (fingerprint-mismatch jamais traité comme SKIP silencieux ; aucun agrégat
+partiel silencieux, `WalkForwardOrphanedFoldArtifacts` couvre une zone/readiness rétrécie entre
+deux tentatives ; réutilisation `train_progress.csv` restreinte aux modes de recherche prouvés
+sûrs, sélection Top-1 reconstruite identique à un REDO complet ; aucune rétroaction inter-fold).
+Suite complète verte (1364/1364). Commit réel
+`525f28fc2fc847d372c40352c9c15e8910b5b827`, poussé sur `origin/autopilot/permanent` puis intégré
+(fast-forward, aucun force-push, régression complète 1364/1364 revérifiée dans le worktree
+d'intégration dédié) sur `origin/master`.
+
+**Dossier principal et `business-b2b/`** : intégralement préservés tout du long (jamais touchés).
+
+**Prochaine tranche** : NON encore mise en file — contrairement aux slices précédentes, la
+poursuite automatique enchaînée est suspendue tant que l'Autopilot reste désactivé. La prochaine
+unité de travail resterait, par dérivation stricte de la même liste « hors scope » que Slice 4/5,
+`WalkForwardEvidence`/`execution_status`/`scientific_verdict`/`verdict_reasons`/
+`validation_run.json` (ADR 0021 Décision 13) — mais ne pas la cadrer/lancer sans confirmation
+explicite de l'utilisateur sur la reprise du développement autonome.
