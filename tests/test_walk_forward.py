@@ -38,27 +38,37 @@ from validation_run import (
 )
 from walk_forward import (
     WALK_FORWARD_SEMANTICS_VERSION,
+    RESUME_ACTION_REDO,
+    RESUME_ACTION_REPLAY_TEST,
+    RESUME_ACTION_SKIP,
     DatasetTooShortForWalkForward,
     FinalHoldoutOverlapError,
+    FoldArtifactConflict,
     FoldArtifacts,
+    FoldResumeDecision,
     FoldTestExecutionFailed,
     InsufficientWarmupHistory,
     NoEligibleTrainCandidate,
     NonDeterministicSearchWithoutSeed,
     OosOverlapError,
     UnsupportedWalkForwardGeometry,
+    WalkForwardOrphanedFoldArtifacts,
+    WalkForwardResumeMismatch,
     WalkForwardSemanticsMismatch,
     build_aggregate_result,
     build_walk_forward_manifest,
     build_walk_forward_specification,
     check_no_final_holdout_overlap,
     check_no_oos_overlap,
+    check_resume_fingerprint,
     check_warmup_sufficiency,
     compute_fold_definitions,
+    decide_fold_resume_action,
     detect_partial_tail,
     execute_walk_forward_fold,
     execute_walk_forward_fold_with_artifacts,
     persist_walk_forward_run,
+    resume_walk_forward_run,
     run_fold_test,
     run_fold_train,
     run_walk_forward,
@@ -2131,6 +2141,22 @@ class TestBuildWalkForwardManifest:
         with pytest.raises(ValueError):
             build_walk_forward_manifest(spec, config, tmp_path / "does_not_exist.json")
 
+    def test_includes_validation_run_id(self, tmp_path):
+        """Correction review indépendante tentative 10, finding MAJEUR : `validation_run_id`
+        pilote `_derive_fold_seed()` mais n'apparaissait dans aucune clé de `manifest.json` — une
+        reprise fournissant un `validation_run_id` différent de la tentative originale passait donc
+        le fingerprint RUN-LEVEL silencieusement (`check_resume_fingerprint()` compare pourtant
+        déjà TOUTES les clés du manifest, hors `data_manifest_path` — il suffit de l'y inclure)."""
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        config = _minimal_optimizer_config()
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+
+        data = build_walk_forward_manifest(
+            spec, config, manifest_path, validation_run_id="wf_run_abc",
+        )
+
+        assert data["validation_run_id"] == "wf_run_abc"
+
 
 class TestPersistWalkForwardRun:
     """`persist_walk_forward_run()` (ADR 0021 Décision 12, écriture seule) — structure
@@ -2464,3 +2490,919 @@ class TestPersistWalkForwardRun:
                 # a1/a0 volontairement inversés par rapport à r0/r1.
                 outcome, (a1, a0), aggregate, spec, config, manifest_path, output_dir,
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 5 — Reprise (resume) d'un run Walk-Forward interrompu (Décision 12, complément).
+# `run_walk_forward()`/`build_aggregate_result()`/`persist_walk_forward_run()` (Slices 3/4) restent
+# INCHANGÉES — cette tranche ne fait que lire, en sens inverse, ce que Slice 4 a écrit.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _real_two_fold_setup():
+    """Deux VRAIS folds (via `compute_fold_definitions()`, jamais construits à la main) sur une
+    zone VALIDATION de 3 mois calendaires avec un préréglage P1M/P1M/P1M — `resume_walk_forward_run()`
+    recalculera EXACTEMENT les deux mêmes folds (fonction pure), garantissant que les fold_id
+    persistés dans les tests ci-dessous correspondent à ceux que la reprise recalculera."""
+    df = _build_synthetic_wf_df(100, start="2023-01-01T00:00:00", freq_minutes=1440)
+    spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+    zone = _zone("2023-01-01T00:00:00+00:00", "2023-04-01T00:00:00+00:00")
+    folds = compute_fold_definitions(zone, spec, None)
+    assert len(folds) == 2
+    return df, spec, zone, folds
+
+
+class TestCheckResumeFingerprint:
+    """`check_resume_fingerprint()` — garde run-level (ADR 0021 Décision 11/12), appelée une
+    seule fois avant toute décision par fold."""
+
+    def test_returns_none_when_no_manifest_persisted_yet(self, tmp_path):
+        assert check_resume_fingerprint(tmp_path / "walk_forward", {"a": 1}) is None
+
+    def test_returns_persisted_manifest_when_fingerprint_matches(self, tmp_path):
+        output_dir = tmp_path / "walk_forward"
+        manifest = {"walk_forward_semantics_version": "x", "data_manifest_path": "/some/path"}
+        walk_forward_module.save_atomic(output_dir / "manifest.json", manifest, "test")
+        current = dict(manifest)
+        # data_manifest_path est un CHEMIN filesystem, jamais une dimension de fingerprint —
+        # doit pouvoir diverger sans lever WalkForwardResumeMismatch.
+        current["data_manifest_path"] = "/different/path/but/irrelevant"
+
+        result = check_resume_fingerprint(output_dir, current)
+
+        assert result == manifest
+
+    def test_raises_on_divergent_specification(self, tmp_path):
+        output_dir = tmp_path / "walk_forward"
+        persisted = {"specification": {"train_period": "P24M"}, "data_manifest_path": "p"}
+        walk_forward_module.save_atomic(output_dir / "manifest.json", persisted, "test")
+        current = {"specification": {"train_period": "P12M"}, "data_manifest_path": "q"}
+
+        with pytest.raises(WalkForwardResumeMismatch):
+            check_resume_fingerprint(output_dir, current)
+
+    def test_raises_on_divergent_data_manifest_content_hash(self, tmp_path):
+        output_dir = tmp_path / "walk_forward"
+        persisted = {"data_manifest": {"content_hash": "hash-A"}, "data_manifest_path": "p"}
+        walk_forward_module.save_atomic(output_dir / "manifest.json", persisted, "test")
+        current = {"data_manifest": {"content_hash": "hash-B"}, "data_manifest_path": "q"}
+
+        with pytest.raises(WalkForwardResumeMismatch):
+            check_resume_fingerprint(output_dir, current)
+
+    def test_raises_on_divergent_semantics_version(self, tmp_path):
+        output_dir = tmp_path / "walk_forward"
+        persisted = {"state_readiness_semantics_version": "daily-state-ready-v1", "data_manifest_path": "p"}
+        walk_forward_module.save_atomic(output_dir / "manifest.json", persisted, "test")
+        current = {"state_readiness_semantics_version": "daily-state-ready-v2", "data_manifest_path": "q"}
+
+        with pytest.raises(WalkForwardResumeMismatch):
+            check_resume_fingerprint(output_dir, current)
+
+
+class TestLoadTrainProgress:
+    """`_load_train_progress()`/`_write_train_progress()` (ADR 0021 Décision 12, AF-V-02 Slice 5) —
+    artefact de continuité de reprise pour un TRAIN interrompu, jamais une source de vérité
+    scientifique : dégrade silencieusement vers `[]` plutôt que de lever une erreur."""
+
+    def test_absent_file_returns_no_candidates(self, tmp_path):
+        fold = _wf_fold(
+            train_start="2020-01-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+        config = _minimal_optimizer_config()
+        assert walk_forward_module._load_train_progress(tmp_path, fold, config) == []
+
+    def test_round_trips_written_candidates(self, tmp_path):
+        fold = _wf_fold(
+            train_start="2020-01-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+        config = _minimal_optimizer_config()
+        candidates = [
+            {"params": {"ema_trend_len": 100}, "score": 1.0},
+            {"params": {"ema_trend_len": 120}, "score": 1.2},
+        ]
+        walk_forward_module._write_train_progress(tmp_path, fold, config, candidates)
+
+        assert walk_forward_module._load_train_progress(tmp_path, fold, config) == candidates
+
+    def test_mismatched_fold_geometry_is_never_reused(self, tmp_path):
+        """Une dérive de géométrie (`validation_zone`/`readiness_spec` différents entre deux
+        tentatives) ne doit JAMAIS faire réutiliser des candidats évalués sous une fenêtre TRAIN
+        différente — même esprit que la garde `FoldArtifactConflict` sur `definition.json`, mais
+        appliquée à cet artefact de continuité qui, lui, dégrade silencieusement plutôt que de
+        lever une erreur (ce n'est qu'une optimisation, jamais un artefact scientifique)."""
+        original_fold = _wf_fold(
+            train_start="2020-01-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+        drifted_fold = _wf_fold(
+            train_start="2019-06-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+        config = _minimal_optimizer_config()
+        walk_forward_module._write_train_progress(
+            tmp_path, original_fold, config, [{"params": {"ema_trend_len": 100}, "score": 1.0}],
+        )
+
+        assert walk_forward_module._load_train_progress(tmp_path, drifted_fold, config) == []
+
+    def test_mismatched_base_config_is_never_reused(self, tmp_path):
+        """Un `base_config.base_params` différent entre deux tentatives (ex. un paramètre FIXE hors
+        search space modifié) ne doit JAMAIS faire réutiliser des candidats évalués sous une
+        configuration différente — même si la géométrie de fold, elle, est identique (review
+        indépendante, tentative 3, finding MAJEUR : `check_resume_fingerprint()` run-level ne couvre
+        pas `base_config.base_params`)."""
+        fold = _wf_fold(
+            train_start="2020-01-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+        original_config = _minimal_optimizer_config()
+        drifted_config = _minimal_optimizer_config(
+            base_params=dict(original_config.base_params, ema_trend_len=999),
+        )
+        walk_forward_module._write_train_progress(
+            tmp_path, fold, original_config, [{"params": {"ema_trend_len": 100}, "score": 1.0}],
+        )
+
+        assert walk_forward_module._load_train_progress(tmp_path, fold, drifted_config) == []
+
+
+class TestDecideFoldResumeAction:
+    """`decide_fold_resume_action()` — décision par fold (ADR 0021 Décision 12), suppose le
+    fingerprint du run déjà validé (n'en revalide aucun aspect)."""
+
+    def test_missing_fold_directory_is_redo(self, tmp_path):
+        fold = _wf_fold(
+            train_start="2020-01-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+
+        decision = decide_fold_resume_action(fold, tmp_path / "walk_forward")
+
+        assert decision.action == RESUME_ACTION_REDO
+        assert decision.selection is None
+        assert decision.fold_result is None
+
+    def test_selection_without_test_result_is_replay_test_with_the_frozen_selection(self, tmp_path):
+        fold = _wf_fold(
+            train_start="2020-01-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+        selection = _fold_selection(fold)
+        fold_dir = tmp_path / "walk_forward" / "folds" / fold.fold_id
+        walk_forward_module.save_atomic(fold_dir / "definition.json", dataclasses.asdict(fold), "test")
+        walk_forward_module.save_atomic(
+            fold_dir / "selection.json", dataclasses.asdict(selection), "test",
+        )
+
+        decision = decide_fold_resume_action(fold, tmp_path / "walk_forward")
+
+        assert decision.action == RESUME_ACTION_REPLAY_TEST
+        assert decision.selection == selection
+        assert decision.fold_result is None
+
+    def test_test_result_without_selection_raises_fold_artifact_conflict(self, tmp_path):
+        fold = _wf_fold(
+            train_start="2020-01-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+        fold_dir = tmp_path / "walk_forward" / "folds" / fold.fold_id
+        walk_forward_module.save_atomic(fold_dir / "definition.json", dataclasses.asdict(fold), "test")
+        walk_forward_module.save_atomic(
+            fold_dir / "test_result.json", {"fold_id": fold.fold_id}, "test",
+        )
+
+        with pytest.raises(FoldArtifactConflict):
+            decide_fold_resume_action(fold, tmp_path / "walk_forward")
+
+    def test_selection_without_definition_raises_fold_artifact_conflict(self, tmp_path):
+        fold = _wf_fold(
+            train_start="2020-01-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+        selection = _fold_selection(fold)
+        fold_dir = tmp_path / "walk_forward" / "folds" / fold.fold_id
+        walk_forward_module.save_atomic(
+            fold_dir / "selection.json", dataclasses.asdict(selection), "test",
+        )
+
+        with pytest.raises(FoldArtifactConflict):
+            decide_fold_resume_action(fold, tmp_path / "walk_forward")
+
+    def test_definition_only_drifted_raises_fold_artifact_conflict(self, tmp_path):
+        """Correction review indépendante tentative 10, finding MAJEUR : la version précédente du
+        fallthrough REDO ne validait `definition_is_consistent` que dans les branches SKIP/
+        REPLAY_TEST — un `definition.json` seul (ni `selection.json` ni `test_result.json`, le cas
+        « TRAIN interrompu avant toute FoldSelection ») dont la géométrie a dérivé passait
+        silencieusement en REDO au lieu d'être refusé, contredisant la docstring de la fonction et
+        l'invariant ADR 0021 Décision 11 (« refuser plutôt que deviner »)."""
+        fold = _wf_fold(
+            train_start="2020-01-01T00:00:00+00:00",
+            boundary="2020-02-01T00:00:00+00:00",
+            test_end="2020-03-01T00:00:00+00:00",
+        )
+        drifted_definition = dataclasses.asdict(fold)
+        drifted_definition["train_start"] = "2019-01-01T00:00:00+00:00"
+        fold_dir = tmp_path / "walk_forward" / "folds" / fold.fold_id
+        walk_forward_module.save_atomic(fold_dir / "definition.json", drifted_definition, "test")
+
+        with pytest.raises(FoldArtifactConflict):
+            decide_fold_resume_action(fold, tmp_path / "walk_forward")
+
+    def test_complete_fold_is_skip_with_the_persisted_result_reloaded(self, tmp_path, monkeypatch):
+        df = _build_synthetic_wf_df(200)
+        fold = _wf_fold(
+            train_start=df["time_paris"].iloc[0].isoformat(),
+            boundary=df["time_paris"].iloc[100].isoformat(),
+            test_end=df["time_paris"].iloc[150].isoformat(),
+        )
+        fold_result, artifacts, config, _fake = _execute_persistable_fold(monkeypatch, df, fold)
+        outcome = WalkForwardRunOutcome(fold_results=(fold_result,), stopped_early=False)
+        aggregate = build_aggregate_result((fold_result,))
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M")
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, (artifacts,), aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        decision = decide_fold_resume_action(fold, output_dir)
+
+        assert decision.action == RESUME_ACTION_SKIP
+        assert decision.fold_result.fold_id == fold_result.fold_id
+        assert decision.fold_result.score_test == pytest.approx(fold_result.score_test)
+        assert decision.fold_result.n_trades == fold_result.n_trades
+
+
+class TestResumeWalkForwardRun:
+    """`resume_walk_forward_run()` — point d'entrée de reprise (ADR 0021 Décision 12). Preuves de
+    complétion de la mission Slice 5 : un fold complet est sauté (jamais ré-exécuté), un fold à
+    sélection figée rejoue uniquement TEST, un fold absent est refait entièrement, un fingerprint
+    divergent est refusé explicitement, l'agrégat couvre tous les folds."""
+
+    def test_master_seed_without_validation_run_id_raises_early(self, tmp_path):
+        spec = _spec(
+            train_period="P1M", test_period="P1M", step_period="P1M", master_seed=777,
+        )
+        zone = _zone("2023-01-01T00:00:00+00:00", "2023-04-01T00:00:00+00:00")
+
+        with pytest.raises(ValueError):
+            resume_walk_forward_run(
+                zone, spec, None, _minimal_optimizer_config(), None,
+                tmp_path / "unused.json", tmp_path / "walk_forward",
+            )
+
+    def test_redo_propagates_the_same_fold_seed_run_walk_forward_would_have_produced(
+        self, tmp_path, monkeypatch,
+    ):
+        """Finding MAJOR de la revue indépendante (Slice 5) : aucun test n'exerçait
+        `resume_walk_forward_run()` avec `spec.master_seed` réellement défini pour vérifier que
+        `fold_seed` (ADR 0021 Décision 9, `_derive_fold_seed()`) est bien propagé au chemin REDO
+        (`_redo_fold_reusing_train_candidates()`) — une régression sur ce calcul (mauvais
+        paramètre, ordre inversé, `fold_id` au lieu de `fold_index`) n'aurait fait échouer aucun
+        test existant de cette classe, tous construits avec `master_seed=None`. Compare
+        directement le `fold_seed` effectivement transmis lors d'un REDO après interruption (rien
+        n'est encore persisté -> les deux folds sont REDO, `test_missing_fold_directory_is_redo`)
+        à celui qu'un `run_walk_forward()` non interrompu, sur le MÊME
+        `validation_run_id`/`fold_index`, aurait produit — jamais une valeur recalculée
+        indépendamment qui masquerait une erreur symétrique dans les deux chemins."""
+        df, _plain_spec, zone, _folds = _real_two_fold_setup()
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M", master_seed=4242)
+        validation_run_id = "wf_run_seed_check"
+        config = _minimal_optimizer_config()
+        output_dir = tmp_path / "walk_forward"
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+
+        redo_seeds = {}
+
+        def fake_redo(fold, base_config, df, output_dir, progress_cb=None, fold_seed=None):
+            redo_seeds[fold.fold_index] = fold_seed
+            return _fold_result_stub(fold)
+
+        monkeypatch.setattr(walk_forward_module, "_redo_fold_reusing_train_candidates", fake_redo)
+
+        resume_walk_forward_run(
+            zone, spec, None, config, df, manifest_path, output_dir,
+            validation_run_id=validation_run_id,
+        )
+
+        assert set(redo_seeds) == {0, 1}
+        assert all(seed is not None for seed in redo_seeds.values())
+
+        reference_seeds = {}
+
+        def fake_execute(fold, base_config, df, progress_cb=None, stop_flag_fn=None, fold_seed=None):
+            reference_seeds[fold.fold_index] = fold_seed
+            return _fold_result_stub(fold)
+
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold", fake_execute)
+
+        run_walk_forward(zone, spec, None, config, df, validation_run_id=validation_run_id)
+
+        assert redo_seeds == reference_seeds
+
+    def test_completed_run_is_fully_skipped_never_re_executed(self, tmp_path, monkeypatch):
+        df, spec, zone, folds = _real_two_fold_setup()
+        config = None
+        results, artifacts_list = [], []
+        for fold in folds:
+            r, a, config, _fake = _execute_persistable_fold(monkeypatch, df, fold, config=config)
+            results.append(r)
+            artifacts_list.append(a)
+        outcome = WalkForwardRunOutcome(fold_results=tuple(results), stopped_early=False)
+        aggregate = build_aggregate_result(tuple(results))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, tuple(artifacts_list), aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError("un fold déjà complet (SKIP) ne doit jamais être ré-exécuté")
+
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "run_fold_test", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "run_fold_train", _fail_if_called)
+
+        resumed, resumed_aggregate = resume_walk_forward_run(
+            zone, spec, None, config, df, manifest_path, output_dir,
+        )
+
+        assert resumed.stopped_early is False
+        assert [r.fold_id for r in resumed.fold_results] == [f.fold_id for f in folds]
+        for original, reloaded in zip(results, resumed.fold_results):
+            assert reloaded.score_test == pytest.approx(original.score_test)
+            assert reloaded.n_trades == original.n_trades
+        assert resumed_aggregate.n_folds == len(folds)
+
+    def test_fold_with_frozen_selection_but_no_test_result_replays_only_the_test(
+        self, tmp_path, monkeypatch,
+    ):
+        df, spec, zone, folds = _real_two_fold_setup()
+        fold0, fold1 = folds
+        config = None
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0, config=config)
+
+        fake1 = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake1)
+        _patch_score_by_net_ret(monkeypatch)
+        all_results, _sensitivity = run_fold_train(fold1, config, df)
+        selection1 = select_fold_top1(fold1, all_results, config)
+
+        outcome = WalkForwardRunOutcome(fold_results=(r0,), stopped_early=False)
+        aggregate = build_aggregate_result((r0,))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, (a0,), aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        # fold1 : TRAIN mené jusqu'à une FoldSelection figée, TEST jamais exécuté (interruption
+        # simulée) — persisté manuellement avec la MÊME primitive que persist_walk_forward_run()
+        # (atomic_json_store.save_atomic(), jamais un open()/json.dump() direct).
+        fold1_dir = output_dir / "folds" / fold1.fold_id
+        walk_forward_module.save_atomic(
+            fold1_dir / "definition.json", dataclasses.asdict(fold1), "test",
+        )
+        walk_forward_module.save_atomic(
+            fold1_dir / "selection.json", dataclasses.asdict(selection1), "test",
+        )
+
+        def _fail_if_train_called(*a, **k):
+            raise AssertionError("REPLAY_TEST ne doit jamais relancer une recherche TRAIN")
+
+        monkeypatch.setattr(walk_forward_module, "run_fold_train", _fail_if_train_called)
+
+        captured_selections = []
+        real_run_fold_test = walk_forward_module.run_fold_test
+
+        def spy_run_fold_test(fold, selection, base_config, df_):
+            captured_selections.append(selection)
+            return real_run_fold_test(fold, selection, base_config, df_)
+
+        monkeypatch.setattr(walk_forward_module, "run_fold_test", spy_run_fold_test)
+
+        resumed, _resumed_aggregate = resume_walk_forward_run(
+            zone, spec, None, config, df, manifest_path, output_dir,
+        )
+
+        assert len(captured_selections) == 1
+        assert captured_selections[0] == selection1
+        assert [r.fold_id for r in resumed.fold_results] == [fold0.fold_id, fold1.fold_id]
+        assert resumed.fold_results[1].selection == selection1
+
+    def test_fold_with_no_persisted_state_is_redone_entirely(self, tmp_path, monkeypatch):
+        df, spec, zone, folds = _real_two_fold_setup()
+        fold0, fold1 = folds
+        config = None
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0, config=config)
+        outcome = WalkForwardRunOutcome(fold_results=(r0,), stopped_early=False)
+        aggregate = build_aggregate_result((r0,))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, (a0,), aggregate, spec, config, manifest_path, output_dir,
+        )
+        # fold1 : rien persisté du tout.
+
+        fake_redo = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake_redo)
+        _patch_score_by_net_ret(monkeypatch)
+
+        resumed, resumed_aggregate = resume_walk_forward_run(
+            zone, spec, None, config, df, manifest_path, output_dir,
+        )
+
+        assert [r.fold_id for r in resumed.fold_results] == [fold0.fold_id, fold1.fold_id]
+        assert fake_redo.calls, "fold1 doit être réellement exécuté (TRAIN+TEST)"
+        assert isinstance(resumed.fold_results[1], FoldResult)
+        assert resumed_aggregate.n_folds == 2
+
+    def test_train_interrupted_with_definition_only_reuses_already_tested_candidates(
+        self, tmp_path, monkeypatch,
+    ):
+        """ADR 0021 Décision 12 : « un TRAIN interrompu réutilise les candidats déjà exécutés
+        (fingerprint identique) ». Cas ADR-nommé « TRAIN interrompu », DISTINCT de
+        `test_fold_with_no_persisted_state_is_redone_entirely` (« rien persisté du tout ») : ici
+        `definition.json` ET un candidat TRAIN déjà exécuté (`train_progress.csv`, mécanisme réel
+        de reprise Slice 5) sont présents pour fold1, mais AUCUN `selection.json` (le TRAIN a été
+        interrompu EN COURS, pas avant de commencer) — `decide_fold_resume_action()` retourne donc
+        toujours `RESUME_ACTION_REDO` (même triplet SKIP/REPLAY_TEST/REDO qu'avant cette tranche),
+        mais l'EXÉCUTION de ce REDO doit réutiliser réellement le candidat déjà exécuté plutôt que
+        de tout refaire depuis zéro (review indépendante, tentative 3, finding MAJEUR)."""
+        df, spec, zone, folds = _real_two_fold_setup()
+        fold0, fold1 = folds
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0, config=config)
+        outcome = WalkForwardRunOutcome(fold_results=(r0,), stopped_early=False)
+        aggregate = build_aggregate_result((r0,))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, (a0,), aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        # fold1 : TRAIN interrompu EN COURS — definition.json persisté (primitive Slice 4), UN des
+        # 3 candidats déclarés déjà exécuté et persisté via le mécanisme de continuité Slice 5
+        # (train_progress.csv, jamais selection.json : le TRAIN n'a pas atteint sa fin).
+        fold1_dir = output_dir / "folds" / fold1.fold_id
+        walk_forward_module.save_atomic(
+            fold1_dir / "definition.json", dataclasses.asdict(fold1), "test",
+        )
+        already_run_params = dict(config.base_params, ema_trend_len=100)
+        walk_forward_module._write_train_progress(
+            fold1_dir, fold1, config, [{"params": already_run_params, "score": 1.0}],
+        )
+
+        assert decide_fold_resume_action(fold1, output_dir).action == RESUME_ACTION_REDO
+
+        fake_redo = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake_redo)
+        _patch_score_by_net_ret(monkeypatch)
+
+        resumed, resumed_aggregate = resume_walk_forward_run(
+            zone, spec, None, config, df, manifest_path, output_dir,
+        )
+
+        fold1_call_params = [c["params"] for c in fake_redo.calls]
+        assert already_run_params not in fold1_call_params, (
+            "le candidat déjà exécuté avant l'interruption ne doit JAMAIS être réexécuté"
+        )
+        # 3 candidats déclarés - 1 déjà réutilisé = 2 nouveaux appels TRAIN + 1 appel TEST.
+        assert len(fake_redo.calls) == 3
+        assert [r.fold_id for r in resumed.fold_results] == [fold0.fold_id, fold1.fold_id]
+        assert resumed_aggregate.n_folds == 2
+        assert not (fold1_dir / "train_progress.csv").exists(), (
+            "l'artefact de continuité doit être nettoyé après un REDO réussi"
+        )
+
+    def test_train_interrupted_reuse_is_never_applied_outside_the_proven_safe_modes(
+        self, tmp_path, monkeypatch,
+    ):
+        """Réciproque de `test_train_interrupted_with_definition_only_reuses_already_tested_
+        candidates` (review indépendante Slice 5, finding MAJEUR) : `_TRAIN_PROGRESS_REUSE_SAFE_
+        MODES` ne contient QUE `{"grid"}` — `mode="single_var"` (`run_mode1()`, PROGRESSIF à
+        étages, voir la docstring de `_TRAIN_PROGRESS_REUSE_SAFE_MODES`) doit ignorer un
+        `train_progress.csv` par ailleurs valide (même fingerprint de géométrie/config que la
+        tentative courante) et repartir d'un REDO complet — jamais réutiliser via `already_tested`
+        le candidat déjà exécuté avant l'interruption. Sans ce test, un futur élargissement
+        accidentel de `_TRAIN_PROGRESS_REUSE_SAFE_MODES` (ou un bris de la condition `if
+        base_config.mode in _TRAIN_PROGRESS_REUSE_SAFE_MODES` dans
+        `_redo_fold_reusing_train_candidates()`) romprait silencieusement cet invariant
+        scientifique — un Top-1 biaisé pour un mode progressif — sans qu'aucun test rouge ne le
+        détecte."""
+        df, spec, zone, folds = _real_two_fold_setup()
+        fold0, fold1 = folds
+        config = _minimal_optimizer_config(mode="single_var", param_ranges=_param_ranges_3_values())
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0, config=config)
+        outcome = WalkForwardRunOutcome(fold_results=(r0,), stopped_early=False)
+        aggregate = build_aggregate_result((r0,))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, (a0,), aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        # fold1 : mêmes artefacts qu'un TRAIN interrompu EN COURS que le test mode="grid" jumeau
+        # ci-dessus (definition.json + un candidat déjà exécuté persisté dans train_progress.csv,
+        # même fingerprint de géométrie/config) — seule la valeur de base_config.mode diffère.
+        fold1_dir = output_dir / "folds" / fold1.fold_id
+        walk_forward_module.save_atomic(
+            fold1_dir / "definition.json", dataclasses.asdict(fold1), "test",
+        )
+        already_run_params = dict(config.base_params, ema_trend_len=100)
+        walk_forward_module._write_train_progress(
+            fold1_dir, fold1, config, [{"params": already_run_params, "score": 1.0}],
+        )
+
+        assert decide_fold_resume_action(fold1, output_dir).action == RESUME_ACTION_REDO
+
+        fake_redo = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake_redo)
+        _patch_score_by_net_ret(monkeypatch)
+
+        resumed, resumed_aggregate = resume_walk_forward_run(
+            zone, spec, None, config, df, manifest_path, output_dir,
+        )
+
+        fold1_call_params = [c["params"] for c in fake_redo.calls]
+        assert already_run_params in fold1_call_params, (
+            "mode='single_var' n'est pas dans _TRAIN_PROGRESS_REUSE_SAFE_MODES — le candidat "
+            "déjà exécuté avant l'interruption doit être RÉÉVALUÉ, jamais sauté via "
+            "already_tested (réutilisation prouvée sûre uniquement pour mode='grid')"
+        )
+        # 3 candidats déclarés, AUCUN sauté (mode non prouvé sûr) + 1 appel TEST.
+        assert len(fake_redo.calls) == 4
+        assert [r.fold_id for r in resumed.fold_results] == [fold0.fold_id, fold1.fold_id]
+        assert resumed_aggregate.n_folds == 2
+        assert not (fold1_dir / "train_progress.csv").exists(), (
+            "l'artefact de continuité doit être nettoyé après un REDO réussi, même hors mode sûr"
+        )
+
+    def test_divergent_fingerprint_is_refused_before_any_fold_is_touched(
+        self, tmp_path, monkeypatch,
+    ):
+        df, spec, zone, folds = _real_two_fold_setup()
+        fold0, fold1 = folds
+        config = None
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0, config=config)
+        outcome = WalkForwardRunOutcome(fold_results=(r0,), stopped_early=False)
+        aggregate = build_aggregate_result((r0,))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path, content_hash="hash-A")
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, (a0,), aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        other_manifest_path, _dm2 = _write_test_data_manifest(other_dir, content_hash="hash-B")
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError("aucun fold ne doit être touché avant la validation du fingerprint")
+
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "run_fold_test", _fail_if_called)
+
+        with pytest.raises(WalkForwardResumeMismatch):
+            resume_walk_forward_run(zone, spec, None, config, df, other_manifest_path, output_dir)
+
+    def test_aggregate_over_the_resumed_outcome_covers_skipped_and_new_folds_together(
+        self, tmp_path, monkeypatch,
+    ):
+        df, spec, zone, folds = _real_two_fold_setup()
+        fold0, fold1 = folds
+        config = None
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0, config=config)
+        outcome = WalkForwardRunOutcome(fold_results=(r0,), stopped_early=False)
+        aggregate = build_aggregate_result((r0,))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, (a0,), aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        fake_redo = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake_redo)
+        _patch_score_by_net_ret(monkeypatch)
+
+        resumed, returned_aggregate = resume_walk_forward_run(
+            zone, spec, None, config, df, manifest_path, output_dir,
+        )
+        full_aggregate = build_aggregate_result(resumed.fold_results)
+
+        assert full_aggregate.n_folds == 2
+        # L'agrégat retourné par resume_walk_forward_run() lui-même (ADR 0021 Décision 12,
+        # dernier paragraphe : "puis appelle build_aggregate_result() ... pour produire un
+        # agrégat recalculé intégralement") doit être ce MÊME agrégat complet, jamais partiel.
+        assert returned_aggregate == full_aggregate
+
+    def test_resuming_with_the_same_validation_run_id_skips_normally(self, tmp_path, monkeypatch):
+        """Preuve, en miroir de `test_resuming_with_a_different_validation_run_id_is_refused`, que
+        `resume_walk_forward_run()` transmet bien SON PROPRE `validation_run_id` au fingerprint —
+        pas seulement `None` par défaut : rejouer la MÊME valeur non-`None` que la persistance
+        originale doit rester un SKIP normal, jamais un faux positif."""
+        df, spec, zone, folds = _real_two_fold_setup()
+        config = None
+        results, artifacts_list = [], []
+        for fold in folds:
+            r, a, config, _fake = _execute_persistable_fold(monkeypatch, df, fold, config=config)
+            results.append(r)
+            artifacts_list.append(a)
+        outcome = WalkForwardRunOutcome(fold_results=tuple(results), stopped_early=False)
+        aggregate = build_aggregate_result(tuple(results))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, tuple(artifacts_list), aggregate, spec, config, manifest_path, output_dir,
+            validation_run_id="wf_run_same",
+        )
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError("un fold déjà complet (SKIP) ne doit jamais être ré-exécuté")
+
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "run_fold_test", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "run_fold_train", _fail_if_called)
+
+        resumed, resumed_aggregate = resume_walk_forward_run(
+            zone, spec, None, config, df, manifest_path, output_dir,
+            validation_run_id="wf_run_same",
+        )
+
+        assert [r.fold_id for r in resumed.fold_results] == [f.fold_id for f in folds]
+        assert resumed_aggregate.n_folds == len(folds)
+
+    def test_resuming_with_a_different_validation_run_id_is_refused(self, tmp_path, monkeypatch):
+        """Correction review indépendante tentative 10, finding MAJEUR : sans cette garde, une
+        reprise avec un `validation_run_id` différent de la tentative originale mélangerait, au
+        sein d'un même `WalkForwardRunOutcome`, des folds SKIP dont le `fold_seed` a été figé sous
+        l'ancien `validation_run_id` et des folds REDO/REPLAY_TEST dérivés du nouveau — une
+        incohérence scientifique jamais détectée avant cette correction."""
+        df, spec, zone, folds = _real_two_fold_setup()
+        fold0 = folds[0]
+        config = None
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0, config=config)
+        outcome = WalkForwardRunOutcome(fold_results=(r0,), stopped_early=False)
+        aggregate = build_aggregate_result((r0,))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, (a0,), aggregate, spec, config, manifest_path, output_dir,
+            validation_run_id="wf_run_original",
+        )
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError("aucun fold ne doit être touché avant la validation du fingerprint")
+
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "run_fold_test", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "run_fold_train", _fail_if_called)
+
+        with pytest.raises(WalkForwardResumeMismatch):
+            resume_walk_forward_run(
+                zone, spec, None, config, df, manifest_path, output_dir,
+                validation_run_id="wf_run_different",
+            )
+
+    def test_geometry_drift_on_a_later_fold_is_caught_before_an_earlier_fold_is_really_executed(
+        self, tmp_path, monkeypatch,
+    ):
+        """`validation_zone`/`readiness_spec` ne font PAS partie du fingerprint run-level de
+        `check_resume_fingerprint()` (ils ne sont pas des clés de `manifest.json`) — une dérive de
+        géométrie n'est détectable que PAR FOLD, via `decide_fold_resume_action()`. Revue
+        indépendante Slice 5 : cette détection par fold doit intervenir AVANT tout backtest réel,
+        jamais entrelacée avec l'exécution — sinon un fold antérieur (ici fold0, REDO) serait
+        réellement ré-exécuté avant que la dérive du fold suivant (fold1) ne soit détectée."""
+        df, spec, zone, folds = _real_two_fold_setup()
+        fold0, fold1 = folds
+        # fold1 : TRAIN mené jusqu'à une FoldSelection figée (comme un TEST interrompu), mais le
+        # definition.json persisté ne correspond PLUS à ce que compute_fold_definitions()
+        # recalcule pour ce fold_id (dérive de géométrie simulée) — un mismatch détectable
+        # seulement au travers de decide_fold_resume_action(), jamais de check_resume_fingerprint().
+        drifted_definition = dataclasses.asdict(fold1)
+        drifted_definition["train_start"] = "2019-01-01T00:00:00+00:00"
+        fold1_dir = tmp_path / "walk_forward" / "folds" / fold1.fold_id
+        walk_forward_module.save_atomic(fold1_dir / "definition.json", drifted_definition, "test")
+        walk_forward_module.save_atomic(
+            fold1_dir / "selection.json", dataclasses.asdict(_fold_selection(fold1)), "test",
+        )
+        # fold0 : rien persisté — nécessiterait un REDO (TRAIN+TEST réels) si jamais exécuté.
+        output_dir = tmp_path / "walk_forward"
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError(
+                "fold0 (REDO) ne doit jamais être réellement exécuté avant que la dérive de "
+                "géométrie de fold1 ne soit détectée"
+            )
+
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "run_fold_test", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "run_fold_train", _fail_if_called)
+
+        with pytest.raises(FoldArtifactConflict):
+            resume_walk_forward_run(zone, spec, None, config, df, manifest_path, output_dir)
+
+    def test_shrunk_validation_zone_leaves_an_orphaned_fold_dir_and_is_refused(
+        self, tmp_path, monkeypatch,
+    ):
+        """Review indépendante Slice 5, finding MAJEUR : `validation_zone`/`readiness_spec` ne
+        font PAS partie du fingerprint run-level de `check_resume_fingerprint()` (ce ne sont pas
+        des clés de `manifest.json`) — si une tentative ultérieure fournit une `validation_zone`
+        plus restrictive que celle qui a produit l'état disque (donc MOINS de folds recalculés par
+        `compute_fold_definitions()`), un `fold_dir` déjà persisté au-delà de ce nouveau compte ne
+        doit JAMAIS être silencieusement ignoré : `resume_walk_forward_run()` itérerait sinon sur
+        le sous-ensemble recalculé, renverrait `stopped_early=False`, et
+        `build_aggregate_result()` produirait un agrégat présenté comme COMPLET en ignorant ce
+        fold — exactement l'agrégat partiel silencieux que Décision 12 (dernier paragraphe)
+        exclut explicitement."""
+        df, spec, zone, folds = _real_two_fold_setup()
+        fold0, fold1 = folds
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0, config=config)
+        r1, a1, _c1, _f1 = _execute_persistable_fold(monkeypatch, df, fold1, config=config)
+        outcome = WalkForwardRunOutcome(fold_results=(r0, r1), stopped_early=False)
+        aggregate = build_aggregate_result((r0, r1))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, (a0, a1), aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        # Fold "orphelin" : simule l'état disque résiduel d'une tentative ANTÉRIEURE menée sous
+        # une validation_zone plus large (3 folds) — jamais réellement exécuté par ce test, juste
+        # fabriqué, pour être absent de la géométrie que la tentative COURANTE (zone/folds
+        # ci-dessus, 2 folds) recalcule.
+        orphan_dir = output_dir / "folds" / "fold_002"
+        walk_forward_module.save_atomic(
+            orphan_dir / "selection.json", dataclasses.asdict(_fold_selection(fold1)), "test",
+        )
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError(
+                "aucun fold ne doit être touché avant la détection du fold_dir orphelin"
+            )
+
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "run_fold_test", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "run_fold_train", _fail_if_called)
+
+        with pytest.raises(WalkForwardOrphanedFoldArtifacts):
+            resume_walk_forward_run(zone, spec, None, config, df, manifest_path, output_dir)
+
+    def test_orphaned_fold_dir_without_selection_or_test_result_is_not_flagged(
+        self, tmp_path, monkeypatch,
+    ):
+        """Symétrique du test ci-dessus : un `fold_dir` hors géométrie courante qui ne porte QUE
+        `train_progress.csv`/`definition.json` (jamais de TRAIN mené jusqu'à une `FoldSelection`)
+        ne représente rien qui serait silencieusement perdu de l'agrégat — `_fold_has_persisted_
+        state()` ne doit se déclencher que sur `selection.json`/`test_result.json`, jamais sur la
+        seule présence du répertoire."""
+        df, spec, zone, folds = _real_two_fold_setup()
+        fold0, fold1 = folds
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0, config=config)
+        r1, a1, _c1, _f1 = _execute_persistable_fold(monkeypatch, df, fold1, config=config)
+        outcome = WalkForwardRunOutcome(fold_results=(r0, r1), stopped_early=False)
+        aggregate = build_aggregate_result((r0, r1))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, (a0, a1), aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        orphan_dir = output_dir / "folds" / "fold_002"
+        orphan_dir.mkdir(parents=True)
+        (orphan_dir / "train_progress.csv").write_text("fold_fingerprint,params_json,score\n")
+
+        resumed, resumed_aggregate = resume_walk_forward_run(
+            zone, spec, None, config, df, manifest_path, output_dir,
+        )
+
+        assert [r.fold_id for r in resumed.fold_results] == [fold0.fold_id, fold1.fold_id]
+        assert resumed_aggregate.n_folds == 2
+
+    def test_redo_with_reused_train_candidates_reconstructs_the_same_selection_as_a_full_redo(
+        self, tmp_path, monkeypatch,
+    ):
+        """MAJEUR (review indépendante) : la docstring de `_redo_fold_reusing_train_candidates()`
+        revendique explicitement reconstruire la MÊME `FoldSelection` Top-1 qu'un REDO complet
+        aurait produite — jamais une sélection biaisée par l'ORDRE de fusion `reused + new`. Les
+        tests `test_train_interrupted_with_definition_only_reuses_already_tested_candidates`/
+        `test_train_interrupted_reuse_is_never_applied_outside_the_proven_safe_modes` ne vérifient
+        QUE le nombre/les params des appels `engine.run_backtest` — jamais que le `FoldResult`
+        obtenu APRÈS réutilisation est identique à celui d'un run de référence non interrompu sur
+        le même fold/mêmes 3 candidats. Preuve directe ici : (1) un REDO plein via
+        `execute_walk_forward_fold()` (Slice 2, inchangée) sert de référence, (2) une reprise avec
+        1 des 3 candidats déjà exécuté (`train_progress.csv`) recalcule fold1, (3) les deux
+        `FoldSelection`/`score_test`/`n_trades` doivent être IDENTIQUES."""
+        df, spec, zone, folds = _real_two_fold_setup()
+        fold0, fold1 = folds
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+
+        # Référence : REDO complet non interrompu de fold1, jamais via resume_walk_forward_run().
+        reference_fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", reference_fake)
+        _patch_score_by_net_ret(monkeypatch)
+        reference_result = execute_walk_forward_fold(fold1, config, df)
+
+        # fold0 complet et persisté normalement (fingerprint run-level valide + un fold SKIP).
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0, config=config)
+        outcome = WalkForwardRunOutcome(fold_results=(r0,), stopped_early=False)
+        aggregate = build_aggregate_result((r0,))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, (a0,), aggregate, spec, config, manifest_path, output_dir,
+        )
+
+        # fold1 : TRAIN interrompu EN COURS — un des 3 candidats déclarés (ema_trend_len=100) déjà
+        # exécuté et persisté via train_progress.csv, même géométrie/config que la référence.
+        fold1_dir = output_dir / "folds" / fold1.fold_id
+        walk_forward_module.save_atomic(
+            fold1_dir / "definition.json", dataclasses.asdict(fold1), "test",
+        )
+        already_run_params = dict(config.base_params, ema_trend_len=100)
+        walk_forward_module._write_train_progress(
+            fold1_dir, fold1, config, [{"params": already_run_params, "score": 1.0}],
+        )
+
+        resume_fake = _ScoreByParamRunBacktest()
+        monkeypatch.setattr(engine, "run_backtest", resume_fake)
+
+        resumed, _resumed_aggregate = resume_walk_forward_run(
+            zone, spec, None, config, df, manifest_path, output_dir,
+        )
+
+        resumed_fold1 = resumed.fold_results[1]
+        assert resumed_fold1.selection == reference_result.selection
+        assert resumed_fold1.score_test == pytest.approx(reference_result.score_test)
+        assert resumed_fold1.n_trades == reference_result.n_trades
+
+    def test_stop_flag_fn_between_folds_stops_before_untouched_folds_with_partial_results(
+        self, tmp_path, monkeypatch,
+    ):
+        """MAJEUR (review indépendante) : `resume_walk_forward_run()` réimplémente indépendamment
+        la même barrière `stop_flag_fn` INTER-fold que `run_walk_forward()` (déjà testée via
+        `TestRunWalkForwardOrchestration.test_stop_flag_fn_between_folds_returns_partial_results_
+        marked_stopped`) — mais aucun test ne couvrait encore cette branche neuve pour la reprise.
+        Preuve : fold0 (SKIP, déjà persisté) est bien inclus dans le résultat partiel ; fold1
+        (REDO, rien persisté) n'est JAMAIS touché — ni TRAIN ni TEST, ni même
+        `decide_fold_resume_action()` ré-exécuté — quand `stop_flag_fn` interrompt la boucle juste
+        avant lui ; `stopped_early` reflète l'arrêt et l'agrégat ne porte que sur le préfixe déjà
+        décidé/exécuté."""
+        df, spec, zone, folds = _real_two_fold_setup()
+        fold0, fold1 = folds
+        config = None
+        r0, a0, config, _f0 = _execute_persistable_fold(monkeypatch, df, fold0, config=config)
+        outcome = WalkForwardRunOutcome(fold_results=(r0,), stopped_early=False)
+        aggregate = build_aggregate_result((r0,))
+        manifest_path, _dm = _write_test_data_manifest(tmp_path)
+        output_dir = tmp_path / "walk_forward"
+        persist_walk_forward_run(
+            outcome, (a0,), aggregate, spec, config, manifest_path, output_dir,
+        )
+        # fold1 : rien persisté — nécessiterait un REDO (TRAIN+TEST réels) s'il était atteint.
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError(
+                "fold1 ne doit jamais être touché après l'arrêt anticipé avant lui"
+            )
+
+        monkeypatch.setattr(walk_forward_module, "run_fold_train", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "run_fold_test", _fail_if_called)
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold", _fail_if_called)
+
+        stop_calls = []
+
+        def stop_flag_fn():
+            stop_calls.append(1)
+            return len(stop_calls) > 1  # False avant fold0 (traité), True avant fold1 (arrêt).
+
+        resumed, resumed_aggregate = resume_walk_forward_run(
+            zone, spec, None, config, df, manifest_path, output_dir, stop_flag_fn=stop_flag_fn,
+        )
+
+        assert resumed.stopped_early is True
+        assert [r.fold_id for r in resumed.fold_results] == [fold0.fold_id]
+        assert resumed.fold_results[0].score_test == pytest.approx(r0.score_test)
+        assert resumed_aggregate.n_folds == 1

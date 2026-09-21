@@ -35,7 +35,7 @@ from typing import Optional, Tuple, Union
 
 import pandas as pd
 
-from atomic_json_store import save_atomic
+from atomic_json_store import load_json_tolerant, load_tolerant, save_atomic
 from dataset_split import SplitBoundary
 from market_data.backtest_manifest import load_backtest_manifest
 from optimizer import (
@@ -490,6 +490,7 @@ def run_fold_train(
     progress_cb=None,
     stop_flag_fn=None,
     fold_seed: Optional[int] = None,
+    already_tested: Optional[set] = None,
 ) -> Tuple[list, dict]:
     """Exécute la phase TRAIN-only d'UN fold (ADR 0021 Décision 6) : `Optimizer.run(
     run_test_validation=False)`, `train_test.enabled=False` — le bloc `if tt.enabled:` de
@@ -512,8 +513,20 @@ def run_fold_train(
     combinaisons déclarées), lève `NonDeterministicSearchWithoutSeed` AVANT tout backtest — jamais
     une recherche TRAIN silencieusement non-reproductible.
 
+    `already_tested` (AF-V-02 Slice 5, extension additive — ADR 0021 Décision 12) : transmis TEL
+    QUEL à `Optimizer.run(already_tested=...)`, le mécanisme de reprise déjà existant et
+    non-Walk-Forward (`optimizer._run_batch_sequential`/`_run_batch_parallel`) — tout candidat dont
+    `optimizer.params_hash(params)` y figure est SAUTÉ (jamais réexécuté), et n'apparaît PAS dans
+    `all_results` retourné par cet appel (voir leur propre docstring : seuls les candidats
+    RÉELLEMENT réexécutés sont retournés). `None` (défaut, tout appelant existant — Slice 2/3/4,
+    `execute_walk_forward_fold()`) laisse le comportement strictement inchangé, `Optimizer.run()`
+    traitant `None` exactement comme `set()`. Voir `_redo_fold_reusing_train_candidates()` pour
+    l'appelant réel de ce paramètre (reconstruction du `FoldSelection` Top-1 à partir de l'UNION
+    des candidats rechargés et de `all_results`, jamais de ce dernier seul).
+
     Retourne `(all_results, sensitivity)` — même contrat que `Optimizer.run()`, `all_results`
-    déjà trié par score TRAIN décroissant."""
+    déjà trié par score TRAIN décroissant PARMI LES SEULS candidats réexécutés à cet appel (voir
+    `already_tested` ci-dessus)."""
     if fold_seed is None and _train_search_reaches_stratified_sample(base_config):
         active_ranges = [pr for pr in base_config.param_ranges if pr.enabled]
         raise NonDeterministicSearchWithoutSeed(
@@ -535,7 +548,7 @@ def run_fold_train(
     optimizer = Optimizer(train_config, df)
     return optimizer.run(
         progress_cb=progress_cb, stop_flag_fn=stop_flag_fn, run_test_validation=False,
-        seed=fold_seed,
+        seed=fold_seed, already_tested=already_tested,
     )
 
 
@@ -998,6 +1011,7 @@ def build_walk_forward_manifest(
     spec: WalkForwardSpecification,
     base_config,
     data_manifest_path: Union[str, Path],
+    validation_run_id: Optional[str] = None,
 ) -> dict:
     """Construit le contenu (dict JSON-sérialisable) de `manifest.json` (ADR 0021 Décision 12) —
     fingerprint de reprise, JAMAIS encore relu par une logique de reprise (hors scope Slice 4).
@@ -1009,7 +1023,17 @@ def build_walk_forward_manifest(
     disque dans ce cas). `search_space`/`scoring`/`filters` proviennent de `base_config`
     (`OptimizationConfig` réel utilisé pour le run TRAIN de tous les folds, Décision 4 : un seul
     search space partagé) — jamais de `WalkForwardSpecification`, qui ne porte que `base_params`
-    (readiness), pas le search space de l'Optimizer."""
+    (readiness), pas le search space de l'Optimizer.
+
+    `validation_run_id` (Slice 5, correction review indépendante tentative 10, finding MAJEUR) est
+    inclus tel quel dans le manifest, au même titre que `master_seed` (toujours présent, y compris
+    `None`) — `_derive_fold_seed(master_seed, validation_run_id, fold_index)` en dépend pour
+    dériver un `fold_seed` déterministe par fold (ADR 0021 Décision 9) ; sans cette clé, une
+    reprise fournissant un `validation_run_id` différent de celui de la tentative originale
+    passerait le fingerprint RUN-LEVEL (`check_resume_fingerprint()`, comparaison générique sur
+    TOUTES les clés du manifest) silencieusement, produisant un `WalkForwardRunOutcome` dont les
+    folds SKIP (fold_seed figé sous l'ancien `validation_run_id`) et les folds REDO/REPLAY_TEST
+    (fold_seed dérivé du nouveau) mélangeraient deux graines incohérentes."""
     manifest = load_backtest_manifest(data_manifest_path)
     if manifest is None:
         raise ValueError(
@@ -1022,6 +1046,7 @@ def build_walk_forward_manifest(
         "train_test_semantics_version": TRAIN_TEST_SEMANTICS_VERSION,
         "state_readiness_semantics_version": STATE_READINESS_SEMANTICS_VERSION,
         "master_seed": spec.master_seed,
+        "validation_run_id": validation_run_id,
         "verdict_policy_id": spec.verdict_policy_id,
         "specification": dataclasses.asdict(spec),
         "search_space": [dataclasses.asdict(pr) for pr in base_config.param_ranges],
@@ -1065,6 +1090,7 @@ def persist_walk_forward_run(
     base_config,
     data_manifest_path: Union[str, Path],
     output_dir: Union[str, Path],
+    validation_run_id: Optional[str] = None,
 ) -> Path:
     """Persiste sur disque les artefacts BRUTS d'un `WalkForwardRunOutcome` déjà obtenu (ADR 0021
     Décision 12, ÉCRITURE SEULE) — jamais appelée automatiquement par `run_walk_forward()`
@@ -1116,7 +1142,14 @@ def persist_walk_forward_run(
     les `trades`/`equity` d'un fold sous le répertoire d'un AUTRE fold en cas d'ordre divergent) —
     un `FoldArtifacts` par `FoldResult`, MÊME ORDRE, MÊME `fold_id`, jamais réassociés autrement.
     Lève `ValueError` (voir `build_walk_forward_manifest()`) AVANT toute écriture disque si
-    `data_manifest_path` est introuvable/illisible."""
+    `data_manifest_path` est introuvable/illisible.
+
+    `validation_run_id` (Slice 5, correction review indépendante tentative 10, finding MAJEUR) est
+    transmis tel quel à `build_walk_forward_manifest()` pour être inclus dans `manifest.json` —
+    un appelant qui persiste un run mené avec un `validation_run_id` donné (même paramètre que
+    celui passé à `run_walk_forward()`) doit repasser EXACTEMENT la même valeur ici pour que
+    `check_resume_fingerprint()` puisse détecter, à la reprise, une divergence de
+    `validation_run_id` (voir sa docstring)."""
     if len(fold_artifacts) != len(outcome.fold_results):
         raise ValueError(
             f"fold_artifacts ({len(fold_artifacts)} élément(s)) et outcome.fold_results "
@@ -1134,7 +1167,9 @@ def persist_walk_forward_run(
 
     # build_walk_forward_manifest() échoue ici, AVANT toute écriture disque, si data_manifest_path
     # est introuvable/illisible (voir sa docstring).
-    manifest_data = build_walk_forward_manifest(spec, base_config, data_manifest_path)
+    manifest_data = build_walk_forward_manifest(
+        spec, base_config, data_manifest_path, validation_run_id=validation_run_id,
+    )
 
     output_path = Path(output_dir)
     save_atomic(output_path / _MANIFEST_FILENAME, manifest_data, "walk_forward_manifest")
@@ -1175,3 +1210,642 @@ def persist_walk_forward_run(
         )
 
     return output_path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 5 — Reprise (resume) d'un run Walk-Forward interrompu (ADR 0021 Décision 12,
+# complément). Consomme les artefacts déjà ÉCRITS par persist_walk_forward_run() (Slice 4, JAMAIS
+# modifiée) pour décider, fold par fold, s'il faut le SAUTER (déjà complet, fingerprint
+# identique), rejouer UNIQUEMENT sa phase TEST (FoldSelection déjà figée mais TEST absent), ou le
+# refaire ENTIÈREMENT (absent/incomplet, sans FoldSelection persistée — réutilisant RÉELLEMENT,
+# dans ce dernier cas, les candidats TRAIN déjà exécutés d'une tentative interrompue via
+# train_progress.csv, voir _redo_fold_reusing_train_candidates()). AUCUN WalkForwardEvidence/
+# verdict scientifique ici (Décision 13, tranche séparée ultérieure). Reste, comme
+# run_walk_forward() (Slice 3), un orchestrateur EN MÉMOIRE pur pour le WalkForwardRunOutcome/
+# AggregateResult qu'il retourne — persist_walk_forward_run() n'est pas conçue pour ré-écrire
+# par-dessus des folds déjà présents sous output_dir (save_atomic() refuse tout écrasement) ;
+# persister un run repris reste une extension future, hors scope de cette tranche. SEULE
+# exception, locale à un fold RESUME_ACTION_REDO : train_progress.csv (voir docstring de
+# _redo_fold_reusing_train_candidates()), un artefact de CONTINUITÉ écrit/supprimé pendant la
+# recherche TRAIN, jamais une source de vérité scientifique.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class WalkForwardResumeMismatch(ValueError):
+    """Levée quand le `manifest.json` déjà persisté sous `output_dir` diverge du fingerprint du
+    run courant (ADR 0021 Décision 11/12) — toute divergence sur les TROIS versions de sémantique,
+    `data_manifest.content_hash`, la spécification, le search space/scoring/filtres ou la
+    stratégie référencée (toute clé de `manifest.json` SAUF `data_manifest_path`, un chemin
+    filesystem, jamais une dimension de fingerprint scientifique). Jamais un
+    `SKIP`/`REPLAY_TEST` silencieux sur un fingerprint divergent : mélanger, au sein d'un même run
+    repris, des artefacts produits sous deux fingerprints différents produirait des métriques
+    scientifiquement incohérentes — mirroring `WalkForwardSemanticsMismatch`/
+    `optimizer.TrainTestSemanticsMismatch`, mais portant sur l'ENSEMBLE du fingerprint de reprise
+    Walk-Forward (Décision 12), pas la seule version de sémantique Walk-Forward."""
+
+
+class FoldArtifactConflict(ValueError):
+    """Levée quand l'état persisté d'UN fold sous `output_dir` est structurellement incohérent —
+    ne correspond à aucun des trois cas propres de reprise (`RESUME_ACTION_SKIP`/
+    `RESUME_ACTION_REPLAY_TEST`/`RESUME_ACTION_REDO`), ex. `test_result.json` présent sans
+    `selection.json`/`definition.json` valides, ou `selection.json` présent sans
+    `definition.json` valide (écriture interrompue EN PLEIN MILIEU de la boucle par-fold de
+    `persist_walk_forward_run()`, entre deux `save_atomic()`). Jamais deviné/réparé
+    silencieusement : une reprise sur un répertoire de fold corrompu doit être refusée
+    explicitement (ADR 0021 Décision 11), à charge pour l'appelant de nettoyer manuellement."""
+
+
+class WalkForwardOrphanedFoldArtifacts(ValueError):
+    """Levée quand `output_dir/folds/` contient un `fold_id` avec un `selection.json`/
+    `test_result.json` déjà persisté, mais qui n'apparaît PAS parmi les `fold_id` recalculés par
+    `compute_fold_definitions()` pour la tentative courante (ADR 0021 Décision 12, review
+    indépendante Slice 5, finding MAJEUR) — typiquement une `validation_zone`/un `readiness_spec`
+    devenu(e) plus restrictif(ve) entre deux tentatives (moins de folds qu'à l'origine).
+    `validation_zone`/`readiness_spec` NE font PAS partie du fingerprint run-level de
+    `check_resume_fingerprint()` (ce ne sont pas des clés de `manifest.json`) : sans cette garde,
+    `resume_walk_forward_run()` itérerait silencieusement sur le sous-ensemble plus petit de folds
+    recalculés, renverrait `stopped_early=False`, et `build_aggregate_result()` produirait un
+    agrégat présenté comme COMPLET alors qu'il ignore les folds orphelins — exactement l'agrégat
+    partiel SILENCIEUX que Décision 12 (dernier paragraphe) exclut explicitement. Jamais deviné/
+    ignoré silencieusement : une reprise dont l'état disque déborde de la géométrie courante doit
+    être refusée explicitement, à charge pour l'appelant de choisir un nouveau `output_dir` ou de
+    restaurer la `validation_zone`/le `readiness_spec` d'origine."""
+
+
+RESUME_ACTION_SKIP = "SKIP"
+RESUME_ACTION_REPLAY_TEST = "REPLAY_TEST"
+RESUME_ACTION_REDO = "REDO"
+
+
+@dataclasses.dataclass(frozen=True)
+class FoldResumeDecision:
+    """Décision de reprise pour UN fold (ADR 0021 Décision 12) — jamais dans `validation_run.py`
+    (même principe que `FoldArtifacts`, Slice 4 : pure plomberie de reprise locale à
+    `walk_forward.py`, ni une `Specification` ni une `Evidence` typée). `selection` porté
+    seulement pour `RESUME_ACTION_REPLAY_TEST` (la `FoldSelection` déjà figée à réutiliser TELLE
+    QUELLE, jamais une nouvelle sélection) ; `fold_result` porté seulement pour
+    `RESUME_ACTION_SKIP` (le `FoldResult` déjà persisté, relu tel quel — jamais recalculé)."""
+
+    fold_id: str
+    action: str
+    selection: Optional[FoldSelection] = None
+    fold_result: Optional[FoldResult] = None
+
+
+def _load_fold_definition(fold_dir: Path) -> Optional[FoldDefinition]:
+    """Lecture tolérante de `definition.json` — `FoldDefinition` est un dataclass PLAT (aucun
+    champ imbriqué) : délègue directement à `atomic_json_store.load_tolerant()` (jamais un
+    `open()`/`json.load()` direct, jamais une réplique locale de `load_tolerant()` elle-même —
+    même primitive déjà réutilisée telle quelle par `dataset_split.py`/`research_run.py` pour
+    leurs propres dataclasses plates)."""
+    return load_tolerant(fold_dir / "definition.json", FoldDefinition)
+
+
+def _load_fold_selection(fold_dir: Path) -> Optional[FoldSelection]:
+    """Lecture tolérante de `selection.json` — même contrat que `_load_fold_definition()`."""
+    return load_tolerant(fold_dir / "selection.json", FoldSelection)
+
+
+def _load_fold_result(fold_dir: Path) -> Optional[FoldResult]:
+    """Lecture tolérante de `test_result.json` — `FoldResult` a DEUX champs imbriqués
+    (`definition: FoldDefinition`, `selection: FoldSelection`), reconstruits explicitement
+    (`atomic_json_store.load_tolerant(path, cls)` ne suffit pas pour un dataclass imbriqué, voir
+    sa propre docstring) — jamais un `cls(**data)` naïf qui laisserait `definition`/`selection`
+    comme de simples `dict` bruts. `None` si le fichier est absent/illisible, ou si `definition`/
+    `selection` sont absents/du mauvais type/incompatibles avec leurs dataclasses respectives."""
+    data = load_json_tolerant(fold_dir / "test_result.json")
+    if data is None:
+        return None
+    definition_data = data.get("definition")
+    selection_data = data.get("selection")
+    if not isinstance(definition_data, dict) or not isinstance(selection_data, dict):
+        return None
+    try:
+        definition = FoldDefinition(**definition_data)
+        selection = FoldSelection(**selection_data)
+        rest = {k: v for k, v in data.items() if k not in ("definition", "selection")}
+        return FoldResult(definition=definition, selection=selection, **rest)
+    except TypeError:
+        return None
+
+
+def _fingerprint_divergent_keys(persisted: dict, current: dict) -> list:
+    """Compare le `manifest.json` persisté au manifest fraîchement reconstruit pour le run
+    courant (`build_walk_forward_manifest()`, Slice 4, jamais réimplémenté) — TOUTES les clés SAUF
+    `data_manifest_path` (un chemin filesystem, jamais une dimension de fingerprint scientifique :
+    seul `data_manifest.content_hash`, imbriqué, en fait foi — ADR 0021 Décision 12). Retourne la
+    liste triée des clés divergentes (vide si le fingerprint est identique)."""
+    keys = sorted((set(persisted) | set(current)) - {"data_manifest_path"})
+    return [k for k in keys if persisted.get(k) != current.get(k)]
+
+
+def check_resume_fingerprint(
+    output_dir: Union[str, Path], current_manifest: dict,
+) -> Optional[dict]:
+    """Garde de reprise RUN-LEVEL (ADR 0021 Décision 12), appelée UNE SEULE FOIS avant toute
+    décision par fold (jamais revalidée par `decide_fold_resume_action()`) : compare
+    `manifest.json` déjà persisté sous `output_dir` (s'il existe) au fingerprint du run courant.
+    Retourne `None` si `output_dir/manifest.json` est absent (run neuf, aucun état antérieur à
+    valider). Retourne le manifest persisté si présent ET identique au fingerprint courant. Lève
+    `WalkForwardResumeMismatch` si présent mais divergent sur au moins une clé (hors
+    `data_manifest_path`) — jamais un `SKIP`/`REPLAY_TEST` silencieux sur un fingerprint
+    incohérent (ADR 0021 Décision 11/12)."""
+    persisted = load_json_tolerant(Path(output_dir) / _MANIFEST_FILENAME)
+    if persisted is None:
+        return None
+    divergent = _fingerprint_divergent_keys(persisted, current_manifest)
+    if divergent:
+        raise WalkForwardResumeMismatch(
+            f"Reprise refusée sous {output_dir} : le manifest.json déjà persisté diverge du "
+            f"fingerprint du run courant sur {divergent!r} — mélanger, au sein d'un même run "
+            "repris, des artefacts produits sous deux fingerprints différents produirait des "
+            "métriques scientifiquement incohérentes (ADR 0021 Décision 11/12). Relancer un "
+            "nouveau run vers un nouveau output_dir plutôt que de reprendre celui-ci."
+        )
+    return persisted
+
+
+def decide_fold_resume_action(
+    fold: FoldDefinition, output_dir: Union[str, Path],
+) -> FoldResumeDecision:
+    """Décision de reprise pour UN fold (ADR 0021 Décision 12) — suppose le fingerprint du run
+    déjà validé par `check_resume_fingerprint()` (appelée une seule fois, avant la boucle par
+    fold, jamais revalidée ici).
+
+    `RESUME_ACTION_SKIP` : `test_result.json` présent et cohérent (`selection.json`/
+    `definition.json` également présents et lisibles) — le fold ne sera JAMAIS ré-exécuté, son
+    `FoldResult` déjà persisté est relu tel quel. `RESUME_ACTION_REPLAY_TEST` : `selection.json`
+    présent et cohérent (`definition.json` lisible) mais `test_result.json` absent/incomplet — la
+    `FoldSelection` déjà figée est réutilisée TELLE QUELLE, jamais une nouvelle sélection TRAIN.
+    `RESUME_ACTION_REDO` : aucun `selection.json` exploitable (fold absent, ou seul
+    `definition.json` présent — TRAIN jamais mené à une sélection) — refait TRAIN -> Top-1 -> TEST,
+    (revue indépendante Slice 5 : `SKIP`/`REPLAY_TEST` ne valident QUE la géométrie de fold
+    [`definition.json`] et le fingerprint RUN-LEVEL [`check_resume_fingerprint()` — dataset,
+    stratégie, search space, scoring, filtres, versions de sémantique, `master_seed`, politique de
+    verdict, exactement la liste de l'ADR 0021 Décision 12] ; `base_config.base_params`/`mode`
+    n'en font délibérément PAS partie, ni ici ni dans le fingerprint RUN-LEVEL — l'ADR ne les liste
+    pas parmi les dimensions de fingerprint de reprise. Seul `_fold_definition_fingerprint()` (voir
+    plus bas) les couvre, mais UNIQUEMENT pour la réutilisation de candidats via
+    `train_progress.csv` [`RESUME_ACTION_REDO`], un mécanisme de continuité local à cette tranche,
+    jamais pour décider `SKIP`/`REPLAY_TEST` d'un fold déjà figé)
+    en réutilisant RÉELLEMENT tout candidat TRAIN déjà exécuté d'une tentative précédente quand
+    `train_progress.csv` en porte (voir l'exécution de cette décision,
+    `_redo_fold_reusing_train_candidates()`, jamais cette fonction-ci qui reste une pure lecture
+    d'artefacts).
+
+    Lève `FoldArtifactConflict` si l'état persisté est structurellement incohérent : un
+    `test_result.json` présent sans `selection.json`/`definition.json` valides, un
+    `selection.json` présent sans `definition.json` valide, OU un `definition.json` persisté qui
+    ne correspond PAS exactement au `fold` fraîchement recalculé pour ce `fold_id` (défense en
+    profondeur, review indépendante Slice 5 : `validation_zone`/`readiness_spec` ne font PAS
+    partie du fingerprint de `check_resume_fingerprint()` — un appelant qui reprendrait le MÊME
+    `output_dir` avec une `validation_zone`/un `readiness_spec` différent(e) recalculerait des
+    frontières de fold différentes tout en trouvant un fingerprint manifest.json identique ; sans
+    cette comparaison, `SKIP`/`REPLAY_TEST` accepterait silencieusement des artefacts dont la
+    géométrie a dérivé). Jamais deviné/réparé silencieusement.
+
+    **Réutilisation des candidats TRAIN déjà exécutés (ADR 0021 Décision 12)** : cette fonction ne
+    décide QUE du triplet SKIP/REPLAY_TEST/REDO à partir de `selection.json`/`test_result.json`
+    (inchangé depuis la première version de cette tranche) — la réutilisation réelle des candidats
+    TRAIN pour un `RESUME_ACTION_REDO` est déléguée à l'EXÉCUTION de cette décision
+    (`_redo_fold_reusing_train_candidates()`, appelée par `resume_walk_forward_run()`), jamais à
+    cette fonction elle-même (qui reste une pure lecture d'artefacts, sans savoir combien de
+    candidats TRAIN ont déjà été évalués). Choix retenu (correction review indépendante, tentative
+    3, finding MAJEUR — la version précédente de cette docstring affirmait à tort qu'aucun candidat
+    n'était jamais persisté avant la fin complète d'un fold, ce qui n'était vrai QUE parce que rien
+    ne les persistait encore) : `_redo_fold_reusing_train_candidates()` persiste elle-même,
+    INCRÉMENTALEMENT PENDANT la recherche TRAIN, chaque candidat réellement exécuté dans
+    `train_progress.csv` (sous le même `fold_dir` que `definition.json`/`selection.json` — fichier
+    NOUVEAU, distinct de `train_candidates.csv` que Slice 4 n'écrit que post-hoc pour un fold
+    ENTIÈREMENT terminé), puis relit ce fichier au tout début de la reprise pour peupler
+    `optimizer.Optimizer.run(already_tested=...)` — le paramètre `already_tested` de la reprise
+    déjà existante, non-Walk-Forward (`optimizer._run_batch_sequential`/`_run_batch_parallel`),
+    réutilisé TEL QUEL (jamais modifié, jamais dupliqué) pour SAUTER réellement les candidats déjà
+    évalués. Précision (revue indépendante Slice 5, tentative 10) : SEUL ce paramètre
+    `already_tested` est réutilisé ici — `optimization_store.load_tested_hashes()`/
+    `save_tested_hashes()` (le mécanisme de PERSISTANCE des hashs pour ce même `already_tested`,
+    ailleurs dans le dépôt pour un run `Optimizer` non-Walk-Forward) ne sont JAMAIS appelées par
+    cette tranche : elles ne persistent que des hashs nus, insuffisants pour reconstruire les
+    `score`/`params` par candidat qu'un TOP-1 réel exige après fusion des candidats rechargés et
+    nouvellement exécutés (voir plus bas). `train_progress.csv` est donc un format NOUVEAU, mais
+    strictement complémentaire (jamais un doublon de `tested.json`/`load_tested_hashes()` :
+    ceux-ci ne couvriraient de toute façon pas le besoin), au sens de la Décision 12 qui exige la
+    réutilisation du mécanisme EXISTANT quand il convient — ici seul le filtrage `already_tested`
+    convient, pas sa couche de persistance hash-only. Un
+    `RESUME_ACTION_REDO` dont le fold n'a par ailleurs RIEN persisté (`test_missing_fold_directory_
+    is_redo`) dégrade silencieusement vers un REDO complet (`train_progress.csv` absent ->
+    `already_tested` vide) — comportement identique à un REDO classique, jamais une régression.
+    Voir `_redo_fold_reusing_train_candidates()`/`_load_train_progress()` pour le détail complet du
+    mécanisme (fusion des candidats rechargés et nouvellement exécutés, re-tri par score décroissant
+    avant `select_fold_top1()`, garde de fingerprint de géométrie PAR FOLD distincte du fingerprint
+    RUN-LEVEL de `check_resume_fingerprint()`)."""
+    fold_dir = _fold_dir(output_dir, fold.fold_id)
+    persisted_definition = _load_fold_definition(fold_dir)
+    definition_is_consistent = persisted_definition is not None and persisted_definition == fold
+    have_selection_file = (fold_dir / "selection.json").is_file()
+    have_test_result_file = (fold_dir / "test_result.json").is_file()
+
+    if have_test_result_file:
+        fold_result = _load_fold_result(fold_dir)
+        selection = _load_fold_selection(fold_dir)
+        if fold_result is None or selection is None or not definition_is_consistent:
+            raise FoldArtifactConflict(
+                f"{fold.fold_id} : test_result.json présent sous {fold_dir} mais incohérent — "
+                "selection.json/definition.json manquant(s), illisible(s), ou definition.json ne "
+                "correspond pas au fold fraîchement recalculé. Reprise refusée plutôt que "
+                "devinée (ADR 0021 Décision 11)."
+            )
+        return FoldResumeDecision(
+            fold_id=fold.fold_id, action=RESUME_ACTION_SKIP, fold_result=fold_result,
+        )
+
+    if have_selection_file:
+        selection = _load_fold_selection(fold_dir)
+        if selection is None or not definition_is_consistent:
+            raise FoldArtifactConflict(
+                f"{fold.fold_id} : selection.json présent sous {fold_dir} mais incohérent — "
+                "illisible, definition.json manquant/illisible, ou definition.json ne "
+                "correspond pas au fold fraîchement recalculé. Reprise refusée plutôt que "
+                "devinée (ADR 0021 Décision 11)."
+            )
+        return FoldResumeDecision(
+            fold_id=fold.fold_id, action=RESUME_ACTION_REPLAY_TEST, selection=selection,
+        )
+
+    if persisted_definition is not None and not definition_is_consistent:
+        raise FoldArtifactConflict(
+            f"{fold.fold_id} : definition.json présent sous {fold_dir} mais ne correspond pas au "
+            "fold fraîchement recalculé (dérive de géométrie — validation_zone/readiness_spec "
+            "modifié(e) entre deux tentatives), alors qu'aucun selection.json/test_result.json "
+            "n'est encore présent. Reprise refusée plutôt que devinée (ADR 0021 Décision 11) — un "
+            "REDO silencieux réutiliserait potentiellement un train_progress.csv accumulé sous "
+            "l'ancienne géométrie."
+        )
+
+    return FoldResumeDecision(fold_id=fold.fold_id, action=RESUME_ACTION_REDO)
+
+
+_TRAIN_PROGRESS_FILENAME = "train_progress.csv"
+
+
+def _train_progress_path(fold_dir: Path) -> Path:
+    return fold_dir / _TRAIN_PROGRESS_FILENAME
+
+
+def _fold_definition_fingerprint(fold: FoldDefinition, base_config) -> str:
+    """Empreinte de géométrie ET de configuration TRAIN pour UN fold (AF-V-02 Slice 5) — jamais
+    confondue avec le fingerprint RUN-LEVEL de `build_walk_forward_manifest()`/
+    `check_resume_fingerprint()` (ADR 0021 Décision 12) : sert uniquement à valider que
+    `train_progress.csv` (voir `_load_train_progress()`) a bien été accumulé pour la MÊME géométrie
+    de fold ET le MÊME `base_config` que ceux de la tentative courante — jamais réutilisé après une
+    dérive (review indépendante, tentative 3, finding MAJEUR : `check_resume_fingerprint()` ne
+    couvre PAS `base_config.base_params`, les paramètres FIXES hors search space — un changement de
+    l'un d'eux entre deux tentatives passerait le fingerprint RUN-LEVEL sans être détecté, mais
+    produirait des scores TRAIN incomparables ; couvert ici explicitement, en plus de la géométrie
+    de fold déjà couverte par `definition.json`/`decide_fold_resume_action()`, puisque ce
+    fingerprint-ci EST celui qui protège concrètement la fusion `reused + new` de
+    `_redo_fold_reusing_train_candidates()`). Inclut `base_params`/`param_ranges`/`score_weights`/
+    `filters`/`mode`/`strategy_module` — tout ce qui influence le `score`/les `params` d'un candidat
+    TRAIN — jamais `data_manifest_path`/champs runtime, mêmes principe que
+    `_fingerprint_divergent_keys()`."""
+    payload = {
+        "fold": dataclasses.asdict(fold),
+        "base_params": base_config.base_params,
+        "param_ranges": [dataclasses.asdict(pr) for pr in base_config.param_ranges],
+        "score_weights": dataclasses.asdict(base_config.score_weights),
+        "filters": dataclasses.asdict(base_config.filters),
+        "mode": base_config.mode,
+        "strategy_module": base_config.strategy_module,
+    }
+    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.md5(serialized.encode()).hexdigest()[:12]
+
+
+def _load_train_progress(fold_dir: Path, fold: FoldDefinition, base_config) -> list:
+    """Lecture TOLÉRANTE de `train_progress.csv` (ADR 0021 Décision 12, mécanisme réel de
+    réutilisation des candidats TRAIN — AF-V-02 Slice 5) : candidats TRAIN déjà exécutés pour un
+    fold dont le TRAIN a été interrompu AVANT d'atteindre une `FoldSelection` (aucun
+    `selection.json` persisté). Fichier NOUVEAU, distinct de `train_candidates.csv` (Slice 4,
+    écrit UNE SEULE FOIS, post-hoc, par `persist_walk_forward_run()` pour un fold ENTIÈREMENT
+    terminé) : celui-ci est écrit INCRÉMENTALEMENT PENDANT la recherche TRAIN elle-même (voir
+    `_redo_fold_reusing_train_candidates()`).
+
+    Chaque ligne porte `fold_fingerprint` (voir `_fold_definition_fingerprint()` — géométrie DE
+    FOLD **ET** configuration TRAIN, `base_config` compris) — si la première ligne lue ne
+    correspond PAS à l'empreinte fraîchement recalculée, tout le fichier est ignoré (`[]`) plutôt
+    que de mélanger des candidats évalués sous une géométrie/config différente.
+
+    Jamais une source de vérité scientifique (contrairement à `definition.json`/`selection.json`/
+    `test_result.json`, ADR 0021 Décision 11, dont la corruption DOIT bloquer la reprise via
+    `FoldArtifactConflict`) : ce fichier n'est qu'un raccourci de reprise — absent, illisible, vide,
+    ou de géométrie/config divergente, il dégrade silencieusement vers `[]` (aucun candidat
+    réutilisé, REDO complet, comportement identique à avant ce mécanisme) plutôt que de lever une
+    erreur."""
+    path = _train_progress_path(fold_dir)
+    if not path.is_file():
+        return []
+    try:
+        progress_df = pd.read_csv(path)
+    except Exception:
+        return []
+    if progress_df.empty:
+        return []
+    expected_fingerprint = _fold_definition_fingerprint(fold, base_config)
+    candidates = []
+    for _, row in progress_df.iterrows():
+        try:
+            if str(row["fold_fingerprint"]) != expected_fingerprint:
+                return []
+            params = json.loads(row["params_json"])
+            score = float(row["score"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return []
+        candidates.append({"params": params, "score": score})
+    return candidates
+
+
+def _write_train_progress(
+    fold_dir: Path, fold: FoldDefinition, base_config, candidates: list,
+) -> None:
+    """Réécriture COMPLÈTE de `train_progress.csv` à chaque nouveau candidat TRAIN réellement
+    exécuté — non-atomique (même convention que les CSV de `persist_walk_forward_run()`, Slice 4 :
+    aucun format tabulaire atomique unique n'existe déjà dans ce dépôt pour ce cas), simplicité
+    priorisée sur la performance (aucune contrainte de perf dans cette mission). Une interruption
+    EN PLEIN MILIEU de cette écriture laisse au pire un fichier illisible/tronqué, dégradé
+    silencieusement vers `[]` par `_load_train_progress()` (jamais une corruption qui bloquerait la
+    reprise — voir sa docstring : ce fichier n'est jamais qu'une optimisation)."""
+    fold_dir.mkdir(parents=True, exist_ok=True)
+    fingerprint = _fold_definition_fingerprint(fold, base_config)
+    rows = [
+        {
+            "fold_fingerprint": fingerprint,
+            "params_json": json.dumps(c["params"], sort_keys=True, ensure_ascii=False),
+            "score": c["score"],
+        }
+        for c in candidates
+    ]
+    pd.DataFrame(rows).to_csv(_train_progress_path(fold_dir), index=False)
+
+
+_TRAIN_PROGRESS_REUSE_SAFE_MODES = frozenset({"grid"})
+"""Modes `optimizer.py` pour lesquels la réutilisation de candidats via `already_tested` (Slice 5)
+est PROUVÉE sûre — review indépendante, tentative 3, finding MAJEUR : `mode="grid"`
+(`Optimizer.run_mode3()`) énumère un produit cartésien INDÉPENDANT du candidat par candidat
+(`itertools.product`, jamais de dépendance à un résultat déjà obtenu) — sauter un candidat via
+`already_tested` ne change donc RIEN aux autres candidats explorés. `mode="single_var"`
+(`run_mode1()`) est PROGRESSIF/à ÉTAGES : `best_params[pr.name]` de chaque étage est dérivé du
+MEILLEUR résultat de SON PROPRE batch (`optimizer.py::run_mode1`) — sauter le candidat qui aurait
+été ce meilleur résultat (parce que déjà `already_tested`) ferait diverger silencieusement les
+étages suivants d'un run non-interrompu, sans que la fusion/re-tri de
+`_redo_fold_reusing_train_candidates()` puisse le rattraper (la divergence a lieu DANS la
+génération des combos, pas dans leur classement final). `mode="general"` (`run_mode4()`) délègue
+selon la taille déclarée à `run_mode3()` (sûr), `_run_stratified_sample()` (tirage aléatoire, non
+audité pour ce risque) ou `_run_progressive_grid()` (3 passes, également à étages) — traité comme
+non sûr par défaut, faute d'audit complet des trois branches. `mode="cross_zone"` (`run_mode2()`)
+n'est jamais réellement appelé avec un historique via `Optimizer.run()` (toujours
+`prior_results=[]`, voir son lambda de dispatch), mais cette garantie est un détail d'implémentation
+d'`optimizer.py` (fichier INTERDIT à cette mission) — trop fragile pour s'y fier sans pouvoir le
+vérifier par un test qui casserait si ça changeait. Pour tout mode HORS de cet ensemble,
+`_redo_fold_reusing_train_candidates()` ignore `train_progress.csv` (aucun candidat rechargé,
+`already_tested` vide) — dégrade vers un REDO complet, jamais vers une réutilisation non prouvée
+sûre."""
+
+
+def _redo_fold_reusing_train_candidates(
+    fold: FoldDefinition,
+    base_config,
+    df,
+    output_dir: Union[str, Path],
+    progress_cb,
+    fold_seed: Optional[int],
+) -> FoldResult:
+    """Exécute un `RESUME_ACTION_REDO` (ADR 0021 Décision 12) en réutilisant RÉELLEMENT les
+    candidats TRAIN déjà exécutés d'une tentative interrompue, au lieu de systématiquement tout
+    refaire depuis zéro (correction review indépendante, tentative 3, finding MAJEUR) — UNIQUEMENT
+    pour `base_config.mode` dans `_TRAIN_PROGRESS_REUSE_SAFE_MODES` (voir sa docstring : les autres
+    modes gardent le comportement REDO complet préexistant, une réutilisation non prouvée sûre
+    étant pire qu'aucune réutilisation).
+
+    Mécanisme : `_load_train_progress()` recharge les candidats déjà exécutés persistés par une
+    tentative précédente (`[]` si aucun, ou si le mode courant n'est pas dans
+    `_TRAIN_PROGRESS_REUSE_SAFE_MODES`) ; `run_fold_train(already_tested=...)` (extension additive
+    Slice 5) transmet leurs hashs à `optimizer.Optimizer.run(already_tested=...)`, le mécanisme de
+    reprise déjà existant et non-Walk-Forward — tout candidat déjà connu est SAUTÉ (jamais
+    réexécuté) et n'apparaît PAS dans le `all_results` retourné par cet appel (voir la docstring de
+    `run_fold_train()`). Les candidats rechargés et nouvellement exécutés sont fusionnés
+    (`reused + new`) puis re-triés par score décroissant (même convention qu'`Optimizer.run()`)
+    AVANT `select_fold_top1()`, pour reconstruire la MÊME `FoldSelection` Top-1 qu'un REDO complet
+    aurait produite — jamais une sélection biaisée par l'ORDRE de fusion.
+
+    Persiste elle-même, INCRÉMENTALEMENT PENDANT la recherche (via un `progress_cb` enveloppant
+    celui de l'appelant), chaque nouveau candidat réellement exécuté dans `train_progress.csv` sous
+    le fold concerné (`_write_train_progress()`) — la SEULE écriture disque de
+    `resume_walk_forward_run()` (dont la docstring affirmait auparavant, à tort, ne rien persister
+    elle-même : sans cette écriture, la réutilisation resterait un mécanisme qui ne sert jamais,
+    faute du moindre candidat jamais accumulé avant la fin complète du fold). Fichier supprimé
+    après un REDO réussi : le fold est alors complet, un futur `persist_walk_forward_run()` externe
+    écrira `test_result.json`, après quoi une reprise ultérieure verra `RESUME_ACTION_SKIP` pour ce
+    fold, plus jamais `RESUME_ACTION_REDO` — le fichier de continuité n'a alors plus d'usage.
+
+    Portée réelle (review indépendante, tentative 3, finding MAJEUR) : cette fonction n'est
+    invoquée QUE par `resume_walk_forward_run()` — le tout premier passage TRAIN d'un fold, via
+    `run_walk_forward()`/`execute_walk_forward_fold()` (Slice 3, EN MÉMOIRE pur, jamais modifiée),
+    n'écrit encore aucun `train_progress.csv`. Un fold dont le TRAIN est interrompu dès sa TOUTE
+    PREMIÈRE tentative n'a donc rien à réutiliser (REDO complet, comportement inchangé) : la
+    réutilisation ne devient réelle qu'à partir de la reprise d'un `RESUME_ACTION_REDO` LUI-MÊME
+    interrompu une seconde fois — la seule granularité de persistance possible sans modifier
+    `run_walk_forward()`/`persist_walk_forward_run()` (Slices 3/4, hors scope de cette tranche).
+
+    `stop_flag_fn=None` transmis à `run_fold_train()` (jamais la barrière inter-fold de
+    `resume_walk_forward_run()`) — même invariant qu'`execute_walk_forward_fold()`/
+    `run_walk_forward()` : un fold démarré va toujours à son terme."""
+    fold_dir = _fold_dir(output_dir, fold.fold_id)
+    if base_config.mode in _TRAIN_PROGRESS_REUSE_SAFE_MODES:
+        reused_candidates = _load_train_progress(fold_dir, fold, base_config)
+    else:
+        reused_candidates = []
+    already_tested_hashes = {params_hash(c["params"]) for c in reused_candidates}
+    accumulated = list(reused_candidates)
+
+    def _persisting_progress_cb(done_in_batch, total_in_batch, result):
+        accumulated.append({"params": result["params"], "score": result["score"]})
+        if base_config.mode in _TRAIN_PROGRESS_REUSE_SAFE_MODES:
+            _write_train_progress(fold_dir, fold, base_config, accumulated)
+        if progress_cb is not None:
+            progress_cb(done_in_batch, total_in_batch, result)
+
+    new_results, _sensitivity = run_fold_train(
+        fold, base_config, df, progress_cb=_persisting_progress_cb, stop_flag_fn=None,
+        fold_seed=fold_seed, already_tested=already_tested_hashes,
+    )
+    merged_results = reused_candidates + new_results
+    merged_results.sort(key=lambda r: r["score"], reverse=True)
+    selection = select_fold_top1(fold, merged_results, base_config, fold_seed=fold_seed)
+    fold_result = run_fold_test(fold, selection, base_config, df)
+
+    progress_path = _train_progress_path(fold_dir)
+    if progress_path.is_file():
+        progress_path.unlink()
+
+    return fold_result
+
+
+def _fold_has_persisted_state(fold_dir: Path) -> bool:
+    """Un fold_dir "compte" pour la détection d'orphelins (`_check_no_orphaned_fold_artifacts()`)
+    dès qu'il porte un `selection.json` OU un `test_result.json` — même seuil que
+    `decide_fold_resume_action()` (un `definition.json` seul, sans `selection.json`, ne représente
+    aucun TRAIN mené à terme, rien à perdre silencieusement s'il est ignoré)."""
+    return (fold_dir / "selection.json").is_file() or (fold_dir / "test_result.json").is_file()
+
+
+def _check_no_orphaned_fold_artifacts(
+    output_dir: Union[str, Path], fold_definitions: Tuple[FoldDefinition, ...],
+) -> None:
+    """Garde de reprise (ADR 0021 Décision 12, review indépendante Slice 5, finding MAJEUR) :
+    lève `WalkForwardOrphanedFoldArtifacts` si `output_dir/folds/` contient un `fold_id` avec un
+    état persisté (`_fold_has_persisted_state()`) qui n'apparaît PAS parmi
+    `{fd.fold_id for fd in fold_definitions}` — voir la docstring de
+    `WalkForwardOrphanedFoldArtifacts` pour le scénario (validation_zone/readiness_spec rétréci(e)
+    entre deux tentatives). No-op si `output_dir/folds/` n'existe pas encore (run neuf)."""
+    folds_root = Path(output_dir) / _FOLDS_DIRNAME
+    if not folds_root.is_dir():
+        return
+    expected_fold_ids = {fd.fold_id for fd in fold_definitions}
+    orphaned = sorted(
+        entry.name for entry in folds_root.iterdir()
+        if entry.is_dir()
+        and entry.name not in expected_fold_ids
+        and _fold_has_persisted_state(entry)
+    )
+    if orphaned:
+        raise WalkForwardOrphanedFoldArtifacts(
+            f"Reprise refusée sous {output_dir} : {len(orphaned)} répertoire(s) de fold "
+            f"déjà persisté(s) {orphaned!r} ne correspond(ent) à AUCUN fold_id recalculé par "
+            "compute_fold_definitions() pour la tentative courante — validation_zone/"
+            "readiness_spec est probablement devenu(e) plus restrictif(ve) que lors de la "
+            "tentative qui a produit ces artefacts (ADR 0021 Décision 12). Reprendre malgré "
+            "cela produirait un agrégat silencieusement partiel. Choisir un nouveau output_dir, "
+            "ou restaurer la validation_zone/le readiness_spec d'origine, plutôt que de "
+            "reprendre celui-ci en l'état."
+        )
+
+
+def resume_walk_forward_run(
+    validation_zone: SplitBoundary,
+    spec: WalkForwardSpecification,
+    readiness_spec: Optional[DailyStateReadiness],
+    base_config,
+    df,
+    data_manifest_path: Union[str, Path],
+    output_dir: Union[str, Path],
+    progress_cb=None,
+    stop_flag_fn=None,
+    validation_run_id: Optional[str] = None,
+) -> Tuple[WalkForwardRunOutcome, AggregateResult]:
+    """Point d'entrée de reprise (ADR 0021 Décision 12) — mirroring `run_walk_forward()` (Slice 3,
+    JAMAIS modifiée) : même géométrie (`compute_fold_definitions()` appelée EXACTEMENT une fois),
+    même garde `master_seed`/`validation_run_id`, même barrière `stop_flag_fn` INTER-fold (jamais
+    transmise à l'intérieur d'un fold). Diffère uniquement par la décision PAR FOLD
+    (`decide_fold_resume_action()`) : `RESUME_ACTION_SKIP` relit le `FoldResult` déjà persisté
+    (aucune ré-exécution, aucun nouveau backtest) ; `RESUME_ACTION_REPLAY_TEST` rejoue UNIQUEMENT
+    `run_fold_test()` (Slice 2, INCHANGÉE) avec la `FoldSelection` déjà figée (jamais une nouvelle
+    sélection TRAIN) ; `RESUME_ACTION_REDO` délègue à `_redo_fold_reusing_train_candidates()` —
+    TRAIN -> Top-1 -> TEST, mais en réutilisant RÉELLEMENT les candidats TRAIN déjà exécutés d'une
+    tentative interrompue (`train_progress.csv`, ADR 0021 Décision 12 — voir sa docstring pour le
+    mécanisme complet ; correction review indépendante, tentative 3, finding MAJEUR : une version
+    précédente refaisait ENTIÈREMENT le TRAIN dans tous les cas de REDO).
+
+    Le fingerprint RUN-LEVEL est validé UNE SEULE FOIS, AVANT toute décision par fold
+    (`check_resume_fingerprint()`) — un fingerprint divergent lève `WalkForwardResumeMismatch`
+    immédiatement, avant tout calcul/exécution de fold. Ce fingerprint inclut désormais
+    `validation_run_id` (Slice 5, correction review indépendante tentative 10, finding MAJEUR) :
+    ce paramètre pilote `_derive_fold_seed()`, donc un `validation_run_id` différent de celui de la
+    tentative persistée produirait, pour les folds REDO/REPLAY_TEST, un `fold_seed` incohérent
+    avec celui déjà figé dans les `FoldSelection` des folds SKIP — refusé explicitement plutôt que
+    mélangé silencieusement. `validation_zone`/`readiness_spec` ne font
+    PAS partie de ce fingerprint run-level (ce sont des paramètres filesystem/runtime, pas des
+    clés de `manifest.json`) — leur dérive éventuelle (géométrie de fold) est détectée PAR FOLD,
+    dans `decide_fold_resume_action()` (comparaison `definition.json` persisté vs fold
+    fraîchement recalculé), mais TOUJOURS en DEUX PHASES strictement séparées : la décision de
+    TOUS les folds (`decide_fold_resume_action()`, pure lecture disque, AUCUN backtest) est
+    calculée intégralement AVANT que le premier backtest réel ne démarre. Un fold tardif dont la
+    géométrie a dérivé lève donc `FoldArtifactConflict` avant que des folds antérieurs aient été
+    réellement ré-exécutés — jamais après coup, jamais fold par fold entrelacé avec l'exécution
+    (review indépendante Slice 5 : un contrôle entrelacé aurait laissé des backtests réels
+    s'exécuter pour les folds précédant celui où la dérive est détectée).
+
+    Reste un orchestrateur EN MÉMOIRE pur pour le `WalkForwardRunOutcome`/`AggregateResult` qu'elle
+    retourne (comme `run_walk_forward()`) : elle ne persiste JAMAIS elle-même `manifest.json`/
+    `state.json`/`aggregate.json`/`test_result.json`/`selection.json` — `save_atomic()` refuse tout
+    écrasement et `persist_walk_forward_run()` n'est pas conçue pour ré-écrire par-dessus des folds
+    déjà présents, un appelant explicite reste responsable d'appeler `persist_walk_forward_run()`
+    séparément s'il veut persister le résultat de cette reprise. SEULE exception, additive et
+    strictement locale à un `RESUME_ACTION_REDO` (Slice 5, correction du finding MAJEUR
+    ci-dessus) : `train_progress.csv` sous `fold_dir`, écrit/supprimé par
+    `_redo_fold_reusing_train_candidates()` — un artefact de CONTINUITÉ de reprise, jamais une
+    source de vérité scientifique (voir sa docstring), sans lequel la réutilisation des candidats
+    TRAIN exigée par la Décision 12 resterait un mécanisme qui ne sert jamais.
+
+    Retourne `(WalkForwardRunOutcome, AggregateResult)` — le `WalkForwardRunOutcome` couvre TOUS
+    les folds (sautés + rejoués + refaits) dans l'ordre de `compute_fold_definitions()` ; l'appel
+    explicite à `build_aggregate_result()` (Slice 3, INCHANGÉE, fonction pure) sur cet ensemble
+    COMPLET produit un agrégat recalculé INTÉGRALEMENT — jamais un agrégat partiel SILENCIEUX (ADR
+    0021 Décision 12, dernier paragraphe) : `build_aggregate_result()` ne distingue déjà pas
+    l'origine (sauté/rejoué/refait) d'un `FoldResult`, seulement son contenu, donc aucune fonction
+    d'agrégation dédiée à la reprise n'est nécessaire au-delà de cet appel explicite. SEULE
+    exception, explicitement signalée et jamais silencieuse (même caveat que `run_walk_forward()`,
+    Slice 3, ci-dessus) : `stop_flag_fn` interrompant la boucle ENTRE deux folds fait retourner un
+    `WalkForwardRunOutcome` avec `stopped_early=True` et `fold_results` limité au préfixe déjà
+    décidé/exécuté — l'agrégat retourné dans ce cas porte alors sur ce même préfixe, jamais sur
+    l'ensemble des folds attendus, mais `stopped_early=True` le signale explicitement à
+    l'appelant : ce n'est jamais un agrégat partiel produit SANS que l'appelant puisse le
+    distinguer d'un agrégat complet."""
+    if spec.master_seed is not None and validation_run_id is None:
+        raise ValueError(
+            "validation_run_id est obligatoire quand spec.master_seed est fourni — nécessaire "
+            "pour dériver un fold_seed déterministe par fold (ADR 0021 Décision 9)."
+        )
+
+    fold_definitions = compute_fold_definitions(validation_zone, spec, readiness_spec)
+    current_manifest = build_walk_forward_manifest(
+        spec, base_config, data_manifest_path, validation_run_id=validation_run_id,
+    )
+    check_resume_fingerprint(output_dir, current_manifest)
+    # validation_zone/readiness_spec ne font pas partie du fingerprint run-level ci-dessus (ce ne
+    # sont pas des clés de manifest.json) — une réduction du nombre de folds recalculés entre deux
+    # tentatives (zone/readiness plus restrictif) laisserait sinon des fold_dir déjà persistés
+    # au-delà de ce nouveau compte silencieusement ignorés par la boucle ci-dessous, produisant un
+    # agrégat partiel présenté comme complet (WalkForwardOrphanedFoldArtifacts, review indépendante
+    # Slice 5, finding MAJEUR — voir sa docstring).
+    _check_no_orphaned_fold_artifacts(output_dir, fold_definitions)
+
+    # Phase 1 — décision de reprise pour TOUS les folds, avant tout backtest réel.
+    # decide_fold_resume_action() ne fait QUE lire des artefacts disque (jamais de backtest) ;
+    # calculer ici la décision de l'ENSEMBLE des folds garantit qu'un FoldArtifactConflict — y
+    # compris une dérive géométrique validation_zone/readiness_spec détectée sur un fold tardif —
+    # est levé avant que le moindre fold antérieur n'ait été réellement ré-exécuté.
+    decisions = [decide_fold_resume_action(fold, output_dir) for fold in fold_definitions]
+
+    # Phase 2 — exécution, fold par fold, dans l'ordre de compute_fold_definitions().
+    fold_results = []
+    for fold, decision in zip(fold_definitions, decisions):
+        if stop_flag_fn is not None and stop_flag_fn():
+            outcome = WalkForwardRunOutcome(fold_results=tuple(fold_results), stopped_early=True)
+            return outcome, build_aggregate_result(outcome.fold_results)
+
+        if decision.action == RESUME_ACTION_SKIP:
+            fold_results.append(decision.fold_result)
+            continue
+
+        fold_seed = _derive_fold_seed(spec.master_seed, validation_run_id, fold.fold_index)
+
+        if decision.action == RESUME_ACTION_REPLAY_TEST:
+            fold_result = run_fold_test(fold, decision.selection, base_config, df)
+        else:
+            fold_result = _redo_fold_reusing_train_candidates(
+                fold, base_config, df, output_dir, progress_cb=progress_cb, fold_seed=fold_seed,
+            )
+        fold_results.append(fold_result)
+
+    outcome = WalkForwardRunOutcome(fold_results=tuple(fold_results), stopped_early=False)
+    return outcome, build_aggregate_result(outcome.fold_results)
