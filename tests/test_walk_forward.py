@@ -26,15 +26,19 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dataset_split import build_split_boundary
+from dataset_split import build_dataset_split_plan, build_split_boundary
 from engine import _add_market_time_columns
 from strategy_contracts import DailyStateReadiness
 from validation_run import (
+    VALIDATION_TYPE_WALK_FORWARD,
     AggregateResult,
     FoldDefinition,
     FoldResult,
     FoldSelection,
+    WalkForwardEvidence,
     WalkForwardRunOutcome,
+    load_validation_run,
+    save_validation_run,
 )
 from walk_forward import (
     WALK_FORWARD_SEMANTICS_VERSION,
@@ -58,6 +62,7 @@ from walk_forward import (
     build_aggregate_result,
     build_walk_forward_manifest,
     build_walk_forward_specification,
+    build_walk_forward_validation_run,
     check_no_final_holdout_overlap,
     check_no_oos_overlap,
     check_resume_fingerprint,
@@ -3406,3 +3411,122 @@ class TestResumeWalkForwardRun:
         assert [r.fold_id for r in resumed.fold_results] == [fold0.fold_id]
         assert resumed.fold_results[0].score_test == pytest.approx(r0.score_test)
         assert resumed_aggregate.n_folds == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 8 — build_walk_forward_validation_run() : assemblage d'une ValidationRun réelle
+# à partir d'un WalkForwardRunOutcome/AggregateResult déjà obtenus (mirroring exact du précédent
+# établi par validation_oos.py::run_oos_validation() côté "oos"). Ne persiste rien elle-même.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _wf_split_plan():
+    return build_dataset_split_plan(
+        split_plan_id="split_perfect_revolution_v1_walk_forward_v2",
+        dataset_snapshot_id="local_csv:sha256:" + "cd" * 32,
+        train=build_split_boundary("2017-10-31T00:00:00+00:00", "2020-11-30T00:00:00+00:00"),
+        validation=build_split_boundary("2020-11-30T00:00:00+00:00", "2025-05-19T00:00:00+00:00"),
+        final_holdout=build_split_boundary("2025-05-19T00:00:00+00:00", "2026-05-20T00:00:00+00:00"),
+    )
+
+
+class TestBuildWalkForwardValidationRun:
+    """`build_walk_forward_validation_run()` — mirroring `run_oos_validation()` côté Walk-Forward :
+    reçoit `outcome`/`aggregate` déjà obtenus séparément, jamais recalculés/ré-exécutés ici."""
+
+    def _outcome_and_aggregate(self):
+        zone = _zone("2023-01-01T00:00:00+00:00", "2023-12-01T00:00:00+00:00")
+        fold0 = _wf_fold(
+            train_start="2023-01-01T00:00:00+00:00", boundary="2023-06-01T00:00:00+00:00",
+            test_end="2023-12-01T00:00:00+00:00", index=0, is_last=True,
+        )
+        r0 = _fold_result_stub(fold0, net_ret_pct=5.0, n_trades=3)
+        outcome = WalkForwardRunOutcome(fold_results=(r0,), stopped_early=False)
+        aggregate = build_aggregate_result((r0,))
+        return outcome, aggregate
+
+    def test_produces_a_validation_run_with_the_expected_walk_forward_shape(self):
+        outcome, aggregate = self._outcome_and_aggregate()
+        spec = build_walk_forward_specification(base_params={"or_start_h": 15, "or_start_m": 30})
+        split_plan = _wf_split_plan()
+
+        run = build_walk_forward_validation_run(
+            outcome, aggregate, spec, split_plan,
+            research_run_id="rr_wf_slice8", validation_run_id="vr_wf_slice8",
+            strategy_name="NASDAQ Perfect Revolution V1.1", strategy_params={"or_start_h": 15},
+        )
+
+        assert run.validation_type == VALIDATION_TYPE_WALK_FORWARD
+        assert run.split_plan_id == split_plan.split_plan_id
+        assert run.dataset_snapshot_id == split_plan.dataset_snapshot_id
+        assert run.specification == spec
+        assert isinstance(run.evidence, WalkForwardEvidence)
+        assert run.evidence.fold_results == outcome.fold_results
+        assert run.evidence.aggregate == aggregate
+        assert run.research_run_id == "rr_wf_slice8"
+        assert run.validation_run_id == "vr_wf_slice8"
+        assert run.strategy_name == "NASDAQ Perfect Revolution V1.1"
+        assert run.strategy_params == {"or_start_h": 15}
+
+    def test_verdict_is_inconclusive_when_the_spec_has_no_verdict_policy(self):
+        outcome, aggregate = self._outcome_and_aggregate()
+        spec = build_walk_forward_specification(
+            base_params={"or_start_h": 15, "or_start_m": 30}, verdict_policy_id=None,
+        )
+        split_plan = _wf_split_plan()
+
+        run = build_walk_forward_validation_run(
+            outcome, aggregate, spec, split_plan,
+            research_run_id="rr_wf_slice8b", validation_run_id="vr_wf_slice8b",
+            strategy_name="NASDAQ Perfect Revolution V1.1", strategy_params={},
+        )
+
+        assert run.evidence.scientific_verdict == "INCONCLUSIVE"
+
+    def test_round_trips_through_save_and_load_validation_run(self, tmp_path):
+        """Round-trip du contenu significatif — pas une égalité stricte d'objet : `fold_results`
+        redevient une `list` de `dict` après un aller-retour JSON générique (même limitation
+        connue, non spécifique à cette tranche, que
+        test_save_and_load_validation_run_round_trips_a_walk_forward_run() dans
+        tests/test_validation_run.py, Slice 6)."""
+        outcome, aggregate = self._outcome_and_aggregate()
+        spec = build_walk_forward_specification(base_params={"or_start_h": 15, "or_start_m": 30})
+        split_plan = _wf_split_plan()
+
+        run = build_walk_forward_validation_run(
+            outcome, aggregate, spec, split_plan,
+            research_run_id="rr_wf_slice8c", validation_run_id="vr_wf_slice8c",
+            strategy_name="NASDAQ Perfect Revolution V1.1", strategy_params={"or_start_h": 15},
+        )
+
+        path = save_validation_run(tmp_path / "validation_run.json", run)
+        loaded = load_validation_run(path)
+
+        assert loaded.validation_run_id == run.validation_run_id
+        assert loaded.research_run_id == run.research_run_id
+        assert loaded.split_plan_id == run.split_plan_id
+        assert loaded.dataset_snapshot_id == run.dataset_snapshot_id
+        assert loaded.validation_type == run.validation_type
+        assert loaded.strategy_name == run.strategy_name
+        assert loaded.strategy_params == run.strategy_params
+        assert loaded.specification.geometry == run.specification.geometry
+        assert loaded.specification.base_params == run.specification.base_params
+        assert loaded.evidence.execution_status == run.evidence.execution_status
+        assert loaded.evidence.scientific_verdict == run.evidence.scientific_verdict
+        assert list(loaded.evidence.verdict_reasons) == list(run.evidence.verdict_reasons)
+        assert len(loaded.evidence.fold_results) == len(run.evidence.fold_results)
+        assert loaded.evidence.fold_results[0]["fold_id"] == run.evidence.fold_results[0].fold_id
+
+    def test_does_not_persist_anything_itself(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        outcome, aggregate = self._outcome_and_aggregate()
+        spec = build_walk_forward_specification(base_params={"or_start_h": 15, "or_start_m": 30})
+        split_plan = _wf_split_plan()
+
+        build_walk_forward_validation_run(
+            outcome, aggregate, spec, split_plan,
+            research_run_id="rr_wf_slice8d", validation_run_id="vr_wf_slice8d",
+            strategy_name="NASDAQ Perfect Revolution V1.1", strategy_params={},
+        )
+
+        assert list(tmp_path.iterdir()) == []

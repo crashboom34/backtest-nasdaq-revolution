@@ -36,7 +36,7 @@ from typing import Optional, Tuple, Union
 import pandas as pd
 
 from atomic_json_store import load_json_tolerant, load_tolerant, save_atomic
-from dataset_split import SplitBoundary
+from dataset_split import DatasetSplitPlan, SplitBoundary
 from market_data.backtest_manifest import load_backtest_manifest
 from optimizer import (
     STATE_READINESS_SEMANTICS_VERSION,
@@ -52,12 +52,16 @@ from optimizer import (
 )
 from strategy_contracts import DailyStateReadiness, resolve_state_ready_boundary
 from validation_run import (
+    VALIDATION_TYPE_WALK_FORWARD,
     AggregateResult,
     FoldDefinition,
     FoldResult,
     FoldSelection,
+    ValidationRun,
     WalkForwardRunOutcome,
     WalkForwardSpecification,
+    build_validation_run,
+    build_walk_forward_evidence,
 )
 
 # Identifie la sémantique du protocole Walk-Forward — géométrie, inclusivité des frontières, règle
@@ -1210,6 +1214,60 @@ def persist_walk_forward_run(
         )
 
     return output_path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AF-V-02 Slice 8 — Assemblage d'une ValidationRun Walk-Forward réelle (ADR 0021 Décisions 8/13).
+# Mirroring exact du précédent établi par validation_oos.py::run_oos_validation() côté "oos" :
+# reçoit `outcome`/`aggregate` DÉJÀ obtenus par un appel séparé et antérieur (jamais recalculés ni
+# ré-exécutés ici — contrairement à run_oos_validation(), cette fonction n'exécute elle-même aucun
+# backtest), `research_run_id`/`validation_run_id`/`strategy_name`/`strategy_params` fournis TELS
+# QUELS par l'appelant (jamais générés/devinés ici), et ne persiste RIEN elle-même — la persistance
+# reste la responsabilité d'un futur appelant explicite (même principe que persist_walk_forward_run(),
+# Slice 4, jamais rappelée automatiquement par cette fonction).
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def build_walk_forward_validation_run(
+    outcome: WalkForwardRunOutcome,
+    aggregate: Optional[AggregateResult],
+    spec: WalkForwardSpecification,
+    split_plan: DatasetSplitPlan,
+    research_run_id: str,
+    validation_run_id: str,
+    strategy_name: str,
+    strategy_params: dict,
+) -> ValidationRun:
+    """Assemble une `ValidationRun` Walk-Forward à partir d'un `outcome`/`aggregate` déjà obtenus
+    (ADR 0021 Décisions 8/13) — mirroring `validation_oos.py::run_oos_validation()`, voir le
+    commentaire de section ci-dessus pour la différence structurelle (aucune exécution ici, et
+    aucun équivalent `HoldoutAccessEvent` retourné — Walk-Forward ne consulte pas `FINAL_HOLDOUT`,
+    ce mécanisme est propre au chemin OOS).
+
+    `spec` sert DIRECTEMENT de `specification` à `build_validation_run()` — contrairement à `"oos"`,
+    `WalkForwardSpecification` porte déjà l'intention figée AVANT exécution, aucune fonction
+    `build_..._specification()` intermédiaire n'est nécessaire. `spec.verdict_policy_id` est transmis
+    à `build_walk_forward_evidence()` (Slice 6, inchangée) pour produire `evidence.scientific_verdict`.
+
+    `split_plan.split_plan_id`/`split_plan.dataset_snapshot_id` fournissent les identifiants
+    correspondants à `build_validation_run()` — `split_plan.validation` n'est PAS lu ici : aucune
+    vérification de cohérence entre `outcome` et la zone `VALIDATION` réellement utilisée n'est faite
+    (responsabilité de l'appelant, jamais silencieusement supposée vérifiée).
+
+    Ne persiste rien (ni `save_validation_run()`, ni `persist_walk_forward_run()`) — retourne
+    uniquement la `ValidationRun` construite."""
+    evidence = build_walk_forward_evidence(outcome, aggregate, spec.verdict_policy_id)
+    return build_validation_run(
+        validation_run_id=validation_run_id,
+        research_run_id=research_run_id,
+        split_plan_id=split_plan.split_plan_id,
+        dataset_snapshot_id=split_plan.dataset_snapshot_id,
+        strategy_name=strategy_name,
+        strategy_params=strategy_params,
+        specification=spec,
+        evidence=evidence,
+        validation_type=VALIDATION_TYPE_WALK_FORWARD,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

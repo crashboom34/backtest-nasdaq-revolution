@@ -388,7 +388,7 @@
     {
       "id": "AF-V-02-SLICE-8",
       "title": "AF-V-02 Slice 8 — Assemblage ValidationRun Walk-Forward (build_walk_forward_validation_run)",
-      "status": "PLANNED",
+      "status": "DONE",
       "prompt_file": "prompts/af-v02-slice-8.md",
       "depends_on": [
         "AF-V-02-SLICE-7"
