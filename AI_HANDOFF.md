@@ -2206,3 +2206,59 @@ faute d'un `split_plan_id` réel — désormais disponible
 fournit `research_run_id`/`strategy_name`/`strategy_params` — probablement une nouvelle fonction
 additive dans `walk_forward.py`, jamais un appel automatique depuis `run_walk_forward()`/
 `resume_walk_forward_run()` elles-mêmes).
+
+## 32. AF-V-02 Slice 8 — Assemblage ValidationRun Walk-Forward achevé ; moteur ADR 0021 désormais complet de bout en bout ; pause avant exécution réelle/GATE V (2026-09-21)
+
+**AF-V-02 Slice 8** (`.autopilot/prompts/af-v02-slice-8.md`), enchaînée automatiquement sans
+reconfirmation (autorisation §31) : `build_walk_forward_validation_run(outcome, aggregate, spec,
+split_plan, research_run_id, validation_run_id, strategy_name, strategy_params) -> ValidationRun`,
+nouvelle fonction additive dans `walk_forward.py` (à côté de `persist_walk_forward_run()`) —
+mirroring exact du précédent déjà établi par `validation_oos.py::run_oos_validation()` côté
+`"oos"` : identifiants fournis TELS QUELS par l'appelant (jamais générés/devinés ici), assemble
+`build_walk_forward_evidence()` (Slice 6, inchangée) puis `build_validation_run()` (inchangée),
+**ne persiste rien elle-même** — un futur appelant explicite reste responsable de
+`save_validation_run()`. `spec` sert directement de `specification` (contrairement à `"oos"`,
+`WalkForwardSpecification` porte déjà l'intention figée avant exécution). Emplacement choisi et
+justifié explicitement (pas un nouveau module séparé, contrairement à `validation_oos.py`, dont la
+séparation se justifie par la connaissance simultanée d'`engine.py` ET de la persistance — cette
+fonction ne connaît ni l'un ni l'autre). Suite complète verte (1383/1383). Review indépendante
+réelle : 1 lot, 2 fichiers couverts, 1 finding non bloquant. Commit réel
+`dd7136ce7f5d292306b3aee5bde15686c2ca18ca`, poussé sur `origin/autopilot/permanent` puis intégré
+(fast-forward, régression complète 1383/1383 revérifiée) sur `origin/master`.
+
+**Le moteur Walk-Forward (ADR 0021, les 15 Décisions) est désormais construit et testé de bout en
+bout au niveau bibliothèque** : géométrie de folds (Slice 1), exécution TRAIN-only + Top-1 + TEST
+par fold (Slice 2), orchestration multi-fold + agrégation OOS (Slice 3), persistance disque
+écriture seule (Slice 4), reprise SKIP/REPLAY_TEST/REDO (Slice 5), `WalkForwardEvidence` + verdict
+structurellement `INCONCLUSIVE` sans politique (Slice 6), `DatasetSplitPlan` réel avec `VALIDATION`
+peuplée selon la décision explicite de l'utilisateur (Slice 7), assemblage `ValidationRun` complet
+(Slice 8). Aucune fonction n'a encore été appelée pour de vrai sur les données réelles
+(`nasdaq_3m.csv`) avec Perfect Revolution — tout ce travail reste au niveau bibliothèque/tests.
+
+**Pause volontaire de l'enchaînement automatique ici — nouvelle vérification avant d'inventer une
+neuvième tranche.** `GATE V` (voir `docs/roadmap/MASTER_ROADMAP.md` §4, table des gates) exige que
+`OOS`+`WalkForward`+`MonteCarlo`+`ParameterStability` produisent **chacun** une `ValidationEvidence`
+réelle sur `CURRENT REFERENCE ENGINE` + Perfect Revolution. Trois constats distincts, aucun
+« clairement cadré par les documents du projet » au sens où les Slices 1 à 8 l'étaient :
+1. **Exécuter réellement** le Walk-Forward construit (lancer un vrai run multi-fold — recherche
+   TRAIN réelle par fold, backtests TEST réels, sur les données réelles) est qualitativement
+   différent des huit tranches précédentes : une action scientifique réelle, coûteuse en temps de
+   calcul et en appels Claude/outils, produisant un artefact qui entre dans l'historique
+   scientifique du dépôt — jamais quelque chose à déclencher silencieusement sans que l'utilisateur
+   en soit conscient, par analogie directe avec la prudence déjà exercée pour `FINAL_HOLDOUT`
+   (accès explicite et délibéré, jamais automatique). Aucun `research_run_id`/`base_params`/budget
+   de calcul concret n'a été fourni pour un tel run.
+2. **Monte-Carlo et Parameter Stability restent à 0 % d'implémentation**, sans le moindre ADR ni
+   ticket de conception équivalent à `docs/adr/0021-*.md` pour Walk-Forward — les concevoir
+   maintenant équivaudrait à inventer un protocole scientifique entier, jamais quelque chose à
+   dériver silencieusement d'une liste « hors scope ».
+3. **`AF-V-01` (OOS)** est déjà `DONE` mais `performance-inconclusive` (`n_trades=0`) — sa
+   contribution réelle à `GATE V` reste donc elle-même incomplète, indépendamment de tout travail
+   Walk-Forward.
+
+Mise en file d'une neuvième tranche volontairement SUSPENDUE — conformément à l'instruction
+explicite de l'utilisateur réservant l'arrêt aux décisions scientifiques/produit réellement
+absentes des sources, jamais à une invention silencieuse, et par analogie avec la prudence
+existante autour de toute action scientifique réelle et coûteuse. L'Autopilot reste actif et
+réactivable dès qu'une décision (lancer un run réel avec quels paramètres/budget, concevoir
+Monte-Carlo/Parameter Stability, ou une autre priorité) est fournie par l'utilisateur.
