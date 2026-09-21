@@ -220,7 +220,7 @@
     {
       "id": "AF-V-02-SLICE-5",
       "title": "AF-V-02 Slice 5 — Reprise (resume) d'un run Walk-Forward interrompu (Décision 12, complément)",
-      "status": "PLANNED",
+      "status": "DONE",
       "prompt_file": "prompts/af-v02-slice-5.md",
       "depends_on": [
         "AF-V-02-SLICE-4"
@@ -269,6 +269,63 @@
         "un fingerprint divergent est explicitement refusé, jamais traité comme SKIP silencieux",
         "agrégat recalculé intégralement depuis l'ensemble des folds (sautés + nouveaux), jamais partiel",
         "aucun WalkForwardEvidence/verdict scientifique produit (hors scope, tranche suivante)"
+      ]
+    },
+    {
+      "id": "AF-V-02-SLICE-6",
+      "title": "AF-V-02 Slice 6 — WalkForwardEvidence : assemblage de la preuve + verdict scientifique (Décision 13)",
+      "status": "PLANNED",
+      "prompt_file": "prompts/af-v02-slice-6.md",
+      "depends_on": [
+        "AF-V-02-SLICE-5"
+      ],
+      "allowed_paths": [
+        "validation_run.py",
+        "walk_forward.py",
+        "tests/test_validation_run.py",
+        "tests/test_walk_forward.py"
+      ],
+      "forbidden_paths": [
+        "engine.py",
+        "optimizer.py",
+        "optimization_store.py",
+        "compute_split_dates",
+        "strategy_contracts.py",
+        "dataset_split.py",
+        "strategies/",
+        "app.py",
+        "nasdaq_3m.csv",
+        "app_corrupted_backup.py",
+        "docs/adr/"
+      ],
+      "targeted_tests": [
+        "tests/test_validation_run.py",
+        "tests/test_walk_forward.py"
+      ],
+      "regression_tests": [],
+      "risk_level": "high",
+      "max_attempts": 3,
+      "max_budget_usd": 20.0,
+      "requires_clean_worktree": true,
+      "scientific_contracts": [
+        "ADR-0021-decision-13"
+      ],
+      "human_gate_conditions": [
+        "modification de FINAL_HOLDOUT",
+        "modification de la stratégie étalon Perfect Revolution V1",
+        "nécessité réelle de définir une politique concrète de seuils PASS/FAIL (décision scientifique/produit absente des sources, jamais à inventer)",
+        "conflit scientifique non résoluble sur la gestion du verdict en cas de stopped_early avec verdict_policy_id fourni",
+        "extension du contrat déjà figé de FoldResult/FoldSelection/FoldDefinition/AggregateResult/WalkForwardRunOutcome/WalkForwardSpecification non strictement additive"
+      ],
+      "completion_evidence": [
+        "tests ciblés verts",
+        "suite complète verte (régression complète imposée par risk_level=high)",
+        "revue indépendante sans finding BLOQUANT/MAJEUR",
+        "build_walk_forward_evidence() produit INCONCLUSIVE explicite sans verdict_policy_id, jamais un verdict inventé",
+        "tout verdict_policy_id fourni sur un run complet lève UnknownVerdictPolicy plutôt qu’un verdict silencieux",
+        "un run stopped_early reste INCONCLUSIVE même avec un verdict_policy_id fourni",
+        "round-trip réel build_validation_run()/save_validation_run()/load_validation_run() vérifié sur disque",
+        "aucune politique concrète de seuils PASS/FAIL introduite"
       ]
     }
   ]
