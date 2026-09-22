@@ -672,7 +672,7 @@
     {
       "id": "AF-V-08-SLICE-1",
       "title": "AF-V-08 Slice 1 — Contrats GateVCampaignPlan + Niveau A build_gate_v_campaign_plan() (ADR 0024)",
-      "status": "READY",
+      "status": "PLANNED",
       "prompt_file": "prompts/af-v08-slice-1.md",
       "depends_on": [],
       "allowed_paths": [
@@ -735,7 +735,7 @@
     {
       "id": "AF-V-08-SLICE-2",
       "title": "AF-V-08 Slice 2 — Contrat GateVCampaignManifest + calcul pur du statut à 6 états (ADR 0024)",
-      "status": "READY",
+      "status": "PLANNED",
       "prompt_file": "prompts/af-v08-slice-2.md",
       "depends_on": [
         "AF-V-08-SLICE-1"
@@ -800,7 +800,7 @@
     {
       "id": "AF-V-08-SLICE-3",
       "title": "AF-V-08 Slice 3 — Niveau B squelette : phase Walk-Forward, double injection, garde persist-once (ADR 0024)",
-      "status": "READY",
+      "status": "PLANNED",
       "prompt_file": "prompts/af-v08-slice-3.md",
       "depends_on": [
         "AF-V-08-SLICE-2"
@@ -866,7 +866,7 @@
     {
       "id": "AF-V-08-SLICE-4",
       "title": "AF-V-08 Slice 4 — Phase Monte-Carlo (mapping TEST-only, drapeau de circularité, ADR 0024)",
-      "status": "READY",
+      "status": "PLANNED",
       "prompt_file": "prompts/af-v08-slice-4.md",
       "depends_on": [
         "AF-V-08-SLICE-3"
@@ -932,7 +932,7 @@
     {
       "id": "AF-V-08-SLICE-5",
       "title": "AF-V-08 Slice 5 — Phase Parameter Stability (exhaustive par fold, statut final, ADR 0024)",
-      "status": "READY",
+      "status": "PLANNED",
       "prompt_file": "prompts/af-v08-slice-5.md",
       "depends_on": [
         "AF-V-08-SLICE-4"
@@ -1000,7 +1000,7 @@
     {
       "id": "AF-V-08-SLICE-6",
       "title": "AF-V-08 Slice 6 — Intégration bout-en-bout, garde-fous anti-déclenchement (ADR 0024)",
-      "status": "READY",
+      "status": "PLANNED",
       "prompt_file": "prompts/af-v08-slice-6.md",
       "depends_on": [
         "AF-V-08-SLICE-5"
