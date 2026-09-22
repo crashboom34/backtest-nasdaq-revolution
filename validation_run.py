@@ -505,11 +505,131 @@ def build_monte_carlo_specification(
     )
 
 
-ValidationSpecification = Union[OosValidationSpecification, WalkForwardSpecification, MonteCarloSpecification]
+VALIDATION_TYPE_PARAMETER_STABILITY = "parameter_stability"
+"""AF-V-04 (Parameter Stability), voir `docs/adr/0023-parameter-stability-plateau-v1.md` Décision
+11 — quatrième `validation_type` enregistré après `"oos"`/`"walk_forward"`/`"monte_carlo"`.
+Uniquement la forme typée ici (`ParameterStabilitySpecification`/`ParameterStabilityEvidence`) —
+l'algorithme de ré-analyse de voisinage lui-même vit dans `parameter_stability.py` (AF-V-04
+Slice 2), jamais dans ce module leaf."""
+
+PARAMETER_STABILITY_SEMANTICS_VERSION = "param-stability-neighborhood-v1"
+"""Versionne le protocole Parameter Stability V1 (filtre de voisinage structurel déterministe,
+dégradation par paramètre + signal joint Hamming 1-2, ADR 0023 Décisions 2/3) — mirroring
+`MONTE_CARLO_SEMANTICS_VERSION`/`walk_forward.WALK_FORWARD_SEMANTICS_VERSION`. Une future V2
+(perturbation multi-dimensionnelle réelle) incrémenterait cette constante, jamais réutilisée
+silencieusement pour un protocole différent."""
+
+_PARAMETER_STABILITY_VALID_SEARCH_MODES = frozenset(
+    {"single_var", "cross_zone", "grid", "general"}
+)
+"""Duplication LOCALE et délibérée de `optimizer.DETERMINISTIC_DISPATCH_MODES ∪ {"general"}`
+(valeurs LITTÉRALES identiques, jamais un import — ce module reste un leaf, ADR 0023 Décision 11).
+Si `optimizer.py` venait à changer cet ensemble, ces chaînes devraient être resynchronisées
+manuellement ici — aucun couplage fonctionnel réel entre les deux modules."""
+
+
+class ParameterStabilitySemanticsMismatch(ValueError):
+    """Levée lors de la relecture d'une `ParameterStabilityEvidence` persistée sous une
+    `parameter_stability_semantics_version` différente de la courante — mirroring exact de
+    `WalkForwardSemanticsMismatch`/`MonteCarloSemanticsMismatch`. Jamais un mélange silencieux de
+    résultats produits sous deux protocoles Parameter Stability différents."""
+
+
+@dataclass(frozen=True)
+class ParameterStabilitySpecification:
+    """Intention figée AVANT ré-analyse d'un Parameter Stability — ADR 0023 Décision 11.
+    `source_candidates_from_optimized_search` rend explicite l'avertissement de circularité
+    (Décision 1) : `best_params` est l'argmax in-sample du MÊME pool de candidats analysé —
+    construite via `build_parameter_stability_specification()`, jamais directement."""
+
+    source_validation_run_id: str
+    search_mode: str
+    source_candidates_from_optimized_search: bool
+    parameter_stability_semantics_version: str
+    verdict_policy_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ParameterStabilityEvidence:
+    """Preuve factuelle + verdict scientifique d'un Parameter Stability — ADR 0023 Décisions
+    6/11 : uniquement des statistiques descriptives, jamais un jugement "plateau"/"pic isolé"
+    au-delà de `scientific_verdict` (contraint, `UnknownVerdictPolicy` réutilisée telle quelle —
+    jamais de politique inventée ici). `zero_candidates_input=True` -> tous les champs `Optional`
+    (`best_score`/`best_params`/`degradation_*`) valent `None` (Décision 7, jamais une exception).
+    `n_neighbors_total_by_param`/`n_neighbors_rejected_by_param` restent DEUX dictionnaires
+    séparés, jamais fusionnés (Décision 2/6, correction BLOCKER B1) —
+    `sensitivity_sample_size_by_param` accompagne `sensitivity` pour distinguer un sentinel `0.0`
+    d'une sensibilité réellement nulle (Décision 6, correction BLOCKER B2).
+    `source_candidates_from_optimized_search` n'apparaît PAS ici — reste uniquement sur
+    `ParameterStabilitySpecification`, jamais dupliqué (mirroring
+    `MonteCarloSpecification.source_trades_from_optimized_params`)."""
+
+    n_candidates_total: int
+    zero_candidates_input: bool
+    search_mode: str
+    neighborhood_applicability: str
+    best_score: Optional[float]
+    best_params: Optional[dict]
+    sensitivity: Dict[str, float]
+    sensitivity_sample_size_by_param: Dict[str, int]
+    n_neighbors_total_by_param: Dict[str, int]
+    n_neighbors_rejected_by_param: Dict[str, int]
+    degradation_by_param: Dict[str, Optional[PercentileDistributionSummary]]
+    degradation_points_by_param: Dict[str, Optional[PercentileDistributionSummary]]
+    n_hamming_le_2_total: int
+    n_hamming_le_2_rejected: int
+    degradation_hamming_le_2: Optional[PercentileDistributionSummary]
+    execution_status: str
+    scientific_verdict: str
+    verdict_reasons: Tuple[str, ...]
+
+
+def build_parameter_stability_specification(
+    source_validation_run_id: str,
+    search_mode: str,
+    source_candidates_from_optimized_search: bool,
+    verdict_policy_id: Optional[str] = None,
+) -> ParameterStabilitySpecification:
+    """SEULE construction sanctionnée d'une `ParameterStabilitySpecification` (ADR 0023 Décision
+    9/11). `parameter_stability_semantics_version` n'est PAS un paramètre : toujours fixée en
+    interne à la constante module `PARAMETER_STABILITY_SEMANTICS_VERSION` courante.
+
+    `ValueError` immédiat si `source_validation_run_id` est absent/vide, AVANT tout calcul —
+    mirroring exact du garde-fou de `build_monte_carlo_specification()`. `ValueError` si
+    `search_mode` n'est pas l'une des 4 valeurs réelles de ce dépôt (Décision 9, taxonomie
+    fail-closed) — jamais une valeur par défaut silencieuse."""
+    if not isinstance(source_validation_run_id, str) or not source_validation_run_id.strip():
+        raise ValueError(
+            "source_validation_run_id est obligatoire pour construire une "
+            "ParameterStabilitySpecification (ADR 0023 Décision 9/11)."
+        )
+    if search_mode not in _PARAMETER_STABILITY_VALID_SEARCH_MODES:
+        raise ValueError(
+            f"search_mode={search_mode!r} invalide — valeurs acceptées : "
+            f"{sorted(_PARAMETER_STABILITY_VALID_SEARCH_MODES)} (ADR 0023 Décision 9, taxonomie "
+            "fail-closed, jamais une valeur par défaut silencieuse)."
+        )
+    return ParameterStabilitySpecification(
+        source_validation_run_id=source_validation_run_id,
+        search_mode=search_mode,
+        source_candidates_from_optimized_search=source_candidates_from_optimized_search,
+        parameter_stability_semantics_version=PARAMETER_STABILITY_SEMANTICS_VERSION,
+        verdict_policy_id=verdict_policy_id,
+    )
+
+
+ValidationSpecification = Union[
+    OosValidationSpecification,
+    WalkForwardSpecification,
+    MonteCarloSpecification,
+    ParameterStabilitySpecification,
+]
 """Contrat commun explicite (tagged union, AF-V-06/AF-V-02) — étendre en ajoutant un membre par
 futur `validation_type`, jamais en élargissant un membre existant."""
 
-ValidationEvidence = Union[OosValidationEvidence, WalkForwardEvidence, MonteCarloEvidence]
+ValidationEvidence = Union[
+    OosValidationEvidence, WalkForwardEvidence, MonteCarloEvidence, ParameterStabilityEvidence
+]
 """Contrat commun explicite (tagged union, AF-V-06/AF-V-02) — même principe que
 `ValidationSpecification`."""
 
@@ -542,6 +662,10 @@ _VALIDATION_TYPES: Dict[str, Tuple[type, type]] = {
     VALIDATION_TYPE_OOS: (OosValidationSpecification, OosValidationEvidence),
     VALIDATION_TYPE_WALK_FORWARD: (WalkForwardSpecification, WalkForwardEvidence),
     VALIDATION_TYPE_MONTE_CARLO: (MonteCarloSpecification, MonteCarloEvidence),
+    VALIDATION_TYPE_PARAMETER_STABILITY: (
+        ParameterStabilitySpecification,
+        ParameterStabilityEvidence,
+    ),
 }
 """Registre explicite `validation_type -> (classe specification, classe evidence)` — voir
 docstring du module (AF-V-06). Étendre en ajoutant une entrée par futur ticket

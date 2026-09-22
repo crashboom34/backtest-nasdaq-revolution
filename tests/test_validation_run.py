@@ -1123,3 +1123,315 @@ def test_save_and_load_validation_run_round_trips_a_monte_carlo_zero_trade_run(t
     assert loaded.evidence.observed_net_ret_pct is None
     assert loaded.evidence.sequence_risk_max_dd_trade_close_basis_pct is None
     assert loaded.evidence.sampling_uncertainty_net_ret_pct is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AF-V-04 Slice 1 — registre étendu avec "parameter_stability"
+# (ParameterStabilitySpecification/Evidence), docs/adr/0023-parameter-stability-plateau-v1.md
+# Décision 11. Uniquement la FORME typée + build_parameter_stability_specification() (validation
+# de search_mode, Décision 9) — aucun algorithme de ré-analyse de voisinage ici
+# (parameter_stability.py, AF-V-04 Slice 2).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _parameter_stability_specification(**kwargs):
+    from validation_run import build_parameter_stability_specification
+    kwargs.setdefault("source_validation_run_id", "val_x")
+    kwargs.setdefault("search_mode", "single_var")
+    kwargs.setdefault("source_candidates_from_optimized_search", False)
+    kwargs.setdefault("verdict_policy_id", None)
+    return build_parameter_stability_specification(**kwargs)
+
+
+def _parameter_stability_evidence(**kwargs):
+    from validation_run import ParameterStabilityEvidence
+    kwargs.setdefault("n_candidates_total", 40)
+    kwargs.setdefault("zero_candidates_input", False)
+    kwargs.setdefault("search_mode", "single_var")
+    kwargs.setdefault("neighborhood_applicability", "local_neighborhood_available")
+    kwargs.setdefault("best_score", 72.5)
+    kwargs.setdefault("best_params", {"stop_pct": 1.2, "target_pct": 6.75})
+    kwargs.setdefault("sensitivity", {"stop_pct": 0.31, "target_pct": 0.12})
+    kwargs.setdefault("sensitivity_sample_size_by_param", {"stop_pct": 8, "target_pct": 8})
+    kwargs.setdefault("n_neighbors_total_by_param", {"stop_pct": 6, "target_pct": 5})
+    kwargs.setdefault("n_neighbors_rejected_by_param", {"stop_pct": 1, "target_pct": 0})
+    kwargs.setdefault(
+        "degradation_by_param",
+        {"stop_pct": _distribution_summary(), "target_pct": _distribution_summary()},
+    )
+    kwargs.setdefault(
+        "degradation_points_by_param",
+        {"stop_pct": _distribution_summary(), "target_pct": _distribution_summary()},
+    )
+    kwargs.setdefault("n_hamming_le_2_total", 14)
+    kwargs.setdefault("n_hamming_le_2_rejected", 2)
+    kwargs.setdefault("degradation_hamming_le_2", _distribution_summary())
+    kwargs.setdefault("execution_status", "completed")
+    kwargs.setdefault("scientific_verdict", "INCONCLUSIVE")
+    kwargs.setdefault("verdict_reasons", ("aucune politique de verdict enregistrée",))
+    return ParameterStabilityEvidence(**kwargs)
+
+
+def test_parameter_stability_validation_type_is_registered():
+    from validation_run import VALIDATION_TYPE_PARAMETER_STABILITY
+    assert VALIDATION_TYPE_PARAMETER_STABILITY == "parameter_stability"
+
+
+def test_parameter_stability_semantics_mismatch_is_a_value_error_subclass():
+    from validation_run import ParameterStabilitySemanticsMismatch
+    assert issubclass(ParameterStabilitySemanticsMismatch, ValueError)
+
+
+def test_parameter_stability_evidence_is_an_explicit_type_not_an_opaque_dict():
+    from validation_run import ParameterStabilityEvidence
+    assert isinstance(_parameter_stability_evidence(), ParameterStabilityEvidence)
+
+
+@pytest.mark.parametrize("search_mode", ["single_var", "cross_zone", "grid", "general"])
+def test_build_parameter_stability_specification_accepts_the_four_real_search_modes(search_mode):
+    """ADR 0023 Décision 9 — valeurs EXACTEMENT identiques à
+    `optimizer.DETERMINISTIC_DISPATCH_MODES ∪ {"general"}`, jamais un ensemble inventé."""
+    spec = _parameter_stability_specification(search_mode=search_mode)
+    assert spec.search_mode == search_mode
+
+
+@pytest.mark.parametrize(
+    "bad_mode", ["", "random", "GRID", "single-var", "bayesian", None],
+)
+def test_build_parameter_stability_specification_rejects_invalid_search_modes(bad_mode):
+    with pytest.raises(ValueError):
+        _parameter_stability_specification(search_mode=bad_mode)
+
+
+@pytest.mark.parametrize("bad_id", ["", "   ", None])
+def test_build_parameter_stability_specification_requires_a_real_source_validation_run_id(bad_id):
+    """ADR 0023 Décision 9/11 — ValueError immédiat, AVANT tout calcul, mirroring le garde-fou de
+    build_monte_carlo_specification()."""
+    with pytest.raises(ValueError):
+        _parameter_stability_specification(source_validation_run_id=bad_id)
+
+
+def test_build_parameter_stability_specification_fixes_the_semantics_version():
+    """ADR 0023 Décision 11 — parameter_stability_semantics_version reste une constante module,
+    jamais une valeur choisie par l'appelant."""
+    from validation_run import (
+        PARAMETER_STABILITY_SEMANTICS_VERSION,
+        build_parameter_stability_specification,
+    )
+
+    spec = build_parameter_stability_specification(
+        source_validation_run_id="val_x",
+        search_mode="grid",
+        source_candidates_from_optimized_search=True,
+    )
+    assert spec.parameter_stability_semantics_version == PARAMETER_STABILITY_SEMANTICS_VERSION
+    assert spec.verdict_policy_id is None
+
+
+def test_build_parameter_stability_specification_does_not_accept_semantics_version_as_a_free_parameter():
+    """ADR 0023 Décision 11 — même discipline que Monte-Carlo (n_simulations/master_seed) : un
+    champ dérivé/fixé en interne n'est jamais un paramètre exposé du builder."""
+    from validation_run import build_parameter_stability_specification
+
+    with pytest.raises(TypeError):
+        build_parameter_stability_specification(
+            source_validation_run_id="val_x",
+            search_mode="grid",
+            source_candidates_from_optimized_search=True,
+            parameter_stability_semantics_version="custom-version",
+        )
+
+
+def test_build_validation_run_accepts_a_correct_parameter_stability_pair():
+    from validation_run import (
+        VALIDATION_TYPE_PARAMETER_STABILITY,
+        ParameterStabilityEvidence,
+        ParameterStabilitySpecification,
+    )
+
+    run = _run(
+        validation_type=VALIDATION_TYPE_PARAMETER_STABILITY,
+        specification=_parameter_stability_specification(),
+        evidence=_parameter_stability_evidence(),
+    )
+    assert run.validation_type == "parameter_stability"
+    assert isinstance(run.specification, ParameterStabilitySpecification)
+    assert isinstance(run.evidence, ParameterStabilityEvidence)
+
+
+def test_build_validation_run_rejects_parameter_stability_specification_with_monte_carlo_evidence():
+    from validation_run import VALIDATION_TYPE_PARAMETER_STABILITY
+
+    with pytest.raises(ValueError):
+        _run(
+            validation_type=VALIDATION_TYPE_PARAMETER_STABILITY,
+            specification=_parameter_stability_specification(),
+            evidence=_monte_carlo_evidence(),
+        )
+
+
+def test_build_validation_run_rejects_monte_carlo_specification_with_parameter_stability_evidence():
+    from validation_run import VALIDATION_TYPE_MONTE_CARLO
+
+    with pytest.raises(ValueError):
+        _run(
+            validation_type=VALIDATION_TYPE_MONTE_CARLO,
+            specification=_monte_carlo_specification(),
+            evidence=_parameter_stability_evidence(),
+        )
+
+
+def test_build_validation_run_rejects_oos_specification_with_parameter_stability_evidence():
+    with pytest.raises(ValueError):
+        _run(
+            validation_type="oos",
+            specification=_specification(),
+            evidence=_parameter_stability_evidence(),
+        )
+
+
+def test_build_validation_run_rejects_parameter_stability_specification_with_walk_forward_evidence():
+    from validation_run import VALIDATION_TYPE_PARAMETER_STABILITY
+
+    with pytest.raises(ValueError):
+        _run(
+            validation_type=VALIDATION_TYPE_PARAMETER_STABILITY,
+            specification=_parameter_stability_specification(),
+            evidence=_walk_forward_evidence(),
+        )
+
+
+def test_existing_monte_carlo_validation_run_construction_is_unaffected_by_parameter_stability_registration():
+    """Non-régression explicite : enregistrer "parameter_stability" ne doit rien changer aux
+    chemins "oos"/"walk_forward"/"monte_carlo" déjà établis."""
+    from validation_run import VALIDATION_TYPE_MONTE_CARLO
+
+    run = _run(
+        validation_type=VALIDATION_TYPE_MONTE_CARLO,
+        specification=_monte_carlo_specification(),
+        evidence=_monte_carlo_evidence(),
+    )
+    assert run.validation_type == "monte_carlo"
+
+
+def test_validation_specification_and_evidence_unions_include_parameter_stability():
+    """Non-régression explicite de la lacune trouvée par la revue architecture d'ADR 0023
+    (ValidationSpecification/ValidationEvidence jamais étendus lors de l'ajout de Monte-Carlo,
+    corrigée commit 85dbba0) — jamais reproduite ici pour Parameter Stability."""
+    import typing
+
+    from validation_run import (
+        ParameterStabilityEvidence,
+        ParameterStabilitySpecification,
+        ValidationEvidence,
+        ValidationSpecification,
+    )
+
+    assert ParameterStabilitySpecification in typing.get_args(ValidationSpecification)
+    assert ParameterStabilityEvidence in typing.get_args(ValidationEvidence)
+
+
+def test_save_and_load_validation_run_round_trips_a_parameter_stability_run(tmp_path):
+    """Round-trip réel sur disque (build_validation_run() -> save_validation_run() ->
+    load_validation_run()) pour validation_type="parameter_stability" — préserve TOUS les champs,
+    y compris les deux dictionnaires n_neighbors_total_by_param/n_neighbors_rejected_by_param
+    séparés (Décision 2/6, correction BLOCKER B1), les PercentileDistributionSummary imbriqués par
+    paramètre, et le signal joint degradation_hamming_le_2 (Décision 2/6, correction N1). Comme
+    pour Monte-Carlo, load_validation_run() ne rehydrate pas les dataclasses imbriquées au-delà de
+    evidence_cls(**raw_evidence) — ce test compare le CONTENU, pas l'identité de type."""
+    from dataclasses import asdict
+
+    from validation_run import VALIDATION_TYPE_PARAMETER_STABILITY
+
+    spec = _parameter_stability_specification(source_validation_run_id="val_ps_source")
+    evidence = _parameter_stability_evidence()
+    run = _run(
+        validation_run_id="val_ps",
+        validation_type=VALIDATION_TYPE_PARAMETER_STABILITY,
+        specification=spec,
+        evidence=evidence,
+    )
+    path = tmp_path / "ps_run.json"
+    save_validation_run(path, run)
+
+    loaded = load_validation_run(path)
+
+    assert loaded.validation_type == "parameter_stability"
+    assert loaded.specification.source_validation_run_id == spec.source_validation_run_id
+    assert loaded.specification.search_mode == spec.search_mode
+    assert (
+        loaded.specification.source_candidates_from_optimized_search
+        == spec.source_candidates_from_optimized_search
+    )
+    assert (
+        loaded.specification.parameter_stability_semantics_version
+        == spec.parameter_stability_semantics_version
+    )
+    assert loaded.specification.verdict_policy_id == spec.verdict_policy_id
+
+    assert loaded.evidence.n_candidates_total == evidence.n_candidates_total
+    assert loaded.evidence.zero_candidates_input == evidence.zero_candidates_input
+    assert loaded.evidence.search_mode == evidence.search_mode
+    assert loaded.evidence.neighborhood_applicability == evidence.neighborhood_applicability
+    assert loaded.evidence.best_score == evidence.best_score
+    assert loaded.evidence.best_params == evidence.best_params
+    assert loaded.evidence.sensitivity == evidence.sensitivity
+    assert (
+        loaded.evidence.sensitivity_sample_size_by_param
+        == evidence.sensitivity_sample_size_by_param
+    )
+    assert loaded.evidence.n_neighbors_total_by_param == evidence.n_neighbors_total_by_param
+    assert loaded.evidence.n_neighbors_rejected_by_param == evidence.n_neighbors_rejected_by_param
+    assert loaded.evidence.n_hamming_le_2_total == evidence.n_hamming_le_2_total
+    assert loaded.evidence.n_hamming_le_2_rejected == evidence.n_hamming_le_2_rejected
+    assert loaded.evidence.execution_status == evidence.execution_status
+    assert loaded.evidence.scientific_verdict == evidence.scientific_verdict
+    assert list(loaded.evidence.verdict_reasons) == list(evidence.verdict_reasons)
+
+    assert loaded.evidence.degradation_by_param == {
+        param: asdict(summary) for param, summary in evidence.degradation_by_param.items()
+    }
+    assert loaded.evidence.degradation_points_by_param == {
+        param: asdict(summary) for param, summary in evidence.degradation_points_by_param.items()
+    }
+    assert loaded.evidence.degradation_hamming_le_2 == asdict(evidence.degradation_hamming_le_2)
+
+
+def test_save_and_load_validation_run_round_trips_a_parameter_stability_zero_candidates_run(tmp_path):
+    """zero_candidates_input=True -> tous les champs Optional valent None (ADR 0023 Décision 7),
+    compteurs non-Optional restent honnêtement à 0 — distinct du cas peuplé ci-dessus."""
+    from validation_run import VALIDATION_TYPE_PARAMETER_STABILITY
+
+    spec = _parameter_stability_specification(source_validation_run_id="val_ps_zero")
+    evidence = _parameter_stability_evidence(
+        n_candidates_total=0,
+        zero_candidates_input=True,
+        best_score=None,
+        best_params=None,
+        sensitivity={},
+        sensitivity_sample_size_by_param={},
+        n_neighbors_total_by_param={},
+        n_neighbors_rejected_by_param={},
+        degradation_by_param={},
+        degradation_points_by_param={},
+        n_hamming_le_2_total=0,
+        n_hamming_le_2_rejected=0,
+        degradation_hamming_le_2=None,
+    )
+    run = _run(
+        validation_run_id="val_ps_zero",
+        validation_type=VALIDATION_TYPE_PARAMETER_STABILITY,
+        specification=spec,
+        evidence=evidence,
+    )
+    path = tmp_path / "ps_zero_run.json"
+    save_validation_run(path, run)
+
+    loaded = load_validation_run(path)
+
+    assert loaded.evidence.zero_candidates_input is True
+    assert loaded.evidence.n_candidates_total == 0
+    assert loaded.evidence.best_score is None
+    assert loaded.evidence.best_params is None
+    assert loaded.evidence.degradation_hamming_le_2 is None
+    assert loaded.evidence.n_hamming_le_2_total == 0
