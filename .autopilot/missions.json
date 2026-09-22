@@ -613,7 +613,7 @@
     {
       "id": "AF-V-04-SLICE-2",
       "title": "AF-V-04 Slice 2 — Algorithme parameter_stability.py (voisinage, dégradation, ADR 0023)",
-      "status": "PLANNED",
+      "status": "DONE",
       "prompt_file": "prompts/af-v04-slice-2.md",
       "depends_on": [
         "AF-V-04-SLICE-1"
