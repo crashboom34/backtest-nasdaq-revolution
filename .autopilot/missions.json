@@ -500,7 +500,7 @@
     {
       "id": "AF-V-03-SLICE-2",
       "title": "AF-V-03 Slice 2 — Algorithme monte_carlo.py (permutation, bootstrap, ADR 0022)",
-      "status": "PLANNED",
+      "status": "DONE",
       "prompt_file": "prompts/af-v03-slice-2.md",
       "depends_on": [
         "AF-V-03-SLICE-1"
