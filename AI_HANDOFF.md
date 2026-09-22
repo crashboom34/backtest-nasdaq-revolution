@@ -2374,3 +2374,98 @@ rappel explicite dans les deux prompts que `validation_run.py`/`parameter_stabil
 JAMAIS importer `optimizer.py` (pas même pour une constante) — les valeurs de `search_mode` sont
 dupliquées littéralement plutôt qu'importées, invariant "leaf" déjà vérifié deux fois par les
 revues indépendantes, jamais à régresser.
+
+**AF-V-04 Slice 1/2 — réellement achevées (2026-09-22)** : les deux tranches ont complété dans le
+même run Autopilot (plusieurs pauses réelles sur limite d'usage Claude entre les deux, correctement
+`WAITING_FOR_CLAUDE`, jamais un Human Gate). Vérifié dans le code réel avant intégration :
+`validation_run.py` n'importe toujours ni `optimizer.py` ni `engine.py` ; `parameter_stability.py`
+n'importe que `scoring`/`validation_run`/`numpy`/stdlib (jamais `optimizer`/`engine`/
+`dataset_split`/`walk_forward`) ; `_is_structural_neighbor()` implémente EXACTEMENT la Décision 2
+corrigée (clés exactes, exclusion de `best_params` lui-même, AUCUNE exclusion sur le score) ;
+la statistique jointe utilise bien `1 <= distance de Hamming <= 2` (jamais `0`). Suite complète
+verte (1509/1509). Commits réels `e2333c11eda1de7e9ec6bf16ded58a523c9c015f` (Slice 1) et
+`d8ab4eaa3626ec23b61e242f74b894d83fc5328d` (Slice 2), intégrés (fast-forward, régression complète
+1509/1509 revérifiée) sur `origin/master`.
+
+**AF-V-02/AF-V-03/AF-V-04 sont désormais TOUS construits et testés au niveau bibliothèque** —
+Walk-Forward, Monte-Carlo, Parameter Stability. Aucun des trois n'a encore été exécuté pour de vrai
+sur `nasdaq_3m.csv`/Perfect Revolution. Voir §35 pour la préparation (jamais l'exécution) d'une
+campagne `GATE V` intégrée.
+
+## 35. Préparation d'une campagne `GATE V` intégrée (jamais son exécution) — état réel, écart d'orchestration identifié, budget estimé (2026-09-22)
+
+**Décision explicite de l'utilisateur** : préparer une campagne réelle intégrée `GATE V` — définir
+ses paramètres/budget/preuves attendues — **sans la lancer** tant que ces trois conditions ne sont
+pas explicitement réunies. Ce paragraphe est cette préparation, pas un déclenchement.
+
+### État réel vérifié (jamais supposé) des quatre preuves exigées par `GATE V`
+
+`docs/roadmap/MASTER_ROADMAP.md` §4 : « `OOS`/`WalkForward`/`MonteCarlo`/`ParameterStability`
+produisent tous une `ValidationEvidence` réelle sur `CURRENT REFERENCE ENGINE` + Perfect Revolution ».
+
+| Preuve | Mécanisme construit | Exécuté pour de vrai ? |
+|---|---|---|
+| `OOS` (`AF-V-01`) | `validation_oos.py::run_oos_validation()` | **Oui**, mais `performance-inconclusive` (`n_trades=0`) — évidence conservée telle quelle, jamais relancée sur le même holdout (§29/32). Une preuve fraîche exige un NOUVEAU `DatasetSnapshot` + accès `FINAL_HOLDOUT` explicitement autorisé (note `GATE V` séparée, `MASTER_ROADMAP.md` §4) — action distincte, non déclenchée ici. |
+| `WalkForward` (`AF-V-02`) | `walk_forward.py` (Slices 1-8), `build_walk_forward_validation_run()` | **Non** — jamais appelé sur les données réelles, seulement testé avec des fixtures synthétiques/le vrai moteur en isolation (ex. tests de cohérence `AggregateResult`). |
+| `MonteCarlo` (`AF-V-03`) | `monte_carlo.py::run_monte_carlo_simulation()` | **Non** — consomme une séquence de trades déjà observés (ADR 0022 Décision 1), jamais encore fournie par un run réel. |
+| `ParameterStability` (`AF-V-04`) | `parameter_stability.py::analyze_parameter_stability()` | **Non** — consomme un pool de candidats déjà évalués (ADR 0023 Décision 1), jamais encore fourni par un run réel. |
+
+### Écart d'orchestration réel identifié (jamais construit à ce jour, dans aucune des slices précédentes)
+
+Chaque module (Slice 8 d'AF-V-02, Slices d'AF-V-03/AF-V-04) a été délibérément conçu pour consommer
+des FAITS déjà calculés par un appelant — **aucun code existant ne relie aujourd'hui un run
+Walk-Forward réel à Monte-Carlo/Parameter Stability**. Concrètement, il manque une fonction (ou un
+script, mirroring `scripts/create_walk_forward_validation_split_plan_v2.py`) qui :
+1. Charge le `DatasetSplitPlan` réel déjà construit (`split_perfect_revolution_v1_walk_forward_v2`,
+   Slice 7 AF-V-02, `VALIDATION` = 54 mois / 5 folds, décision utilisateur du 2026-09-21).
+2. Appelle `walk_forward.run_walk_forward()` (ou `resume_walk_forward_run()`) pour de vrai —
+   **c'est ICI, et seulement ici, que la campagne devient réellement coûteuse** (recherche
+   `Optimizer.run()` réelle par fold, 5 folds, chacun une vraie recherche TRAIN + un vrai backtest
+   TEST).
+3. Extrait, du `WalkForwardRunOutcome` obtenu, la séquence de trades par fold (déjà persistée en
+   CSV, `oos_trades.csv`, Slice 4) pour alimenter `monte_carlo.py`, et le pool de candidats TRAIN
+   par fold (`train_candidates.csv`, même Slice) pour alimenter `parameter_stability.py`.
+4. Assemble les quatre `ValidationRun` (`OOS` déjà existante, `WalkForward` via
+   `build_walk_forward_validation_run()`, `MonteCarlo`/`ParameterStability` via leurs builders
+   respectifs) sous un `research_run_id` commun.
+
+**Cette fonction d'orchestration n'existe pas encore** — construire ce CODE (jamais l'exécuter sur
+les données réelles) resterait une "préparation" légitime, à coût nul (aucun backtest réel), si une
+future tranche est autorisée pour cela. Ce paragraphe se limite à documenter l'écart, ne le comble
+pas.
+
+### Identifiants déjà conventionnés dans ce dépôt, à réutiliser pour toute future campagne réelle
+
+- `research_run_id`/`experiment_id` : `research_run.py::build_research_run()`, déjà exige
+  `dataset_snapshot_id` réel, capture `git_sha`/`engine_version`/`seed` automatiquement.
+- `validation_run_id` (un par preuve — OOS/WalkForward/MonteCarlo/ParameterStability) :
+  `validate_portable_identifier()`, même convention que partout ailleurs dans ce dépôt.
+- `split_plan_id` : `split_perfect_revolution_v1_walk_forward_v2` (Slice 7 AF-V-02, réel, déjà sur
+  disque dans le checkout principal).
+- `source_validation_run_id` (Monte-Carlo/Parameter Stability) : le `validation_run_id` du run
+  `WalkForward` dont les trades/candidats sont réutilisés — jamais un identifiant inventé
+  séparément.
+
+### Budget estimé pour une exécution réelle complète (jamais engagé par cette préparation)
+
+- **`WalkForward`** : SEUL poste réellement coûteux — 5 folds, chacun une vraie recherche
+  `Optimizer.run()` (ordre de grandeur dépendant du `search_space`/mode réellement choisi, non
+  encore fixé) + un vrai backtest TEST par fold. Aucun budget Claude/API consommé (calcul local pur
+  côté moteur) — coût en TEMPS DE CALCUL local, pas en crédits.
+  `AF-V-02 Slice 8`'s propre disqualification de l'exécution réelle (§32) reste valable : paramètres
+  réels (`base_params`, budget de recherche par fold) non encore fixés, jamais inventés ici.
+- **`MonteCarlo`/`ParameterStability`** : négligeables (ADR 0022/0023 Décision 14 — millisecondes à
+  secondes, purement locaux, une fois les trades/candidats réels du `WalkForward` disponibles).
+- **`OOS` fraîche** : hors scope de cette préparation (action séparée déjà actée, `MASTER_ROADMAP.md`
+  §4) — nécessiterait un nouveau `DatasetSnapshot`/accès holdout explicitement autorisés, jamais
+  engagés ici.
+
+### Conditions explicites avant toute exécution réelle (rappel, rien de déclenché ici)
+
+Les trois conditions posées par l'utilisateur restent NON réunies à ce stade : (1) Walk-Forward/
+Monte-Carlo/Parameter Stability sont prêts (VRAI, ce paragraphe le confirme) ; (2) le plan OOS n'est
+PAS encore clarifié au-delà de la note `GATE V` déjà actée (FAUX — reste à préciser : quand, quel
+`DatasetSnapshot`) ; (3) aucun identifiant/paramètre/budget réel n'est encore ENREGISTRÉ pour un
+run `WalkForward` réel (FAUX — `base_params`/recherche/budget de calcul restent à fixer
+explicitement). **Aucune campagne réelle n'est donc lancée par cette section — préparation
+documentaire uniquement, conformément à l'instruction explicite de l'utilisateur.**
