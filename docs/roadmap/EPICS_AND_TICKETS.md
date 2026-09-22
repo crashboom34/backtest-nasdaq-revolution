@@ -815,6 +815,26 @@ Ne pas présumer que ce soit la priorité automatique du track : les frontières
 décision produit explicite reste nécessaire avant de le démarrer, comme pour tout ticket de ce
 track. **Effort** : S. **Uncertainty** : medium. **Skills recommended** : `domain-modeling`.
 
+### AF-V-08 — Orchestration de campagne `GATE V` intégrée
+
+**Status** : **READY** (`AF-V-02`/`AF-V-03`/`AF-V-04 = DONE`, 2026-09-22 — débloqué, ADR 0024
+rédigée). Ticket créé le 2026-09-22 (décision explicite de l'utilisateur) : Walk-Forward/
+Monte-Carlo/Parameter Stability sont tous construits au niveau bibliothèque mais **aucun code
+n'existe encore pour les relier** à un run réel — ce ticket ferme cet écart d'orchestration,
+**préparation/conception uniquement, aucune exécution réelle** (voir `docs/adr/0024-gate-v-campaign-orchestration-v1.md`
+pour le protocole complet : plan de campagne immuable, exécution en deux niveaux séparés,
+reprise sans doublon, jamais de déclaration `GATE V PASS`).
+
+**What to build** : `gate_v_campaign.py` — `GateVCampaignPlan`/`GateVCampaignManifest` typés,
+`build_gate_v_campaign_plan()` (préparation déterministe, aucune donnée marché), et
+`execute_gate_v_campaign()` (exécution explicite future, collaborateurs injectés, jamais appelée
+automatiquement). Relie `walk_forward.py`/`monte_carlo.py`/`parameter_stability.py` déjà
+existants — assemble les `ValidationRun` produites sous un `research_run_id` commun.
+
+**Dependencies** : `AF-V-02`, `AF-V-03`, `AF-V-04` (tous `DONE`). **Effort** : L (plusieurs
+tranches TDD). **Uncertainty** : low (chaque décision de conception découle des contrats déjà
+réels et déjà revus, ADR 0021/0022/0023). **Skills recommended** : `tdd`, `codebase-design`.
+
 ---
 
 ### AF-F-01 — Knowledge Base foundation
