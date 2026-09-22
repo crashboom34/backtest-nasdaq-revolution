@@ -553,6 +553,121 @@
         "probability_of_ruin absent (jamais réintroduit)",
         "scientific_verdict toujours INCONCLUSIVE sans verdict_policy_id, UnknownVerdictPolicy levée sinon"
       ]
+    },
+    {
+      "id": "AF-V-04-SLICE-1",
+      "title": "AF-V-04 Slice 1 — Contrats typés ParameterStabilitySpecification/ParameterStabilityEvidence (ADR 0023)",
+      "status": "PLANNED",
+      "prompt_file": "prompts/af-v04-slice-1.md",
+      "depends_on": [],
+      "allowed_paths": [
+        "validation_run.py",
+        "tests/test_validation_run.py"
+      ],
+      "forbidden_paths": [
+        "engine.py",
+        "optimizer.py",
+        "optimization_store.py",
+        "dataset_split.py",
+        "walk_forward.py",
+        "validation_oos.py",
+        "monte_carlo.py",
+        "scoring.py",
+        "strategy_contracts.py",
+        "strategies/",
+        "app.py",
+        "nasdaq_3m.csv",
+        "app_corrupted_backup.py",
+        "docs/adr/"
+      ],
+      "targeted_tests": [
+        "tests/test_validation_run.py"
+      ],
+      "regression_tests": [],
+      "risk_level": "high",
+      "max_attempts": 3,
+      "max_budget_usd": 20.0,
+      "requires_clean_worktree": true,
+      "scientific_contracts": [
+        "ADR-0023-parameter-stability-v1"
+      ],
+      "human_gate_conditions": [
+        "modification de FINAL_HOLDOUT",
+        "modification de la stratégie étalon Perfect Revolution V1",
+        "nécessité réelle de définir une politique concrète de seuils PASS/FAIL",
+        "extension du contrat déjà figé de WalkForwardSpecification/WalkForwardEvidence/MonteCarloSpecification/MonteCarloEvidence/OosValidationEvidence non strictement additive",
+        "tentative d’importer optimizer.py/engine.py/dataset_split.py/walk_forward.py dans validation_run.py"
+      ],
+      "completion_evidence": [
+        "tests ciblés verts",
+        "suite complète verte (régression complète imposée par risk_level=high)",
+        "revue indépendante sans finding BLOQUANT/MAJEUR",
+        "validation_run.py reste un leaf (aucun import optimizer.py/engine.py/dataset_split.py/walk_forward.py)",
+        "UnknownVerdictPolicy et PercentileDistributionSummary réutilisées telles quelles, jamais dupliquées",
+        "_VALIDATION_TYPES étendu par une entrée littérale, jamais une affectation a posteriori",
+        "ValidationSpecification/ValidationEvidence étendus pour inclure ParameterStability",
+        "round-trip réel build_validation_run()/save_validation_run()/load_validation_run() vérifié sur disque pour validation_type=parameter_stability",
+        "aucune modification des contrats Walk-Forward/OOS/Monte-Carlo déjà en place"
+      ]
+    },
+    {
+      "id": "AF-V-04-SLICE-2",
+      "title": "AF-V-04 Slice 2 — Algorithme parameter_stability.py (voisinage, dégradation, ADR 0023)",
+      "status": "PLANNED",
+      "prompt_file": "prompts/af-v04-slice-2.md",
+      "depends_on": [
+        "AF-V-04-SLICE-1"
+      ],
+      "allowed_paths": [
+        "parameter_stability.py",
+        "tests/test_parameter_stability.py"
+      ],
+      "forbidden_paths": [
+        "engine.py",
+        "optimizer.py",
+        "optimization_store.py",
+        "dataset_split.py",
+        "walk_forward.py",
+        "validation_oos.py",
+        "validation_run.py",
+        "monte_carlo.py",
+        "scoring.py",
+        "strategy_contracts.py",
+        "strategies/",
+        "app.py",
+        "nasdaq_3m.csv",
+        "app_corrupted_backup.py",
+        "docs/adr/"
+      ],
+      "targeted_tests": [
+        "tests/test_parameter_stability.py"
+      ],
+      "regression_tests": [],
+      "risk_level": "high",
+      "max_attempts": 3,
+      "max_budget_usd": 20.0,
+      "requires_clean_worktree": true,
+      "scientific_contracts": [
+        "ADR-0023-parameter-stability-v1"
+      ],
+      "human_gate_conditions": [
+        "modification de FINAL_HOLDOUT",
+        "modification de la stratégie étalon Perfect Revolution V1",
+        "nécessité réelle de définir une politique concrète de seuils PASS/FAIL",
+        "conflit scientifique non résoluble sur le filtre de voisinage/la statistique Hamming telle que décrite par ADR 0023",
+        "nécessité réelle d’importer engine.py/optimizer.py/dataset_split.py/walk_forward.py dans parameter_stability.py"
+      ],
+      "completion_evidence": [
+        "tests ciblés verts",
+        "suite complète verte (régression complète imposée par risk_level=high)",
+        "revue indépendante sans finding BLOQUANT/MAJEUR",
+        "déterminisme bit-à-bit prouvé par test (séquence fixée)",
+        "filtre de voisinage démontré JAMAIS identique à la clause score>0 de compute_sensitivity_filtered() (test avec voisins rejetés)",
+        "best_params exclu de son propre voisinage, par paramètre ET par Hamming",
+        "test de cohérence avec un run Walk-Forward réel (train_candidates.csv)",
+        "aucune dépendance moteur ni optimizer.py (import statique testé), aucune mention de FINAL_HOLDOUT",
+        "scientific_verdict toujours INCONCLUSIVE sans verdict_policy_id, UnknownVerdictPolicy levée sinon"
+      ]
     }
   ]
 }
