@@ -2262,3 +2262,66 @@ absentes des sources, jamais à une invention silencieuse, et par analogie avec 
 existante autour de toute action scientifique réelle et coûteuse. L'Autopilot reste actif et
 réactivable dès qu'une décision (lancer un run réel avec quels paramètres/budget, concevoir
 Monte-Carlo/Parameter Stability, ou une autre priorité) est fournie par l'utilisateur.
+
+## 33. AF-V-03 (Monte-Carlo) — ADR 0022 rédigée, revue deux fois, corrigée, implémentée en 2 tranches (2026-09-21/22)
+
+**Décision explicite de l'utilisateur** : reprendre `GATE V` par `AF-V-03` (Monte-Carlo) puis
+`AF-V-04` (Parameter Stability), chacune précédée d'une ADR scientifique complète, revue par deux
+lectures indépendantes, avant toute implémentation ; enchaînement automatique réautorisé sans
+reconfirmation entre étapes ; aucune campagne scientifique réelle coûteuse avant que Walk-Forward/
+Monte-Carlo/Parameter Stability soient tous prêts et qu'un plan de budget/preuves comparables
+existe. Voir aussi la note GATE V ajoutée à `docs/roadmap/MASTER_ROADMAP.md` (§4) : une preuve OOS
+externe fraîche reste une action séparée, non déclenchée par cette mission.
+
+**ADR 0022 (`docs/adr/0022-monte-carlo-trade-resampling-v1.md`, `bfbc671`)** : remplace l'ancienne
+esquisse non contraignante (perturbations d'exécution — spread/slippage/ordre, jamais implémentable
+avec un moteur d'exécution déterministe) par un protocole de rééchantillonnage de trades :
+permutation (`sequence_risk`) et bootstrap avec remise (`sampling_uncertainty`), gardés séparés.
+**Deux revues indépendantes réelles** (validité scientifique/overfitting ; architecture/
+reproductibilité/intégration) ont trouvé 2 BLOCKER + 6 MAJOR réels avant toute implémentation :
+- `probability_of_ruin` mathématiquement dégénérée sous chaînage multiplicatif (déjà la seule
+  convention retenue par ce dépôt, ADR 0021 Décision 15) — `{0,1}` exact sous permutation, fonction
+  triviale de comptage sous bootstrap, lisible à tort comme "risque de ruine nul" en pratique —
+  **supprimée** de l'ADR, jamais réintroduite.
+- Le drawdown reconstruit depuis les seuls PnL de clôture de trade n'est PAS le `max_dd_pct` réel
+  du moteur (barre par barre, capture l'excursion intra-trade) — champs renommés explicitement
+  `*_trade_close_basis_pct`, jamais confondus.
+- Biais de sélection (trades issus de paramètres optimisés), absence de cadre de test d'hypothèse/
+  risque de comparaisons multiples, sens du biais i.i.d. non énoncé, canal de "seed shopping"
+  (`master_seed`/`n_simulations` librement choisis), discipline de pré-enregistrement d'une future
+  politique de verdict, justification statistique imprécise (`1/sqrt(n)` d'une proportion, pas
+  d'un quantile ; `n_trades`, pas `n_simulations`, est la vraie contrainte liante) — tous corrigés,
+  reconfirmés propres par une seconde lecture des deux mêmes revues.
+- **Aucun `HUMAN_GATE_REQUIRED` consolidé n'a été nécessaire** : chaque choix restait dérivable des
+  conventions/contraintes déjà réelles de ce dépôt, jamais un choix scientifique matériellement
+  ambigu entre plusieurs protocoles également valides.
+
+**AF-V-03 Slice 1** (`.autopilot/prompts/af-v03-slice-1.md`) : `MonteCarloSpecification`/
+`MonteCarloEvidence`/`MonteCarloDistributionSummary`/`MonteCarloSemanticsMismatch` dans
+`validation_run.py` (mirroring exact de `WalkForwardSpecification`/`WalkForwardEvidence`),
+`build_monte_carlo_specification()` (dérive `master_seed` par SHA-256 depuis
+`source_validation_run_id`, jamais un entier libre — ferme le canal "seed shopping"),
+`UnknownVerdictPolicy` réutilisée telle quelle (jamais dupliquée), `_VALIDATION_TYPES` étendu par
+une troisième entrée littérale. Suite complète verte (1402/1402). Commit réel
+`7e673866b8a3cf84b4083f0c75e1883fad9609b4`, intégré (fast-forward, régression complète revérifiée)
+sur `origin/master`.
+
+**AF-V-03 Slice 2** (`.autopilot/prompts/af-v03-slice-2.md`) : nouveau module leaf `monte_carlo.py`
+— `run_monte_carlo_simulation()`, UN seul `numpy.random.default_rng()` par méthode (jamais un par
+simulation, tirage vectorisé — vérifié : exactement 2 appels dans le code réel), énumération
+exhaustive des permutations si `n_trades! < n_simulations`, percentiles de la plus longue série de
+pertes en valeurs entières réellement observées (interpolation `"lower"`, jamais `"linear"`), test
+de cohérence stricte `observed_net_ret_pct` vs `AggregateResult.oos_net_return_pct` sur un run
+Walk-Forward réel. Aucun import `engine`/`optimizer`/`dataset_split`/`walk_forward` (vérifié dans
+le code réel poussé). Deux pauses réelles sur limite d'usage Claude pendant cette tranche
+(correctement `WAITING_FOR_CLAUDE`, jamais un Human Gate), plus une collision de verrou avec le
+déclenchement périodique de la tâche Windows (`AlphaForgeAutopilot`, single-instance déjà vérifié
+fonctionnel — la reprise manuelle a correctement refusé de démarrer une deuxième instance ;
+attendu la fin de l'instance déjà active plutôt que de forcer). Suite complète verte (1444/1444).
+Review indépendante réelle : 2 lots, 2 fichiers couverts, 2 findings bloquants réellement corrigés
+avant clôture. Commit réel `0758cc52d33bde1387ca6ff431b12d0511b9a1da`, intégré (fast-forward,
+régression complète 1444/1444 revérifiée) sur `origin/master`.
+
+**Prochaine tranche** : `AF-V-04` (Parameter Stability) — même discipline (ADR scientifique d'abord,
+deux revues indépendantes, correction des BLOCKER/MAJEUR, implémentation TDD ensuite), à préparer
+sans redemander d'autorisation.
