@@ -512,12 +512,16 @@ Uniquement la forme typée ici (`ParameterStabilitySpecification`/`ParameterStab
 l'algorithme de ré-analyse de voisinage lui-même vit dans `parameter_stability.py` (AF-V-04
 Slice 2), jamais dans ce module leaf."""
 
-PARAMETER_STABILITY_SEMANTICS_VERSION = "param-stability-neighborhood-v1"
-"""Versionne le protocole Parameter Stability V1 (filtre de voisinage structurel déterministe,
+PARAMETER_STABILITY_SEMANTICS_VERSION = "param-stability-neighborhood-v2"
+"""Versionne le protocole Parameter Stability (filtre de voisinage structurel déterministe,
 dégradation par paramètre + signal joint Hamming 1-2, ADR 0023 Décisions 2/3) — mirroring
-`MONTE_CARLO_SEMANTICS_VERSION`/`walk_forward.WALK_FORWARD_SEMANTICS_VERSION`. Une future V2
-(perturbation multi-dimensionnelle réelle) incrémenterait cette constante, jamais réutilisée
-silencieusement pour un protocole différent."""
+`MONTE_CARLO_SEMANTICS_VERSION`/`walk_forward.WALK_FORWARD_SEMANTICS_VERSION`. **v1 -> v2 (mission
+GATE V, 2026-09-22)** : ajout additif/rétrocompatible de `ParameterStabilitySpecification.source_fold_id`
+(traçabilité — `source_validation_run_id` seul n'identifie pas QUEL fold d'un run Walk-Forward
+multi-fold a produit un pool de candidats donné). Aucun artefact réel n'existait encore sous v1
+(AF-V-03/AF-V-04 jamais exécutées pour de vrai) — bump précautionneux, pas une migration de
+données réelles. Une future V3 (perturbation multi-dimensionnelle réelle) incrémenterait à
+nouveau cette constante, jamais réutilisée silencieusement pour un protocole différent."""
 
 _PARAMETER_STABILITY_VALID_SEARCH_MODES = frozenset(
     {"single_var", "cross_zone", "grid", "general"}
@@ -537,16 +541,26 @@ class ParameterStabilitySemanticsMismatch(ValueError):
 
 @dataclass(frozen=True)
 class ParameterStabilitySpecification:
-    """Intention figée AVANT ré-analyse d'un Parameter Stability — ADR 0023 Décision 11.
+    """Intention figée AVANT ré-analyse d'un Parameter Stability — ADR 0023 Décision 11, amendée
+    (mission GATE V, 2026-09-22, `param-stability-neighborhood-v2`) pour `source_fold_id`.
     `source_candidates_from_optimized_search` rend explicite l'avertissement de circularité
     (Décision 1) : `best_params` est l'argmax in-sample du MÊME pool de candidats analysé —
-    construite via `build_parameter_stability_specification()`, jamais directement."""
+    construite via `build_parameter_stability_specification()`, jamais directement.
+
+    `source_fold_id: Optional[str]` — correction de traçabilité : `source_validation_run_id` seul
+    n'identifie QUE le run source (souvent un Walk-Forward MULTI-FOLD), jamais QUEL fold a produit
+    ce pool de candidats précis. Reste `Optional` (jamais requis au niveau du type) car Parameter
+    Stability demeure générique (ADR 0023 Décision 1) — une source non-Walk-Forward (recherche
+    OOS/exploratoire simple) n'a structurellement aucun fold à référencer. Un futur appelant
+    Walk-Forward (orchestration GATE V) DOIT le fournir ; cette obligation vit à la couche
+    d'orchestration, jamais dans ce contrat de base générique."""
 
     source_validation_run_id: str
     search_mode: str
     source_candidates_from_optimized_search: bool
     parameter_stability_semantics_version: str
     verdict_policy_id: Optional[str] = None
+    source_fold_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -589,15 +603,20 @@ def build_parameter_stability_specification(
     search_mode: str,
     source_candidates_from_optimized_search: bool,
     verdict_policy_id: Optional[str] = None,
+    source_fold_id: Optional[str] = None,
 ) -> ParameterStabilitySpecification:
     """SEULE construction sanctionnée d'une `ParameterStabilitySpecification` (ADR 0023 Décision
-    9/11). `parameter_stability_semantics_version` n'est PAS un paramètre : toujours fixée en
+    9/11, amendée mission GATE V 2026-09-22 pour `source_fold_id`).
+    `parameter_stability_semantics_version` n'est PAS un paramètre : toujours fixée en
     interne à la constante module `PARAMETER_STABILITY_SEMANTICS_VERSION` courante.
 
     `ValueError` immédiat si `source_validation_run_id` est absent/vide, AVANT tout calcul —
     mirroring exact du garde-fou de `build_monte_carlo_specification()`. `ValueError` si
     `search_mode` n'est pas l'une des 4 valeurs réelles de ce dépôt (Décision 9, taxonomie
-    fail-closed) — jamais une valeur par défaut silencieuse."""
+    fail-closed) — jamais une valeur par défaut silencieuse. `source_fold_id` reste `Optional`
+    (`None` par défaut, rétrocompatible) mais, si EXPLICITEMENT fourni, doit être une chaîne non
+    vide — un `source_fold_id=""` serait ambigu avec "non fourni", jamais silencieusement
+    confondu (correction de traçabilité, mission GATE V)."""
     if not isinstance(source_validation_run_id, str) or not source_validation_run_id.strip():
         raise ValueError(
             "source_validation_run_id est obligatoire pour construire une "
@@ -609,12 +628,21 @@ def build_parameter_stability_specification(
             f"{sorted(_PARAMETER_STABILITY_VALID_SEARCH_MODES)} (ADR 0023 Décision 9, taxonomie "
             "fail-closed, jamais une valeur par défaut silencieuse)."
         )
+    if source_fold_id is not None and (
+        not isinstance(source_fold_id, str) or not source_fold_id.strip()
+    ):
+        raise ValueError(
+            "source_fold_id, si fourni, doit être une chaîne non vide — ambigu avec "
+            "l'absence de fold (None) sinon. Omettre le paramètre plutôt que de fournir une "
+            "valeur vide/non-chaîne si aucun fold ne s'applique."
+        )
     return ParameterStabilitySpecification(
         source_validation_run_id=source_validation_run_id,
         search_mode=search_mode,
         source_candidates_from_optimized_search=source_candidates_from_optimized_search,
         parameter_stability_semantics_version=PARAMETER_STABILITY_SEMANTICS_VERSION,
         verdict_policy_id=verdict_policy_id,
+        source_fold_id=source_fold_id,
     )
 
 

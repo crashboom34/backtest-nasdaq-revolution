@@ -1242,6 +1242,39 @@ def test_build_parameter_stability_specification_does_not_accept_semantics_versi
         )
 
 
+def test_build_parameter_stability_specification_source_fold_id_defaults_to_none():
+    """Correction de traçabilité (mission GATE V, 2026-09-22) — `source_validation_run_id` seul ne
+    distingue pas QUEL fold d'un run Walk-Forward multi-fold a produit ce pool de candidats.
+    `source_fold_id` reste `Optional` (Parameter Stability demeure générique, ADR 0023 Décision 1 —
+    une source non-Walk-Forward n'a structurellement aucun fold) : rétrocompatible, aucun appelant
+    existant n'est cassé par cet ajout."""
+    spec = _parameter_stability_specification()
+    assert spec.source_fold_id is None
+
+
+def test_build_parameter_stability_specification_accepts_a_real_source_fold_id():
+    spec = _parameter_stability_specification(source_fold_id="fold_002")
+    assert spec.source_fold_id == "fold_002"
+
+
+@pytest.mark.parametrize("bad_fold_id", ["", "   ", 42, 3.5, ("fold_002",)])
+def test_build_parameter_stability_specification_rejects_an_empty_source_fold_id_when_provided(bad_fold_id):
+    """Un `source_fold_id` EXPLICITEMENT fourni mais vide/non-chaîne serait ambigu avec "non
+    fourni" (`None`) — refusé (`ValueError` propre, `isinstance` vérifié AVANT `.strip()`, jamais
+    un `AttributeError` sur un type inattendu) plutôt que silencieusement confondu avec l'absence
+    de fold."""
+    with pytest.raises(ValueError):
+        _parameter_stability_specification(source_fold_id=bad_fold_id)
+
+
+def test_parameter_stability_semantics_version_bumped_for_the_source_fold_id_addition():
+    """Le champ additif `source_fold_id` (Décision 11 amendée, mission GATE V) est versionné,
+    jamais silencieusement mélangé avec le contrat ADR 0023 d'origine — même discipline que toute
+    autre évolution de contrat scientifique dans ce dépôt."""
+    from validation_run import PARAMETER_STABILITY_SEMANTICS_VERSION
+    assert PARAMETER_STABILITY_SEMANTICS_VERSION == "param-stability-neighborhood-v2"
+
+
 def test_build_validation_run_accepts_a_correct_parameter_stability_pair():
     from validation_run import (
         VALIDATION_TYPE_PARAMETER_STABILITY,
