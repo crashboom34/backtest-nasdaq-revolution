@@ -369,7 +369,7 @@ futur ticket, jamais en généralisant ce module en dict opaque ») :
 VALIDATION_TYPE_MONTE_CARLO = "monte_carlo"  # nom déjà utilisé par DOMAIN_MODEL.md, jamais inventé
 
 @dataclass(frozen=True)
-class MonteCarloDistributionSummary:
+class PercentileDistributionSummary:
     p5: Optional[float]
     p25: Optional[float]
     p50: Optional[float]
@@ -410,14 +410,14 @@ class MonteCarloEvidence:
     observed_max_dd_trade_close_basis_pct: Optional[float]
     observed_lag1_autocorrelation: Optional[float]
     observed_longest_losing_streak: Optional[int]
-    sequence_risk_max_dd_trade_close_basis_pct: Optional[MonteCarloDistributionSummary]
+    sequence_risk_max_dd_trade_close_basis_pct: Optional[PercentileDistributionSummary]
     # Interpolation "lower" (jamais "linear", le défaut numpy) pour ce champ précisément : une série
     # de pertes est un COMPTEUR entier, un percentile interpolé linéairement produirait une valeur
-    # non entière ("p5 = 2.3 séries") non interprétable — chaque champ de ce MonteCarloDistributionSummary
+    # non entière ("p5 = 2.3 séries") non interprétable — chaque champ de ce PercentileDistributionSummary
     # reste donc une VALEUR ENTIÈRE RÉELLEMENT OBSERVÉE dans l'échantillon simulé, jamais interpolée.
-    sequence_risk_longest_losing_streak: Optional[MonteCarloDistributionSummary]
-    sampling_uncertainty_net_ret_pct: Optional[MonteCarloDistributionSummary]
-    sampling_uncertainty_max_dd_trade_close_basis_pct: Optional[MonteCarloDistributionSummary]
+    sequence_risk_longest_losing_streak: Optional[PercentileDistributionSummary]
+    sampling_uncertainty_net_ret_pct: Optional[PercentileDistributionSummary]
+    sampling_uncertainty_max_dd_trade_close_basis_pct: Optional[PercentileDistributionSummary]
     execution_status: str
     scientific_verdict: str
     verdict_reasons: Tuple[str, ...]
@@ -525,3 +525,10 @@ par fold).
   fait déjà vérifié dans le dépôt (conventions existantes, contraintes du moteur réel) plutôt que
   par une préférence esthétique ; voir le rapport de revue joint pour confirmation indépendante
   avant de lever ce statut `Proposé`.
+- **Amendement post-merge (2026-09-22, revue architecture d'ADR 0023)** : `MonteCarloDistributionSummary`
+  a été renommée `PercentileDistributionSummary` (nom, jamais la forme/les champs) — la Décision 6
+  de l'ADR 0023 (Parameter Stability) en devient le second consommateur, et ce dépôt applique déjà
+  ailleurs (ex. `*_trade_close_basis_pct` vs `*_max_dd_pct`, Décision 6 ci-dessus) la discipline de
+  ne jamais laisser un nom de type suggérer une origine unique qu'il n'a plus. Renommage mécanique
+  appliqué au code réel déjà mergé (`validation_run.py`, `monte_carlo.py`, leurs tests), suite
+  complète revérifiée verte avant re-intégration.

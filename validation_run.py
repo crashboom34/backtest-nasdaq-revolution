@@ -410,12 +410,15 @@ class MonteCarloSemanticsMismatch(ValueError):
 
 
 @dataclass(frozen=True)
-class MonteCarloDistributionSummary:
-    """Résumé en percentiles d'une distribution simulée (`sequence_risk`/`sampling_uncertainty`,
-    ADR 0022 Décision 6) — `p5`/`p25`/`p50`/`p75`/`p95`, tous `Optional[float]` (`None` uniquement
-    pour un `MonteCarloEvidence.zero_trade_input=True`, jamais pour une distribution réellement
-    calculée). Type explicite, jamais un `dict` opaque — mirroring le principe déjà retenu partout
-    ailleurs dans ce dépôt pour toute forme de preuve typée."""
+class PercentileDistributionSummary:
+    """Résumé en percentiles d'une distribution — `p5`/`p25`/`p50`/`p75`/`p95`, tous
+    `Optional[float]` (`None` uniquement quand la distribution sous-jacente n'a réellement pas pu
+    être calculée, ex. `MonteCarloEvidence.zero_trade_input=True`, ADR 0022 Décision 6/7 — jamais
+    pour une distribution réellement calculée). Type explicite, jamais un `dict` opaque — mirroring
+    le principe déjà retenu partout ailleurs dans ce dépôt pour toute forme de preuve typée.
+    Nommage délibérément générique (renommé depuis `MonteCarloDistributionSummary`, revue
+    architecture ADR 0023) : réutilisé par plusieurs `validation_type` (`monte_carlo`,
+    `parameter_stability`) — jamais un nom qui laisserait croire à une origine unique."""
 
     p5: Optional[float]
     p25: Optional[float]
@@ -457,10 +460,10 @@ class MonteCarloEvidence:
     observed_max_dd_trade_close_basis_pct: Optional[float]
     observed_lag1_autocorrelation: Optional[float]
     observed_longest_losing_streak: Optional[int]
-    sequence_risk_max_dd_trade_close_basis_pct: Optional[MonteCarloDistributionSummary]
-    sequence_risk_longest_losing_streak: Optional[MonteCarloDistributionSummary]
-    sampling_uncertainty_net_ret_pct: Optional[MonteCarloDistributionSummary]
-    sampling_uncertainty_max_dd_trade_close_basis_pct: Optional[MonteCarloDistributionSummary]
+    sequence_risk_max_dd_trade_close_basis_pct: Optional[PercentileDistributionSummary]
+    sequence_risk_longest_losing_streak: Optional[PercentileDistributionSummary]
+    sampling_uncertainty_net_ret_pct: Optional[PercentileDistributionSummary]
+    sampling_uncertainty_max_dd_trade_close_basis_pct: Optional[PercentileDistributionSummary]
     execution_status: str
     scientific_verdict: str
     verdict_reasons: Tuple[str, ...]
@@ -502,11 +505,11 @@ def build_monte_carlo_specification(
     )
 
 
-ValidationSpecification = Union[OosValidationSpecification, WalkForwardSpecification]
+ValidationSpecification = Union[OosValidationSpecification, WalkForwardSpecification, MonteCarloSpecification]
 """Contrat commun explicite (tagged union, AF-V-06/AF-V-02) — étendre en ajoutant un membre par
 futur `validation_type`, jamais en élargissant un membre existant."""
 
-ValidationEvidence = Union[OosValidationEvidence, WalkForwardEvidence]
+ValidationEvidence = Union[OosValidationEvidence, WalkForwardEvidence, MonteCarloEvidence]
 """Contrat commun explicite (tagged union, AF-V-06/AF-V-02) — même principe que
 `ValidationSpecification`."""
 

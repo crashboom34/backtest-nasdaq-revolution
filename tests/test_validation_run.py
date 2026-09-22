@@ -806,13 +806,13 @@ def test_save_and_load_round_trips_evidence_built_via_build_walk_forward_evidenc
 
 
 def _distribution_summary(**kwargs):
-    from validation_run import MonteCarloDistributionSummary
+    from validation_run import PercentileDistributionSummary
     kwargs.setdefault("p5", 1.0)
     kwargs.setdefault("p25", 2.0)
     kwargs.setdefault("p50", 3.0)
     kwargs.setdefault("p75", 4.0)
     kwargs.setdefault("p95", 5.0)
-    return MonteCarloDistributionSummary(**kwargs)
+    return PercentileDistributionSummary(**kwargs)
 
 
 def _monte_carlo_specification(**kwargs):
@@ -852,8 +852,8 @@ def test_monte_carlo_validation_type_is_registered():
 
 
 def test_monte_carlo_distribution_summary_is_an_explicit_type_not_an_opaque_dict():
-    from validation_run import MonteCarloDistributionSummary
-    assert isinstance(_distribution_summary(), MonteCarloDistributionSummary)
+    from validation_run import PercentileDistributionSummary
+    assert isinstance(_distribution_summary(), PercentileDistributionSummary)
 
 
 def test_monte_carlo_semantics_mismatch_is_a_value_error_subclass():
@@ -1018,11 +1018,11 @@ def test_existing_walk_forward_validation_run_construction_is_unaffected_by_mont
 def test_save_and_load_validation_run_round_trips_a_monte_carlo_run(tmp_path):
     """Round-trip réel sur disque (build_validation_run() -> save_validation_run() ->
     load_validation_run()) pour validation_type="monte_carlo" — préserve tous les champs, y
-    compris les MonteCarloDistributionSummary imbriqués. Comme pour Walk-Forward (voir
+    compris les PercentileDistributionSummary imbriqués. Comme pour Walk-Forward (voir
     test_save_and_load_validation_run_round_trips_a_walk_forward_run), load_validation_run() ne
     rehydrate PAS les dataclasses imbriquées au-delà de evidence_cls(**raw_evidence) — cette
     tranche n'a pas le droit de toucher load_validation_run() (hors scope, voir mission) : les
-    MonteCarloDistributionSummary reviennent donc comme de simples dict après un aller-retour
+    PercentileDistributionSummary reviennent donc comme de simples dict après un aller-retour
     JSON, jamais comme une égalité stricte d'objet. Ce test compare le CONTENU, pas l'identité de
     type — même principe déjà documenté pour fold_results/aggregate."""
     from dataclasses import asdict

@@ -6,7 +6,7 @@ top-level LEAF (Décision 11) : n'importe ni `engine.py`, ni `optimizer.py`, ni 
 ni `walk_forward.py` — preuve structurelle de la Décision 10 (impossibilité structurelle d'accéder
 à la zone holdout finale réservée, jamais consultée ni consultable ici). Seul `validation_run.py`
 (leaf lui-même) est importé, pour les contrats typés déjà posés par AF-V-03 Slice 1
-(`MonteCarloSpecification`/`MonteCarloEvidence`/`MonteCarloDistributionSummary`) et
+(`MonteCarloSpecification`/`MonteCarloEvidence`/`PercentileDistributionSummary`) et
 `UnknownVerdictPolicy` (réutilisée telle quelle, Décision 9/12).
 
 `run_monte_carlo_simulation(trades, spec) -> MonteCarloEvidence` est la seule fonction publique :
@@ -23,7 +23,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from validation_run import (
-    MonteCarloDistributionSummary,
+    PercentileDistributionSummary,
     MonteCarloEvidence,
     MonteCarloSpecification,
     UnknownVerdictPolicy,
@@ -88,12 +88,12 @@ def _longest_losing_streak(returns: np.ndarray) -> np.ndarray:
     return streak.max(axis=-1)
 
 
-def _distribution_summary(values: np.ndarray, method: str = "linear") -> MonteCarloDistributionSummary:
+def _distribution_summary(values: np.ndarray, method: str = "linear") -> PercentileDistributionSummary:
     """Résumé en percentiles `p5`/`p25`/`p50`/`p75`/`p95` (ADR 0022 Décision 6). `method="lower"`
     réservé à `sequence_risk_longest_losing_streak` (Décision 11 — valeurs ENTIÈRES réellement
     observées dans l'échantillon simulé, jamais interpolées linéairement)."""
     p5, p25, p50, p75, p95 = np.percentile(values, [5, 25, 50, 75, 95], method=method)
-    return MonteCarloDistributionSummary(
+    return PercentileDistributionSummary(
         p5=float(p5), p25=float(p25), p50=float(p50), p75=float(p75), p95=float(p95),
     )
 
@@ -133,10 +133,10 @@ def _draw_sampling_uncertainty_samples(
 
 def _sequence_risk(
     trades_arr: np.ndarray, n_simulations: int, master_seed: int,
-) -> Tuple[MonteCarloDistributionSummary, MonteCarloDistributionSummary]:
+) -> Tuple[PercentileDistributionSummary, PercentileDistributionSummary]:
     """Permutation/réordonnancement (ADR 0022 Décision 2.1) : reconstruit la courbe d'équité
     chaînée pour chaque permutation tirée par `_draw_sequence_risk_permutations()`, agrège le max
-    drawdown et la plus longue série de pertes consécutives en `MonteCarloDistributionSummary`."""
+    drawdown et la plus longue série de pertes consécutives en `PercentileDistributionSummary`."""
     permuted = _draw_sequence_risk_permutations(trades_arr, n_simulations, master_seed)
 
     curves = _chain_returns(permuted)
@@ -151,10 +151,10 @@ def _sequence_risk(
 
 def _sampling_uncertainty(
     trades_arr: np.ndarray, n_simulations: int, master_seed: int,
-) -> Tuple[MonteCarloDistributionSummary, MonteCarloDistributionSummary]:
+) -> Tuple[PercentileDistributionSummary, PercentileDistributionSummary]:
     """Bootstrap avec remise (ADR 0022 Décision 2.2) : reconstruit la courbe d'équité chaînée pour
     chaque échantillon tiré par `_draw_sampling_uncertainty_samples()`, agrège le rendement net
-    final ET le max drawdown en `MonteCarloDistributionSummary`."""
+    final ET le max drawdown en `PercentileDistributionSummary`."""
     sampled = _draw_sampling_uncertainty_samples(trades_arr, n_simulations, master_seed)
 
     curves = _chain_returns(sampled)
