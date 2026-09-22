@@ -2325,3 +2325,52 @@ régression complète 1444/1444 revérifiée) sur `origin/master`.
 **Prochaine tranche** : `AF-V-04` (Parameter Stability) — même discipline (ADR scientifique d'abord,
 deux revues indépendantes, correction des BLOCKER/MAJEUR, implémentation TDD ensuite), à préparer
 sans redemander d'autorisation.
+
+## 34. AF-V-04 (Parameter Stability) — ADR 0023 rédigée, revue sur TROIS passes, corrigée ; correctifs cross-ADR appliqués au code déjà mergé ; Slices 1/2 mises en file (2026-09-22)
+
+**ADR 0023** (`docs/adr/0023-parameter-stability-plateau-v1.md`, `ca321f1`) : contrairement à
+Monte-Carlo, ce protocole **réutilise un mécanisme déjà réellement implémenté** dans ce dépôt —
+`scoring.py::compute_sensitivity_filtered()`/`compute_sensitivity_correlation()`, déjà câblées dans
+`Optimizer.run()` — plutôt que d'en inventer un nouveau. Conçu comme une ré-analyse purement
+déterministe (aucune graine, aucun tirage aléatoire) d'un pool de candidats DÉJÀ évalués par une
+recherche `Optimizer` terminée — jamais un nouveau backtest.
+
+**Revue en TROIS passes, chaque nouvelle correction re-vérifiée par les deux mêmes revues** :
+1. Première passe : 2 BLOCKER + 6 MAJEUR réels — le filtre réutilisé de `compute_sensitivity_filtered()`
+   exclut silencieusement les candidats rejetés (`score <= 0`), or ce sont précisément ceux qui
+   démontreraient le plus fortement un pic isolé ; le sentinel `0.0` de `sensitivity` est
+   indiscernable d'une vraie valeur nulle sans connaître la taille d'échantillon sous-jacente ;
+   absence d'avertissement de circularité (le vainqueur EST l'argmax in-sample sur ce même pool,
+   plus circulaire qu'en Monte-Carlo) ; la méthode "un paramètre à la fois" ne peut jamais confirmer
+   une robustesse jointe, seulement l'infirmer ; le mode `"general"` produisait des champs vides
+   silencieusement confondables avec "analysé et stable" ; `best_params` s'incluait lui-même dans
+   son propre voisinage, injectant un point de dégradation `0` garanti ; aucun avertissement de
+   comparaisons multiples.
+2. Deuxième passe (après corrections) : 2 NOUVEAUX MAJEUR introduits PAR les corrections elles-mêmes
+   — la statistique jointe `degradation_hamming_le_2` réincluait la distance `0` (c'est-à-dire
+   `best_params` lui-même) et manquait ses compteurs compagnons ; `neighborhood_applicability`
+   dérivait uniquement de `search_mode`, jamais du voisinage RÉELLEMENT mesuré (une grille
+   clairsemée avec zéro voisin réel se lisait quand même "disponible localement") — corrigées,
+   reconfirmées propres.
+3. Troisième passe : 3 findings mineurs (troisième sentinel non désambiguïsé pour la corrélation de
+   Spearman, incohérence de nommage de champ, impact cross-ADR non documenté) — corrigés.
+
+**Correctifs cross-ADR appliqués au code déjà mergé (AF-V-03), trouvés par la revue architecture
+d'ADR 0023 avant même le début de l'implémentation d'AF-V-04** (commit `85dbba0`) :
+- `MonteCarloDistributionSummary` renommée `PercentileDistributionSummary` — ce nom suggérait à
+  tort une origine unique alors qu'ADR 0023 en devient un second consommateur non lié ; ce dépôt
+  applique déjà cette discipline ailleurs (`*_trade_close_basis_pct`, ADR 0022 Décision 6).
+  Renommage mécanique (forme/champs inchangés) dans `validation_run.py`/`monte_carlo.py`/leurs
+  tests, amendement post-merge documenté dans les Conséquences d'ADR 0022.
+- `ValidationSpecification`/`ValidationEvidence` (alias `Union` typés) n'avaient jamais été étendus
+  pour inclure `MonteCarloSpecification`/`MonteCarloEvidence` depuis leur ajout (Slice 1 AF-V-03) —
+  lacune réelle (leur propre docstring dit pourtant « étendre en ajoutant un membre par futur
+  `validation_type` ») — corrigée dans le même commit. Suite complète verte (1444/1444) avant et
+  après, intégré sur `origin/master`.
+
+**AF-V-04 Slice 1/Slice 2** (`.autopilot/prompts/af-v04-slice-1.md`/`af-v04-slice-2.md`) mises en
+file (`08d3bf9`) — mirroring exact du découpage AF-V-03 (typé d'abord, algorithme ensuite), avec un
+rappel explicite dans les deux prompts que `validation_run.py`/`parameter_stability.py` ne doivent
+JAMAIS importer `optimizer.py` (pas même pour une constante) — les valeurs de `search_mode` sont
+dupliquées littéralement plutôt qu'importées, invariant "leaf" déjà vérifié deux fois par les
+revues indépendantes, jamais à régresser.
