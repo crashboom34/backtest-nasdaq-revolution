@@ -2469,3 +2469,69 @@ PAS encore clarifié au-delà de la note `GATE V` déjà actée (FAUX — reste 
 run `WalkForward` réel (FAUX — `base_params`/recherche/budget de calcul restent à fixer
 explicitement). **Aucune campagne réelle n'est donc lancée par cette section — préparation
 documentaire uniquement, conformément à l'instruction explicite de l'utilisateur.**
+
+## 36. `AF-V-08` — ADR 0024 (câblage d'orchestration `GATE V`) rédigée, revue sur DEUX passes, corrigée, intégrée ; implémentation TDD mise en file (2026-09-22)
+
+**Décision explicite de l'utilisateur** : combler l'écart d'orchestration documenté au §35 — un
+câblage APPELABLE ET TESTÉ reliant Walk-Forward/Monte-Carlo/Parameter Stability, avec les mêmes
+garde-fous scientifiques (mapping TEST-only, exhaustivité par fold, jamais de fusion en score
+unique) et une conception/revue rigoureuse AVANT toute implémentation. Ticket `AF-V-08`, ADR `0024`
+— identifiants vérifiés disponibles (`grep -rn "AF-V-08" docs/` : aucune occurrence avant l'ADR),
+`AF-V-05` (Stress/Noise) explicitement préservé, jamais réutilisé.
+
+### ADR 0024 — conception et double revue indépendante
+
+`docs/adr/0024-gate-v-campaign-orchestration-v1.md` (commit `cc00f65`) définit : le modèle de
+campagne (Walk-Forward + Monte-Carlo dérivé + N Parameter Stability par fold, jamais fusionnés),
+les identifiants/filiation `ResearchRun`/`ValidationRun`, les entrées obligatoires fail-closed, les
+artefacts produits, la séparation stricte Niveau A (préparation déterministe,
+`build_gate_v_campaign_plan()`) / Niveau B (exécution explicite future,
+`execute_gate_v_campaign()`), le mapping scientifique précis WF→MC/PS, les 6 états factuels
+(`NOT_READY`/`READY_FOR_EXECUTION`/`RUNNING`/`EVIDENCE_INCOMPLETE`/
+`EVIDENCE_COMPLETE_AWAITING_POLICY`/`TECHNICAL_FAILURE` — **jamais `GATE V PASS`**), la reprise sans
+doublon, et la différence entre techniquement prête / exécutée / `GATE V` réellement passée.
+
+**Deux revues indépendantes** ont tourné en parallèle sur l'ADR (axe architecture/reproductibilité,
+axe validité scientifique) — 2 BLOCKER + 3 MAJEUR + 3 MINEUR au total, tous corrigés puis
+reconfirmés propres par une DEUXIÈME passe de revue (les deux agents originaux n'étant plus
+joignables après une compaction de contexte, la confirmation a été refaite via deux nouveaux agents
+indépendants relisant l'ADR corrigé dans son intégralité) :
+
+| # | Sévérité | Axe | Résumé |
+|---|---|---|---|
+| 1 | BLOCKER | Architecture | `persist_walk_forward_run()` (Slice 4 AF-V-02, gelée, `save_atomic()` refuse tout écrasement) aurait été rappelée sans condition après une reprise déjà persistée -> `FileExistsError` dès sa toute première écriture. **Corrigé** : appelée AU PLUS UNE FOIS par campagne, gardée par l'existence de `.../walk_forward/aggregate.json` (dernier fichier écrit, marqueur de complétion fiable). Limite résiduelle honnêtement documentée (crash PENDANT cet appel unique = résolution manuelle, hors scope de modifier Slice 4). |
+| 2 | BLOCKER | Scientifique | `source_trades_from_optimized_params`/`source_candidates_from_optimized_search` (drapeaux de circularité obligatoires sur `MonteCarloSpecification`/`ParameterStabilitySpecification`, ADR 0022/0023) n'étaient JAMAIS mentionnés. **Corrigé** : les deux hardcodés `True`, justifié (Walk-Forward TEST/TRAIN sont structurellement toujours issus d'une recherche optimisée dans ce câblage). |
+| 3 | MAJEUR | Architecture | Fausse affirmation "signature identique" entre `run_walk_forward()`/`resume_walk_forward_run()` (signatures et types de retour RÉELLEMENT différents). **Corrigé** : deux collaborateurs injectés séparés. |
+| 4 | MAJEUR | Architecture | Portée de la garantie FINAL_HOLDOUT (imports propres du module) jamais distinguée de la frontière de confiance d'un futur collaborateur injecté réel. **Corrigé** : précisée explicitement (Décision 10). |
+| 5 | MAJEUR | Scientifique | `EVIDENCE_COMPLETE_AWAITING_POLICY`/contribution Parameter Stability "prête" reposaient sur un simple décompte de fichiers, ignorant la condition de qualité qu'ADR 0023 Décision 3 exige déjà d'un futur agrégateur `GATE V` (`neighborhood_applicability`/voisins non rejetés). **Corrigé** : les deux conditions désormais cumulatives. |
+| 6-8 | MINEUR ×3 | Les deux | Surface d'injection MC/PS mal cadrée ; branche run frais omettant `build_aggregate_result()` (romprait silencieusement le marqueur de complétion) ; risque de cherry-picking ENTRE campagnes jamais restaté. Les trois corrigés. |
+
+### Intégration
+
+`cc00f65` (ADR 0024 + ticket `AF-V-08`) et `d944c4e` (mission queue) intégrés à `origin/master` via
+le worktree d'intégration dédié (fast-forward only, 1517 tests verts avant/après chaque push).
+`AF-V-08` : `Status: READY` -> conception achevée, `implementation: NOT STARTED`.
+
+### Implémentation mise en file (jamais lancée par cette mission)
+
+Six tranches TDD séquentielles, `nouveau module gate_v_campaign.py`, mises en file dans
+`.autopilot/missions.json` (`AF-V-08-SLICE-1` à `6`, `status: READY`, chaînées par `depends_on`) :
+
+1. Contrats `GateVCampaignPlan` + Niveau A (`build_gate_v_campaign_plan()`).
+2. Contrat `GateVCampaignManifest` + calcul PUR du statut à 6 états (dont le correctif MAJEUR #5).
+3. Niveau B squelette — phase Walk-Forward, double injection, garde persist-once (correctif BLOCKER #1).
+4. Phase Monte-Carlo (mapping TEST-only, drapeau de circularité, correctif BLOCKER #2).
+5. Phase Parameter Stability (exhaustive par fold, statut final).
+6. Intégration bout-en-bout, garde-fous anti-déclenchement, clôture de la matrice TDD Décision 13.
+
+Chaque `forbidden_paths` protège l'intégralité des modules déjà revus/gelés (`engine.py`,
+`optimizer.py`, `walk_forward.py`, `monte_carlo.py`, `parameter_stability.py`, `validation_run.py`,
+`validation_oos.py`, `scripts/autopilot/`, `docs/adr/`) — seuls `gate_v_campaign.py`/
+`tests/test_gate_v_campaign.py` sont modifiables (`docs/roadmap/EPICS_AND_TICKETS.md` en plus pour
+la Slice 6, clôture du ticket).
+
+### Ce qui N'A PAS été fait dans cette mission (conforme à l'instruction explicite)
+
+Aucun backtest réel, aucune recherche `Optimizer`, aucun téléchargement, aucun accès `FINAL_HOLDOUT`.
+`base_params`/`search_mode`/`search_space`/`budget_per_fold` réels restent des entrées à fournir —
+voir §37 pour la proposition consolidée soumise à décision.
