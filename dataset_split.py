@@ -105,6 +105,8 @@ commune (lecture/parsing tolérant), et ne personnalise que l'étape de reconstr
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -367,7 +369,7 @@ def save_dataset_split_plan(path: Union[str, Path], plan: DatasetSplitPlan) -> P
     return save_atomic(path, asdict(plan), "dataset_split_plan")
 
 
-def load_dataset_split_plan(path: Union[str, Path]) -> Optional[DatasetSplitPlan]:
+def load_dataset_split_plan(path: Union[str, Path], *, strict: bool = False) -> Optional[DatasetSplitPlan]:
     """Lecture tolérante avec rehydratation des `SplitBoundary` imbriquées (voir docstring du
     module — `load_tolerant()` générique ne suffit pas pour des champs dataclass imbriqués).
     Réutilise `load_json_tolerant()` pour la partie commune (fichier absent/illisible/invalide ->
@@ -376,7 +378,7 @@ def load_dataset_split_plan(path: Union[str, Path]) -> Optional[DatasetSplitPlan
     if data is None:
         return None
     try:
-        return DatasetSplitPlan(
+        plan = DatasetSplitPlan(
             split_plan_id=data["split_plan_id"],
             dataset_snapshot_id=data["dataset_snapshot_id"],
             train=SplitBoundary(**data["train"]),
@@ -387,8 +389,41 @@ def load_dataset_split_plan(path: Union[str, Path]) -> Optional[DatasetSplitPlan
             ),
             created_at=data["created_at"],
         )
+        if strict:
+            def checked(boundary: Optional[SplitBoundary]) -> Optional[SplitBoundary]:
+                if boundary is None:
+                    return None
+                return build_split_boundary(boundary.start, boundary.end)
+
+            return build_dataset_split_plan(
+                split_plan_id=plan.split_plan_id,
+                dataset_snapshot_id=plan.dataset_snapshot_id,
+                train=checked(plan.train),
+                final_holdout=checked(plan.final_holdout),
+                validation=checked(plan.validation),
+                discovery_oos=checked(plan.discovery_oos),
+                created_at=plan.created_at,
+            )
+        return plan
     except (TypeError, KeyError):
         return None
+
+
+def dataset_split_plan_fingerprint(plan: DatasetSplitPlan) -> str:
+    """Opaque identity of all persisted split metadata; no market data is consulted."""
+    payload = json.dumps(asdict(plan), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def assert_oos_window_matches_split(plan: DatasetSplitPlan, start: str, end: str) -> None:
+    """Check an external OOS reference against split metadata without exposing its zone."""
+    provided = build_split_boundary(start, end)
+    expected = plan.final_holdout
+    if (
+        _parse_offset_aware(provided.start, "oos.start") != _parse_offset_aware(expected.start, "split.end_zone.start")
+        or _parse_offset_aware(provided.end, "oos.end") != _parse_offset_aware(expected.end, "split.end_zone.end")
+    ):
+        raise ValueError("La fenêtre OOS ne correspond pas au split référencé.")
 
 
 def _holdout_access_event_filename(event: HoldoutAccessEvent) -> str:
