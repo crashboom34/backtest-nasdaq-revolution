@@ -672,7 +672,7 @@
     {
       "id": "AF-V-08-SLICE-1",
       "title": "AF-V-08 Slice 1 — Contrats GateVCampaignPlan + Niveau A build_gate_v_campaign_plan() (ADR 0024)",
-      "status": "PLANNED",
+      "status": "DONE",
       "prompt_file": "prompts/af-v08-slice-1.md",
       "depends_on": [],
       "allowed_paths": [
