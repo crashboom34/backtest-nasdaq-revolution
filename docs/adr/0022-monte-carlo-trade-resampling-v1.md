@@ -532,3 +532,55 @@ par fold).
   ne jamais laisser un nom de type suggérer une origine unique qu'il n'a plus. Renommage mécanique
   appliqué au code réel déjà mergé (`validation_run.py`, `monte_carlo.py`, leurs tests), suite
   complète revérifiée verte avant re-intégration.
+
+### Amendement AF-V-08 du 2026-09-27 — dérivation du rendement % par trade TEST (correction Décision 1, Human Gate)
+
+**Constat vérifié, corrige une supposition fausse** : la Décision 1 ci-dessus affirmait un
+`net_ret_pct` « déjà produit par `engine.run_backtest()` » par trade individuel — vérifié FAUX à
+la préparation de l'implémentation `AF-V-08` Slice 4 : `engine.py::run_backtest()` ne persiste par
+trade que `resultat_net` (PnL en unité monétaire absolue, arrondi à 2 décimales) et `capital_apres`
+(capital cumulé après ce trade, également arrondi à 2 décimales) — `net_ret_pct` n'existe dans ce
+dépôt qu'en agrégat sur tout le backtest (`engine.py::_compute_stats()`), jamais par trade.
+
+**Convention retenue (Human Gate, ne modifie ni `engine.py` ni `walk_forward.py`)** : l'appelant de
+`run_monte_carlo_simulation()` (l'orchestration `GATE V`, ADR 0024, jamais `monte_carlo.py`
+lui-même qui reste un leaf pur sans connaissance de cette dérivation) dérive le rendement % de
+chaque trade TEST depuis la trajectoire de capital RÉELLEMENT persistée, jamais depuis
+`resultat_net` directement :
+
+```
+trade_return_pct_i = (capital_apres_i / capital_before_i - 1.0) * 100
+```
+
+où `capital_before_i` est `capital_apres` du trade précédent du MÊME fold Walk-Forward, ou
+`base_config.global_params.get("initial_capital", 10_000.0)` (même clé/valeur par défaut que
+`optimizer.py::_run_single()`) pour le premier trade de CHAQUE fold — le capital est réinitialisé à
+CHAQUE fold, jamais propagé depuis le capital terminal d'un fold antérieur (`flat_each_fold_v1`,
+ADR 0021 Décision 14, code gelé et non modifié). `resultat_net` devient un **invariant d'audit**,
+jamais la source numérique primaire du rendement.
+
+**Contrôle de cohérence obligatoire, AVANT tout calcul Monte-Carlo** : pour chaque trade,
+`capital_apres_i` doit être égal à `capital_before_i + resultat_net_i` à l'arrondi centime du
+moteur près. `resultat_net`/`capital_apres` sont chacun arrondis indépendamment à 2 décimales à
+l'écriture (`engine.py`, `round(x, 2)`) — la vraie valeur non arrondie satisfait cette égalité
+exactement, donc l'écart observé sur les valeurs persistées est borné par la somme des arrondis des
+quantités impliquées : `capital_before_i` (jusqu'à 0,005, sauf pour le premier trade d'un fold où
+`initial_capital` est une valeur de configuration exacte, non arrondie), `capital_apres_i` (jusqu'à
+0,005) et `resultat_net_i` (jusqu'à 0,005) — soit un écart borné à **0,015 unité monétaire** dans le
+pire cas (constante `_TRADE_RETURN_INTEGRITY_TOLERANCE`, tenant compte des trois quantités
+indépendamment arrondies ; conservatrice pour le premier trade d'un fold, où seules deux quantités
+sont réellement arrondies). Un écart supérieur -> `ValueError` immédiat, AVANT tout appel à
+`run_monte_carlo_simulation()` — jamais un rendement dérivé sur une trajectoire de capital
+incohérente avec le PnL persisté.
+
+**Aucune censure d'un rendement réel** : un trade dont les faits persistés montrent
+`capital_apres_i <= 0` (perte totale ou pire) produit légitimement un `trade_return_pct_i <= -100 %`
+— jamais inventé, jamais tronqué. **Mais** un trade SUIVANT ne peut structurellement pas être
+dérivé si `capital_before_i <= 0` (base financière non définie pour un rapport) — `ValueError`
+immédiat, fail-closed, avant tout calcul sur ce trade.
+
+**Aucune version de contrat modifiée** : `engine.py`/`walk_forward.py` restent inchangés par cet
+amendement (aucun format de persistance/checkpoint modifié) — ni `WALK_FORWARD_SEMANTICS_VERSION`,
+ni `WALK_FORWARD_CAPTURE_CONTRACT_VERSION`, ni `MONTE_CARLO_SEMANTICS_VERSION` ne sont incrémentées.
+Aucun artefact Walk-Forward réel n'existe à ce jour (`AI_HANDOFF.md` §35, vérifié) — aucune
+migration n'est nécessaire.

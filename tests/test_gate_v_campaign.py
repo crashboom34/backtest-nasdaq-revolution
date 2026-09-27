@@ -11,6 +11,7 @@ import dataclasses
 import inspect
 import json
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -1168,6 +1169,78 @@ def _execute_fold_results_and_artifacts(plan, split_plan, fold_ids=None):
     return tuple(results), tuple(artifacts)
 
 
+def _execute_fold_results_and_artifacts_with_trades(plan, split_plan, trades_by_fold):
+    """`trades_by_fold` : `{fold_id: [{"resultat_net":..., "capital_apres":...}, ...]}`, ordre
+    chronologique. `date_entree`/`date_sortie` sont auto-remplies dans la fenêtre TEST effective
+    RÉELLE de leur fold (sauf si déjà fournies par l'appelant, pour les tests négatifs) --
+    jamais des dates hors bornes par défaut. Fold absent du mapping -> zéro trade, avec la même
+    forme `pd.DataFrame()` (colonnes vides) que `engine.py::run_backtest()` produit réellement
+    pour un fold zéro-trade (`trades_df = pd.DataFrame(trades) if trades else pd.DataFrame()`)
+    -- jamais un DataFrame "zéro ligne mais avec colonnes", qui ne reproduirait pas fidèlement
+    `EmptyDataError` au rechargement CSV réel."""
+    from datetime import timedelta
+
+    definitions = compute_fold_definitions(
+        split_plan.validation, plan.walk_forward_specification, plan.readiness_spec,
+    )
+    results, artifacts = [], []
+    for definition in definitions:
+        raw_rows = trades_by_fold.get(definition.fold_id, [])
+        rows = []
+        boundary = datetime.fromisoformat(definition.effective_boundary)
+        for idx, row in enumerate(raw_rows):
+            filled = dict(row)
+            entry = boundary + timedelta(days=idx)
+            filled.setdefault("date_entree", entry.isoformat())
+            filled.setdefault("date_sortie", (entry + timedelta(hours=1)).isoformat())
+            rows.append(filled)
+        n_trades = len(rows)
+        selection = FoldSelection(
+            fold_id=definition.fold_id, selected_params={"lookback": 12},
+            selected_params_hash="synthetic_hash", score_train=1.0, rank_in_train=1,
+            train_candidates_evaluated=2, train_candidates_unique=2, train_candidates_eligible=2,
+            search_space_hash=plan.search_space_hash, algorithm=plan.search_mode, fold_seed=None,
+        )
+        results.append(FoldResult(
+            fold_id=definition.fold_id, definition=definition, selection=selection,
+            n_trades=n_trades,
+            net_ret_pct=0.0 if n_trades == 0 else 1.0,
+            max_dd_pct=None if n_trades == 0 else 0.5,
+            profit_factor=None if n_trades == 0 else 1.2,
+            win_rate=None if n_trades == 0 else 50.0,
+            expectancy=None if n_trades == 0 else 1.0,
+            score_test=0.0, zero_trade_oos=(n_trades == 0), forced_closes=0, coverage_bars=1,
+        ))
+        artifacts.append(FoldArtifacts(
+            fold_id=definition.fold_id,
+            train_candidates=[{
+                "params": {"lookback": 12}, "score": 1.0, "stats": {"n_trades": n_trades},
+                "filtered": False, "filter_reason": None,
+            }],
+            test_trades=pd.DataFrame(rows) if rows else pd.DataFrame(),
+            test_equity=pd.DataFrame({"capital": [10_000.0]}),
+        ))
+    return tuple(results), tuple(artifacts)
+
+
+def _execute_fake_run_with_trades(plan, split_plan, trades_by_fold, *, wrong_validation_run_id=None):
+    calls = []
+    results, artifacts = _execute_fold_results_and_artifacts_with_trades(plan, split_plan, trades_by_fold)
+
+    def fn(validation_zone, spec, readiness_spec, base_config, df, *,
+           data_manifest_path, output_dir, progress_cb=None, stop_flag_fn=None,
+           validation_run_id):
+        calls.append(validation_run_id)
+        outcome = WalkForwardRunOutcome(fold_results=results, stopped_early=False)
+        aggregate = build_aggregate_result(results)
+        return WalkForwardCapturedRunV1(
+            outcome=outcome, fold_artifacts=artifacts,
+            validation_run_id=wrong_validation_run_id or validation_run_id,
+            aggregate=aggregate,
+        )
+    return fn, calls
+
+
 def _execute_fake_run(plan, split_plan, *, stopped_early=False, fold_ids=None,
                        wrong_validation_run_id=None):
     """Doublure de run_walk_forward_fn/resume_walk_forward_fn -- ne touche jamais l'Optimizer/
@@ -1489,10 +1562,14 @@ class TestExecuteGateVCampaignWalkForwardPhase:
         assert len(run_calls) == 1
 
         # Simule un crash APRES save_validation_run() mais AVANT la mise a jour du manifeste
-        # (risque explicitement anticipe par la mission AF-V-08 precedente).
+        # (risque explicitement anticipe par la mission AF-V-08 precedente). Depuis la Slice 4,
+        # un appel complet rattache AUSSI Monte-Carlo dans la foulee -- reinitialiser les DEUX
+        # references (jamais MC seule sans WF, regle structurelle deja existante, Slice 2) pour
+        # rester un manifeste valide a relire.
         manifest_path = campaign_root / plan.campaign_id / "manifest.json"
         record = json.loads(manifest_path.read_text(encoding="utf-8"))
         record["walk_forward_validation_run_id"] = None
+        record["monte_carlo_validation_run_id"] = None
         record["status"] = "RUNNING"
         record["running"] = True
         manifest_path.write_text(json.dumps(record), encoding="utf-8")
@@ -1505,10 +1582,13 @@ class TestExecuteGateVCampaignWalkForwardPhase:
         )
 
         assert reconciled.walk_forward_validation_run_id == manifest.walk_forward_validation_run_id
+        assert reconciled.monte_carlo_validation_run_id == manifest.monte_carlo_validation_run_id
 
-    def test_never_references_monte_carlo_or_parameter_stability_execution(self):
+    def test_never_references_parameter_stability_execution(self):
+        """Depuis la Slice 4, `run_monte_carlo_simulation` EST légitimement référencée (appelée
+        directement, jamais injectée, ADR 0024 Décision 5) -- seule Parameter Stability (Slice 5)
+        reste totalement hors scope ici."""
         source = inspect.getsource(gate_v_campaign.execute_gate_v_campaign)
-        assert "run_monte_carlo_simulation" not in source
         assert "analyze_parameter_stability" not in source
         signature = inspect.signature(gate_v_campaign.execute_gate_v_campaign)
         assert "run_monte_carlo_fn" not in signature.parameters
@@ -1520,3 +1600,588 @@ class TestExecuteGateVCampaignWalkForwardPhase:
             param = signature.parameters[name]
             assert param.kind == inspect.Parameter.KEYWORD_ONLY
             assert param.default is inspect.Parameter.empty
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AF-V-08 Slice 4, vague 1 — dérivation du rendement % par trade TEST depuis la trajectoire de
+# capital réellement persistée (Human Gate 2026-09-27, ADR 0022 amendement, jamais depuis
+# resultat_net directement -- invariant d'audit seulement). Fonction PURE, aucun I/O.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fold_trades(rows):
+    return pd.DataFrame(rows)
+
+
+class TestDeriveFoldTestTradeReturnsPct:
+    def test_first_trade_derived_from_initial_capital(self):
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        trades = _fold_trades([{"resultat_net": 100.0, "capital_apres": 10_100.0}])
+        result = _derive_fold_test_trade_returns_pct(trades, 10_000.0)
+        assert result == pytest.approx((1.0,))
+
+    def test_subsequent_trades_chain_from_previous_capital_apres(self):
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        trades = _fold_trades([
+            {"resultat_net": 100.0, "capital_apres": 10_100.0},
+            {"resultat_net": -50.0, "capital_apres": 10_050.0},
+        ])
+        result = _derive_fold_test_trade_returns_pct(trades, 10_000.0)
+        assert result[0] == pytest.approx(1.0)
+        assert result[1] == pytest.approx((10_050.0 / 10_100.0 - 1.0) * 100.0)
+
+    def test_two_independent_folds_each_reset_to_their_own_initial_capital(self):
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        fold_a = _fold_trades([{"resultat_net": 500.0, "capital_apres": 10_500.0}])
+        fold_b = _fold_trades([{"resultat_net": 500.0, "capital_apres": 10_500.0}])
+        result_a = _derive_fold_test_trade_returns_pct(fold_a, 10_000.0)
+        result_b = _derive_fold_test_trade_returns_pct(fold_b, 10_000.0)
+        assert result_a == result_b  # aucune fuite d'état entre deux folds (flat_each_fold_v1)
+
+    def test_zero_trade_fold_returns_empty_tuple(self):
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        assert _derive_fold_test_trade_returns_pct(_fold_trades([]), 10_000.0) == ()
+
+    def test_non_positive_capital_before_on_next_trade_raises(self):
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        trades = _fold_trades([
+            {"resultat_net": -10_500.0, "capital_apres": -500.0},
+            {"resultat_net": 10.0, "capital_apres": -490.0},
+        ])
+        with pytest.raises(ValueError, match="capital_before"):
+            _derive_fold_test_trade_returns_pct(trades, 10_000.0)
+
+    def test_first_trade_allows_return_at_or_below_minus_100_percent(self):
+        """Un rendement réel <= -100 % n'est jamais censuré (fait persisté, pas une erreur)."""
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        trades = _fold_trades([{"resultat_net": -10_500.0, "capital_apres": -500.0}])
+        result = _derive_fold_test_trade_returns_pct(trades, 10_000.0)
+        assert result[0] == pytest.approx(-105.0)
+
+    def test_non_finite_resultat_net_raises(self):
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        trades = _fold_trades([{"resultat_net": float("nan"), "capital_apres": 10_100.0}])
+        with pytest.raises(ValueError, match="fini"):
+            _derive_fold_test_trade_returns_pct(trades, 10_000.0)
+
+    def test_non_finite_capital_apres_raises(self):
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        trades = _fold_trades([{"resultat_net": 100.0, "capital_apres": float("inf")}])
+        with pytest.raises(ValueError, match="fini"):
+            _derive_fold_test_trade_returns_pct(trades, 10_000.0)
+
+    def test_missing_resultat_net_column_raises(self):
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        trades = pd.DataFrame({"capital_apres": [10_100.0]})
+        with pytest.raises(ValueError, match="resultat_net"):
+            _derive_fold_test_trade_returns_pct(trades, 10_000.0)
+
+    def test_missing_capital_apres_column_raises(self):
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        trades = pd.DataFrame({"resultat_net": [100.0]})
+        with pytest.raises(ValueError, match="capital_apres"):
+            _derive_fold_test_trade_returns_pct(trades, 10_000.0)
+
+    def test_incoherent_capital_trajectory_beyond_tolerance_raises(self):
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        trades = _fold_trades([{"resultat_net": 100.0, "capital_apres": 10_200.0}])
+        with pytest.raises(ValueError, match="[Ii]ncohérence"):
+            _derive_fold_test_trade_returns_pct(trades, 10_000.0)
+
+    def test_cent_rounding_discrepancy_within_tolerance_accepted(self):
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        trades = _fold_trades([{"resultat_net": 100.01, "capital_apres": 10_100.0}])
+        result = _derive_fold_test_trade_returns_pct(trades, 10_000.0)
+        assert result[0] == pytest.approx(1.0, abs=1e-3)
+
+    def test_chained_returns_reconstruct_serialized_capital_trajectory_exactly(self):
+        rows = [
+            {"resultat_net": 100.0, "capital_apres": 10_100.0},
+            {"resultat_net": -200.0, "capital_apres": 9_900.0},
+            {"resultat_net": 50.0, "capital_apres": 9_950.0},
+        ]
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        returns = _derive_fold_test_trade_returns_pct(_fold_trades(rows), 10_000.0)
+        rebuilt_capital = 10_000.0
+        for r in returns:
+            rebuilt_capital *= (1.0 + r / 100.0)
+        assert rebuilt_capital == pytest.approx(rows[-1]["capital_apres"])
+
+    def test_initial_capital_must_be_finite_and_positive(self):
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        trades = _fold_trades([{"resultat_net": 100.0, "capital_apres": 100.0}])
+        for bad in (0.0, -1.0, float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="initial_capital"):
+                _derive_fold_test_trade_returns_pct(trades, bad)
+
+    def test_survives_real_csv_round_trip_numpy_dtypes(self, tmp_path):
+        """oos_trades.csv est écrit/relu via pandas -- numpy.float64/int64 ne sont pas des
+        sous-classes de float/int Python ; une validation isinstance() stricte les rejetterait
+        à tort."""
+        from gate_v_campaign import _derive_fold_test_trade_returns_pct
+
+        rows = [
+            {"resultat_net": 100.0, "capital_apres": 10_100.0},
+            {"resultat_net": -50.0, "capital_apres": 10_050.0},
+        ]
+        path = tmp_path / "oos_trades.csv"
+        pd.DataFrame(rows).to_csv(path, index=False)
+        reloaded = pd.read_csv(path)
+        result = _derive_fold_test_trade_returns_pct(reloaded, 10_000.0)
+        assert result[0] == pytest.approx(1.0)
+        assert result[1] == pytest.approx((10_050.0 / 10_100.0 - 1.0) * 100.0)
+
+
+def _execute_base_config_stub():
+    return OptimizationConfig(
+        run_id="mc_stub", strategy_module="strategies.perfect_revolution_v1",
+        strategy_name="test", data_file="unused.csv", base_params={"lookback": 12},
+        param_ranges=[], mode="grid", score_weights=ScoreWeights(), filters=FilterConfig(),
+        train_test=TrainTestConfig(), global_params={}, n_workers=1,
+    )
+
+
+class TestInitialCapitalFromBaseConfig:
+    """ADR 0022 amendement : même clé/valeur par défaut que optimizer.py::_run_single()."""
+
+    def test_defaults_to_ten_thousand_matching_run_single(self):
+        from gate_v_campaign import _initial_capital_from_base_config
+
+        base_config = dataclasses.replace(_execute_base_config_stub(), global_params={})
+        assert _initial_capital_from_base_config(base_config) == 10_000.0
+
+    def test_uses_explicit_value_when_present(self):
+        from gate_v_campaign import _initial_capital_from_base_config
+
+        base_config = dataclasses.replace(
+            _execute_base_config_stub(), global_params={"initial_capital": 25_000.0},
+        )
+        assert _initial_capital_from_base_config(base_config) == 25_000.0
+
+    @pytest.mark.parametrize("bad", [0.0, -5.0, float("nan"), float("inf")])
+    def test_rejects_non_finite_or_non_positive(self, bad):
+        from gate_v_campaign import _initial_capital_from_base_config
+
+        base_config = dataclasses.replace(
+            _execute_base_config_stub(), global_params={"initial_capital": bad},
+        )
+        with pytest.raises(ValueError, match="initial_capital"):
+            _initial_capital_from_base_config(base_config)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AF-V-08 Slice 4, vague 2 — phase Monte-Carlo de execute_gate_v_campaign(), après une preuve
+# Walk-Forward complète et validée. Parameter Stability reste totalement hors scope : aucun test
+# ici ne l'appelle/l'importe/l'approche.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_MC_TRADES_BY_FOLD = {
+    "fold_000": [
+        {"resultat_net": 100.0, "capital_apres": 10_100.0},
+        {"resultat_net": -50.0, "capital_apres": 10_050.0},
+    ],
+    "fold_001": [
+        {"resultat_net": 200.0, "capital_apres": 10_200.0},
+    ],
+}
+
+_MC_TRADES_BY_FOLD_WITH_ONE_ZERO_TRADE_FOLD = {
+    "fold_000": [
+        {"resultat_net": 100.0, "capital_apres": 10_100.0},
+        {"resultat_net": -50.0, "capital_apres": 10_050.0},
+    ],
+    # fold_001 absent -> pd.DataFrame() sans colonnes, forme EXACTE d'engine.py pour un fold
+    # zero-trade (trades_df = pd.DataFrame(trades) if trades else pd.DataFrame()) -- déclenche
+    # réellement pandas.errors.EmptyDataError à la relecture CSV, jamais un DataFrame "0 ligne
+    # mais avec colonnes" qui contournerait ce cas précis.
+}
+
+
+class TestExecuteGateVCampaignMonteCarloPhase:
+    def test_fresh_walk_forward_run_continues_into_monte_carlo_in_same_call(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, run_calls = _execute_fake_run_with_trades(plan, split_plan, _MC_TRADES_BY_FOLD)
+
+        manifest = _execute(
+            plan, campaign_root, tmp_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        assert len(run_calls) == 1
+        wf_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD)
+        mc_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_MONTE_CARLO)
+        assert manifest.walk_forward_validation_run_id == wf_id
+        assert manifest.monte_carlo_validation_run_id == mc_id
+        assert manifest.status == "EVIDENCE_INCOMPLETE"  # Parameter Stability toujours absente
+        assert "PASS" not in manifest.status
+
+        mc_run_path = campaign_root / plan.campaign_id / "validations" / mc_id / "validation_run.json"
+        assert mc_run_path.is_file()
+        mc_run = load_validation_run(mc_run_path)
+        assert mc_run.validation_run_id == mc_id
+        assert mc_run.specification.source_validation_run_id == wf_id
+        assert mc_run.specification.source_trades_from_optimized_params is True
+        assert mc_run.evidence.n_input_trades == 3
+        assert mc_run.evidence.zero_trade_input is False
+        assert mc_run.evidence.execution_status == "completed"
+
+    def test_trades_concatenated_in_fold_order_never_train_candidates(self, tmp_path):
+        """Rendements attendus : fold_000 [1.0, -0.495...], fold_001 [2.0] -- jamais depuis
+        train_candidates.csv (jamais lu par cette phase)."""
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run_with_trades(plan, split_plan, _MC_TRADES_BY_FOLD)
+
+        manifest = _execute(
+            plan, campaign_root, tmp_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        mc_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_MONTE_CARLO)
+        mc_run_path = campaign_root / plan.campaign_id / "validations" / mc_id / "validation_run.json"
+        mc_run = load_validation_run(mc_run_path)
+        expected_r2 = (10_050.0 / 10_100.0 - 1.0) * 100.0
+        expected_net_ret = ((1.0 + 1.0 / 100.0) * (1.0 + expected_r2 / 100.0) * (1.0 + 2.0 / 100.0) - 1.0) * 100.0
+        assert mc_run.evidence.observed_net_ret_pct == pytest.approx(expected_net_ret)
+
+    def test_rejects_trade_outside_its_fold_test_window(self, tmp_path):
+        """ADR 0021 Décision 4 : un trade daté hors de la fenêtre TEST de SON fold est refusé --
+        c'est aussi le mécanisme de détection de duplication inter-fold (§7.5), les fenêtres TEST
+        ne se chevauchant jamais entre folds."""
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        foreign_row = {
+            "resultat_net": 100.0, "capital_apres": 10_100.0,
+            "date_entree": "1999-01-01T00:00:00+00:00",  # bien avant toute fenêtre TEST réelle
+        }
+        run_fn, _calls = _execute_fake_run_with_trades(
+            plan, split_plan, {"fold_000": [foreign_row]},
+        )
+
+        with pytest.raises(ValueError, match="fenêtre TEST|date_entree"):
+            _execute(
+                plan, campaign_root, tmp_path,
+                run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+            )
+
+    def test_rejects_missing_date_entree_column(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        definitions = compute_fold_definitions(
+            split_plan.validation, plan.walk_forward_specification, plan.readiness_spec,
+        )
+        selection = FoldSelection(
+            fold_id=definitions[0].fold_id, selected_params={"lookback": 12},
+            selected_params_hash="synthetic_hash", score_train=1.0, rank_in_train=1,
+            train_candidates_evaluated=2, train_candidates_unique=2, train_candidates_eligible=2,
+            search_space_hash=plan.search_space_hash, algorithm=plan.search_mode, fold_seed=None,
+        )
+        results = [FoldResult(
+            fold_id=d.fold_id, definition=d, selection=dataclasses.replace(selection, fold_id=d.fold_id),
+            n_trades=(1 if d.fold_id == definitions[0].fold_id else 0),
+            net_ret_pct=0.0, max_dd_pct=None, profit_factor=None, win_rate=None, expectancy=None,
+            score_test=0.0, zero_trade_oos=(d.fold_id != definitions[0].fold_id),
+            forced_closes=0, coverage_bars=1,
+        ) for d in definitions]
+        artifacts = [FoldArtifacts(
+            fold_id=d.fold_id,
+            train_candidates=[{
+                "params": {"lookback": 12}, "score": 1.0, "stats": {"n_trades": 0},
+                "filtered": False, "filter_reason": None,
+            }],
+            # Colonne date_entree délibérément absente, contrairement au schéma réel engine.py.
+            test_trades=(
+                pd.DataFrame({"resultat_net": [100.0], "capital_apres": [10_100.0]})
+                if d.fold_id == definitions[0].fold_id else pd.DataFrame()
+            ),
+            test_equity=pd.DataFrame({"capital": [10_000.0]}),
+        ) for d in definitions]
+
+        def run_fn(validation_zone, spec, readiness_spec, base_config, df, *,
+                   data_manifest_path, output_dir, progress_cb=None, stop_flag_fn=None,
+                   validation_run_id):
+            outcome = WalkForwardRunOutcome(fold_results=tuple(results), stopped_early=False)
+            return WalkForwardCapturedRunV1(
+                outcome=outcome, fold_artifacts=tuple(artifacts),
+                validation_run_id=validation_run_id, aggregate=build_aggregate_result(results),
+            )
+
+        with pytest.raises(ValueError, match="date_entree"):
+            _execute(
+                plan, campaign_root, tmp_path,
+                run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+            )
+
+    def test_one_zero_trade_fold_among_others_hits_empty_csv_read_path(self, tmp_path):
+        """Reproduit la forme EXACTE d'un oos_trades.csv réellement écrit par engine.py pour un
+        fold zéro-trade (pandas.errors.EmptyDataError à la relecture) -- jamais la forme "0 ligne
+        mais colonnes définies" utilisée par la fixture Slice 3 pour un autre usage."""
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run_with_trades(
+            plan, split_plan, _MC_TRADES_BY_FOLD_WITH_ONE_ZERO_TRADE_FOLD,
+        )
+
+        manifest = _execute(
+            plan, campaign_root, tmp_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        mc_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_MONTE_CARLO)
+        mc_run_path = campaign_root / plan.campaign_id / "validations" / mc_id / "validation_run.json"
+        mc_run = load_validation_run(mc_run_path)
+        assert mc_run.evidence.n_input_trades == 2  # seulement fold_000, fold_001 contribue 0
+        assert mc_run.evidence.zero_trade_input is False
+
+    def test_global_zero_trades_still_executes_monte_carlo(self, tmp_path):
+        """ADR 0022 Décision 7 : zéro trade global reste un cas valide, jamais une exception."""
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run(plan, split_plan)  # fixture Slice 3 : folds zéro-trade
+
+        manifest = _execute(
+            plan, campaign_root, tmp_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        assert manifest.monte_carlo_validation_run_id is not None
+        mc_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_MONTE_CARLO)
+        mc_run_path = campaign_root / plan.campaign_id / "validations" / mc_id / "validation_run.json"
+        mc_run = load_validation_run(mc_run_path)
+        assert mc_run.evidence.zero_trade_input is True
+        assert mc_run.evidence.n_input_trades == 0
+        assert mc_run.evidence.observed_net_ret_pct is None
+
+    def test_persists_monte_carlo_exactly_once(self, tmp_path, monkeypatch):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run_with_trades(plan, split_plan, _MC_TRADES_BY_FOLD)
+        import monte_carlo
+        real_run = monte_carlo.run_monte_carlo_simulation
+        calls = []
+
+        def spy(*args, **kwargs):
+            calls.append(1)
+            return real_run(*args, **kwargs)
+        monkeypatch.setattr(gate_v_campaign, "run_monte_carlo_simulation", spy)
+
+        _execute(
+            plan, campaign_root, tmp_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        assert len(calls) == 1
+
+    def test_monte_carlo_already_attached_is_idempotent_no_recompute(self, tmp_path, monkeypatch):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run_with_trades(plan, split_plan, _MC_TRADES_BY_FOLD)
+        data_manifest_path = _execute_data_manifest(tmp_path)
+        first = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+        assert first.monte_carlo_validation_run_id is not None
+
+        monkeypatch.setattr(
+            gate_v_campaign, "run_monte_carlo_simulation",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("run_monte_carlo_simulation ne devait jamais être rappelée")
+            ),
+        )
+        second = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+        assert second == first
+
+    def test_reconciles_monte_carlo_already_persisted_without_recompute(self, tmp_path, monkeypatch):
+        """Crash APRES save_validation_run() MC, AVANT mise à jour du manifeste (le risque
+        principal de cette slice)."""
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run_with_trades(plan, split_plan, _MC_TRADES_BY_FOLD)
+        data_manifest_path = _execute_data_manifest(tmp_path)
+        completed = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+        assert completed.monte_carlo_validation_run_id is not None
+
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        record["monte_carlo_validation_run_id"] = None
+        record["status"] = "RUNNING"
+        record["running"] = True
+        manifest_path.write_text(json.dumps(record), encoding="utf-8")
+
+        monkeypatch.setattr(
+            gate_v_campaign, "run_monte_carlo_simulation",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("run_monte_carlo_simulation ne devait jamais être rappelée")
+            ),
+        )
+        reconciled = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+        assert reconciled.monte_carlo_validation_run_id == completed.monte_carlo_validation_run_id
+
+    def test_refused_when_walk_forward_proof_missing_from_disk(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run_with_trades(plan, split_plan, _MC_TRADES_BY_FOLD)
+        data_manifest_path = _execute_data_manifest(tmp_path)
+        _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        wf_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD)
+        campaign_dir = campaign_root / plan.campaign_id
+        (campaign_dir / "validations" / wf_id / "validation_run.json").unlink()
+        manifest_path = campaign_dir / "manifest.json"
+        record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        record["monte_carlo_validation_run_id"] = None
+        record["status"] = "RUNNING"
+        record["running"] = True
+        manifest_path.write_text(json.dumps(record), encoding="utf-8")
+
+        # Le manifeste lui-même redevient illisible dès qu'une preuve qu'il référence disparaît
+        # (garde Slice 2, `load_gate_v_campaign_manifest`/`_load_manifest_proofs`) -- fail-closed
+        # atteint avant même la précondition Monte-Carlo spécifique à cette slice.
+        with pytest.raises(ValueError, match="ValidationRun|preuve"):
+            _execute(
+                plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+                run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+            )
+
+    def test_refused_when_walk_forward_proof_incoherent_with_plan(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run_with_trades(plan, split_plan, _MC_TRADES_BY_FOLD)
+        data_manifest_path = _execute_data_manifest(tmp_path)
+        _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        wf_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD)
+        campaign_dir = campaign_root / plan.campaign_id
+        wf_path = campaign_dir / "validations" / wf_id / "validation_run.json"
+        record = json.loads(wf_path.read_text(encoding="utf-8"))
+        record["dataset_snapshot_id"] = "foreign_snapshot"
+        wf_path.write_text(json.dumps(record), encoding="utf-8")
+        manifest_path = campaign_dir / "manifest.json"
+        manifest_record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_record["monte_carlo_validation_run_id"] = None
+        manifest_record["status"] = "RUNNING"
+        manifest_record["running"] = True
+        manifest_path.write_text(json.dumps(manifest_record), encoding="utf-8")
+
+        with pytest.raises(ValueError):
+            _execute(
+                plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+                run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+            )
+
+    def test_persists_running_manifest_before_costly_monte_carlo_call(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run_with_trades(plan, split_plan, _MC_TRADES_BY_FOLD)
+        data_manifest_path = _execute_data_manifest(tmp_path)
+        _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+        mc_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_MONTE_CARLO)
+        mc_dir = campaign_root / plan.campaign_id / "validations" / mc_id
+        shutil.rmtree(mc_dir)  # force un calcul FRAIS, jamais la réconciliation
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        record["monte_carlo_validation_run_id"] = None
+        record["status"] = "RUNNING"
+        record["running"] = True
+        manifest_path.write_text(json.dumps(record), encoding="utf-8")
+
+        observed = {}
+        import monte_carlo
+        real_run = monte_carlo.run_monte_carlo_simulation
+
+        def spying_run(*args, **kwargs):
+            reloaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            observed["status"] = reloaded["status"]
+            observed["running"] = reloaded["running"]
+            return real_run(*args, **kwargs)
+
+        import gate_v_campaign as gvc
+        old = gvc.run_monte_carlo_simulation
+        gvc.run_monte_carlo_simulation = spying_run
+        try:
+            _execute(
+                plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+                run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+            )
+        finally:
+            gvc.run_monte_carlo_simulation = old
+
+        assert observed == {"status": "RUNNING", "running": True}
+
+    def test_technical_exception_during_monte_carlo_propagates_without_fabricated_evidence(
+        self, tmp_path, monkeypatch,
+    ):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run_with_trades(plan, split_plan, _MC_TRADES_BY_FOLD)
+        data_manifest_path = _execute_data_manifest(tmp_path)
+        _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+        mc_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_MONTE_CARLO)
+        mc_dir = campaign_root / plan.campaign_id / "validations" / mc_id
+        shutil.rmtree(mc_dir)  # force un calcul FRAIS, jamais la réconciliation
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        record["monte_carlo_validation_run_id"] = None
+        record["status"] = "RUNNING"
+        record["running"] = True
+        manifest_path.write_text(json.dumps(record), encoding="utf-8")
+
+        def failing_run(*args, **kwargs):
+            raise RuntimeError("synthetic monte-carlo crash")
+        monkeypatch.setattr(gate_v_campaign, "run_monte_carlo_simulation", failing_run)
+
+        with pytest.raises(RuntimeError, match="synthetic monte-carlo crash"):
+            _execute(
+                plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+                run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+            )
+
+        from gate_v_campaign import load_gate_v_campaign_manifest
+        plan_reload = plan
+        reloaded = load_gate_v_campaign_manifest(manifest_path, plan_reload)
+        assert reloaded.status == "RUNNING"
+        assert reloaded.monte_carlo_validation_run_id is None
+        assert reloaded.status != "TECHNICAL_FAILURE"
+
+    def test_never_references_parameter_stability(self):
+        source = inspect.getsource(gate_v_campaign.execute_gate_v_campaign)
+        assert "analyze_parameter_stability" not in source
+        assert "ParameterStabilitySpecification" not in source
+        assert "parameter_stability_validation_run_ids_by_fold" not in source
+
+    def test_one_monte_carlo_validation_run_per_campaign(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run_with_trades(plan, split_plan, _MC_TRADES_BY_FOLD)
+        _execute(
+            plan, campaign_root, tmp_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+        validations_dir = campaign_root / plan.campaign_id / "validations"
+        mc_dirs = [
+            p for p in validations_dir.iterdir()
+            if p.is_dir() and VALIDATION_TYPE_MONTE_CARLO in p.name
+        ]
+        assert len(mc_dirs) == 1

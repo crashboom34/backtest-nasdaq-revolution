@@ -260,6 +260,22 @@ Assemble la `ValidationRun` Walk-Forward via `build_walk_forward_validation_run(
   `run_monte_carlo_simulation()` (EXISTANT), puis une `ValidationRun` Monte-Carlo — **UNE SEULE**
   pour toute la campagne (jamais une par fold, cohérent avec ADR 0022 Décision 1).
 
+**Amendement AF-V-08 du 2026-09-27 — mapping exact `oos_trades.csv` -> `Tuple[float, ...]` (Human
+Gate, précise le mapping ci-dessus, ne le contredit pas)** : `execute_gate_v_campaign()` (1) lit
+`folds/<fold_id>/oos_trades.csv` de CHAQUE fold de `expected_fold_ids`, dans cet ordre ; (2) dérive
+le rendement % de chaque trade depuis la trajectoire de capital réellement persistée
+(`trade_return_pct_i = (capital_apres_i / capital_before_i - 1.0) * 100`, capital réinitialisé à
+`base_config.global_params.get("initial_capital", 10_000.0)` au premier trade de CHAQUE fold —
+ADR 0022 amendement AF-V-08 du 2026-09-27, correction de la Décision 1 de cette même ADR qui
+supposait à tort un `net_ret_pct` déjà persisté par trade) ; (3) vérifie `resultat_net` comme
+INVARIANT D'AUDIT de cette trajectoire (`capital_apres ≈ capital_before + resultat_net`, tolérance
+`0,015` unité monétaire — trois quantités indépendamment arrondies au centime, ADR 0022 même
+amendement), divergence -> `ValueError` avant tout calcul ; (4) transmet UNIQUEMENT le
+`Tuple[float, ...]` résultant à `run_monte_carlo_simulation()` — `monte_carlo.py` reste un leaf pur,
+sans connaissance de `capital_apres`/`resultat_net`/du fold source. Cette dérivation vit
+ENTIÈREMENT dans `gate_v_campaign.py` — `engine.py`/`walk_forward.py` restent inchangés, aucune
+version de contrat Walk-Forward n'est modifiée par cet amendement.
+
 **Drapeaux de circularité — jamais laissés implicites (correctif BLOCKER, revue scientifique)** :
 `build_monte_carlo_specification()`/`build_parameter_stability_specification()` exigent tous deux
 `source_trades_from_optimized_params`/`source_candidates_from_optimized_search` comme paramètres
@@ -515,19 +531,20 @@ identifie déjà sans ambiguïté le run Walk-Forward source complet.
 
 ## Conséquences
 
-- **État réel d'implémentation (mis à jour AF-V-08 Slice 3, corrige une affirmation devenue
-  fausse)** : Slice 1 (`build_gate_v_campaign_plan()`) et Slice 2 (`GateVCampaignManifest`/
-  `derive_gate_v_campaign_status()`) sont IMPLEMENTED + TESTED + PUSHED sur `codex/af-v-08`
-  (commits `ee3f7b8`/`6d8cd29`). L'API additive Walk-Forward captured artifacts V1
+- **État réel d'implémentation (mis à jour AF-V-08 Slice 4, corrige une affirmation devenue
+  fausse)** : Slice 1 (`build_gate_v_campaign_plan()`), Slice 2 (`GateVCampaignManifest`/
+  `derive_gate_v_campaign_status()`) et Slice 3 (`execute_gate_v_campaign()`, phase Walk-Forward)
+  sont IMPLEMENTED + TESTED + PUSHED sur `codex/af-v-08` (commits `ee3f7b8`/`6d8cd29`/`a5f16d5`).
+  L'API additive Walk-Forward captured artifacts V1
   (`run_walk_forward_with_artifacts_v1()`/`resume_walk_forward_with_artifacts_v1()`, ADR 0021
-  amendement) est également IMPLEMENTED + TESTED + PUSHED (commit `7958e29`). Slice 3
-  (`execute_gate_v_campaign()`, phase Walk-Forward uniquement) est en cours dans cette mission.
-  Slices 4 à 6 (Monte-Carlo, Parameter Stability, intégration bout-en-bout) restent NON commencées.
-  **`GATE V` reste NON PASSÉE** — aucune de ces tranches ne produit ni ne peut produire un verdict
-  `PASS`/Champion (Décision 15).
+  amendement) est également IMPLEMENTED + TESTED + PUSHED (commit `7958e29`). Slice 4 (phase
+  Monte-Carlo) est en cours dans cette mission. Slices 5-6 (Parameter Stability, intégration
+  bout-en-bout) restent NON commencées. **`GATE V` reste NON PASSÉE** — aucune de ces tranches ne
+  produit ni ne peut produire un verdict `PASS`/Champion (Décision 15).
 - **`gate_v_campaign.py`** existe et contient à ce stade : Niveau A complet (Slice 1), le contrat
-  `GateVCampaignManifest` et le calcul pur de statut (Slice 2), et le squelette Niveau B limité à
-  la phase Walk-Forward (Slice 3) — implémentation des tranches suivantes toujours en attente.
+  `GateVCampaignManifest` et le calcul pur de statut (Slice 2), le squelette Niveau B pour la phase
+  Walk-Forward (Slice 3), et son extension Monte-Carlo (Slice 4, cette mission) — implémentation
+  des tranches suivantes toujours en attente.
 - **Dépendance explicite sur `AF-V-07`** (`ValidationPolicyVersion`) pour que `GATE V` passe
   RÉELLEMENT un jour — non bloquante pour CETTE ADR (`EVIDENCE_COMPLETE_AWAITING_POLICY` reste un
   état factuel valide et utile sans elle), mais nécessaire pour aller au-delà.

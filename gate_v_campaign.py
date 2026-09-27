@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Mapping, Optional, Tuple, Union
 
+import pandas as pd
+
 from atomic_json_store import (
     load_json_tolerant, save_atomic, save_atomic_overwrite, validate_portable_identifier,
 )
@@ -26,6 +28,7 @@ from dataset_split import (
     assert_oos_window_matches_split, dataset_split_plan_fingerprint, load_dataset_split_plan,
 )
 from strategy_contracts import DailyStateReadiness
+from monte_carlo import run_monte_carlo_simulation
 from validation_run import (
     MONTE_CARLO_SEMANTICS_VERSION,
     PARAMETER_STABILITY_SEMANTICS_VERSION,
@@ -44,6 +47,7 @@ from validation_run import (
     ParameterStabilitySpecification,
     build_monte_carlo_specification,
     build_parameter_stability_specification,
+    build_validation_run,
     ValidationRun,
     WalkForwardEvidence,
     WalkForwardRunOutcome,
@@ -728,6 +732,61 @@ def _parameter_stability_quality(
     return True
 
 
+def _monte_carlo_complete(
+    plan: GateVCampaignPlan, wf: Optional[ValidationRun], mc: ValidationRun,
+) -> bool:
+    """Extrait de `derive_gate_v_campaign_status()` (Slice 2, comportement inchangé — pur
+    extract-method) pour être réutilisable comme garde de pré-persistance par
+    `execute_gate_v_campaign()` (Slice 4) avant d'écrire une `ValidationRun` Monte-Carlo
+    immuable — jamais réimplémentée séparément."""
+    if not isinstance(mc.specification, MonteCarloSpecification) or not isinstance(mc.evidence, MonteCarloEvidence):
+        raise ValueError("Preuve Monte-Carlo de type incohérent.")
+    if mc.specification != build_monte_carlo_specification(
+        gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD), True,
+    ):
+        raise ValueError("Provenance Monte-Carlo étrangère à la campagne Walk-Forward.")
+    if wf is not None and wf.evidence.aggregate is not None:
+        expected_trades = _evidence_field(wf.evidence.aggregate, "total_oos_trades")
+        if (mc.evidence.n_input_trades != expected_trades
+                or mc.evidence.zero_trade_input != (expected_trades == 0)):
+            raise ValueError("Le compte des trades Monte-Carlo diffère du Walk-Forward.")
+    if mc.evidence.zero_trade_input and any(
+        getattr(mc.evidence, field_name) is not None for field_name in (
+            "observed_net_ret_pct", "observed_max_dd_trade_close_basis_pct",
+            "observed_lag1_autocorrelation", "observed_longest_losing_streak",
+            "sequence_risk_max_dd_trade_close_basis_pct",
+            "sequence_risk_longest_losing_streak",
+            "sampling_uncertainty_net_ret_pct",
+            "sampling_uncertainty_max_dd_trade_close_basis_pct",
+        )
+    ):
+        raise ValueError("Monte-Carlo à zéro trade ne peut contenir de métrique inventée.")
+    mc_complete = mc.evidence.execution_status == "completed"
+    if not mc.evidence.zero_trade_input:
+        observed = (
+            mc.evidence.observed_net_ret_pct,
+            mc.evidence.observed_max_dd_trade_close_basis_pct,
+        )
+        distributions = (
+            mc.evidence.sequence_risk_max_dd_trade_close_basis_pct,
+            mc.evidence.sequence_risk_longest_losing_streak,
+            mc.evidence.sampling_uncertainty_net_ret_pct,
+            mc.evidence.sampling_uncertainty_max_dd_trade_close_basis_pct,
+        )
+        mc_complete = mc_complete and (
+            mc.evidence.n_input_trades > 0
+            and all(isinstance(value, (int, float)) and math.isfinite(value) for value in observed)
+            and isinstance(mc.evidence.observed_longest_losing_streak, int)
+            and mc.evidence.observed_longest_losing_streak >= 0
+            and all(summary is not None and all(
+                isinstance(_evidence_field(summary, percentile), (int, float))
+                and math.isfinite(_evidence_field(summary, percentile))
+                for percentile in ("p5", "p25", "p50", "p75", "p95")
+            ) for summary in distributions)
+        )
+    return mc_complete
+
+
 def derive_gate_v_campaign_status(
     plan: GateVCampaignPlan, manifest: GateVCampaignManifest,
     evidence_by_validation_run_id: Mapping[str, ValidationRun],
@@ -753,53 +812,7 @@ def derive_gate_v_campaign_status(
         if hashlib.sha256(payload.encode("utf-8")).hexdigest() != plan.oos_evidence_hash:
             raise ValueError("La preuve OOS ne correspond plus à l'empreinte du plan de campagne.")
     wf_complete = _walk_forward_complete(plan, wf) if wf is not None else False
-    mc_complete = False
-    if mc is not None:
-        if not isinstance(mc.specification, MonteCarloSpecification) or not isinstance(mc.evidence, MonteCarloEvidence):
-            raise ValueError("Preuve Monte-Carlo de type incohérent.")
-        if mc.specification != build_monte_carlo_specification(
-            gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD), True,
-        ):
-            raise ValueError("Provenance Monte-Carlo étrangère à la campagne Walk-Forward.")
-        if wf is not None and wf.evidence.aggregate is not None:
-            expected_trades = _evidence_field(wf.evidence.aggregate, "total_oos_trades")
-            if (mc.evidence.n_input_trades != expected_trades
-                    or mc.evidence.zero_trade_input != (expected_trades == 0)):
-                raise ValueError("Le compte des trades Monte-Carlo diffère du Walk-Forward.")
-        if mc.evidence.zero_trade_input and any(
-            getattr(mc.evidence, field_name) is not None for field_name in (
-                "observed_net_ret_pct", "observed_max_dd_trade_close_basis_pct",
-                "observed_lag1_autocorrelation", "observed_longest_losing_streak",
-                "sequence_risk_max_dd_trade_close_basis_pct",
-                "sequence_risk_longest_losing_streak",
-                "sampling_uncertainty_net_ret_pct",
-                "sampling_uncertainty_max_dd_trade_close_basis_pct",
-            )
-        ):
-            raise ValueError("Monte-Carlo à zéro trade ne peut contenir de métrique inventée.")
-        mc_complete = mc.evidence.execution_status == "completed"
-        if not mc.evidence.zero_trade_input:
-            observed = (
-                mc.evidence.observed_net_ret_pct,
-                mc.evidence.observed_max_dd_trade_close_basis_pct,
-            )
-            distributions = (
-                mc.evidence.sequence_risk_max_dd_trade_close_basis_pct,
-                mc.evidence.sequence_risk_longest_losing_streak,
-                mc.evidence.sampling_uncertainty_net_ret_pct,
-                mc.evidence.sampling_uncertainty_max_dd_trade_close_basis_pct,
-            )
-            mc_complete = mc_complete and (
-                mc.evidence.n_input_trades > 0
-                and all(isinstance(value, (int, float)) and math.isfinite(value) for value in observed)
-                and isinstance(mc.evidence.observed_longest_losing_streak, int)
-                and mc.evidence.observed_longest_losing_streak >= 0
-                and all(summary is not None and all(
-                    isinstance(_evidence_field(summary, percentile), (int, float))
-                    and math.isfinite(_evidence_field(summary, percentile))
-                    for percentile in ("p5", "p25", "p50", "p75", "p95")
-                ) for summary in distributions)
-            )
+    mc_complete = _monte_carlo_complete(plan, wf, mc) if mc is not None else False
     ps_complete = set(manifest.parameter_stability_validation_run_ids_by_fold) == set(plan.expected_fold_ids)
     source_folds = {
         _evidence_field(fold, "fold_id"): fold for fold in wf.evidence.fold_results
@@ -957,6 +970,7 @@ _WALK_FORWARD_MANIFEST_FILENAME = "manifest.json"
 _WALK_FORWARD_AGGREGATE_FILENAME = "aggregate.json"
 _WALK_FORWARD_FOLDS_DIRNAME = "folds"
 _WALK_FORWARD_TEST_RESULT_FILENAME = "test_result.json"
+_WALK_FORWARD_OOS_TRADES_FILENAME = "oos_trades.csv"
 _VALIDATIONS_DIRNAME = "validations"
 _VALIDATION_RUN_FILENAME = "validation_run.json"
 
@@ -1034,89 +1048,16 @@ def _validate_captured_run(
         )
 
 
-def execute_gate_v_campaign(
-    plan: GateVCampaignPlan,
-    *,
-    campaign_root: Union[str, Path],
-    base_config,
-    data_manifest_path: Union[str, Path],
-    load_market_data_fn,
-    run_walk_forward_fn,
-    resume_walk_forward_fn,
-    progress_cb=None,
-    stop_flag_fn=None,
+def _run_walk_forward_phase(
+    plan: GateVCampaignPlan, campaign_root: Union[str, Path], campaign_dir: Path,
+    manifest: GateVCampaignManifest, split_plan, base_config, data_manifest_path,
+    load_market_data_fn, run_walk_forward_fn, resume_walk_forward_fn, progress_cb, stop_flag_fn,
 ) -> GateVCampaignManifest:
-    """AF-V-08 Slice 3 — squelette Niveau B, PHASE WALK-FORWARD UNIQUEMENT (ADR 0024 Décision 5).
-
-    `run_walk_forward_fn`/`resume_walk_forward_fn`/`load_market_data_fn` sont INJECTÉS,
-    keyword-only, SANS valeur par défaut — jamais importés ici (un appelant réel passe
-    `walk_forward.run_walk_forward_with_artifacts_v1`/`resume_walk_forward_with_artifacts_v1` et
-    un vrai chargeur des données de marché réelles). `run_walk_forward_fn`/`resume_walk_forward_fn` sont
-    appelés avec la signature réelle de ces deux fonctions (positionnels
-    `validation_zone, spec, readiness_spec, base_config, df`, puis les mots-clés
-    `data_manifest_path, output_dir, progress_cb, stop_flag_fn, validation_run_id`).
-
-    Choix run/resume/déjà-persisté (Décision 6/8, jamais réimplémenté par l'appelant) :
-    `.../walk_forward/aggregate.json` présent -> relecture directe, aucun appel ; sinon
-    `.../walk_forward/.gate_v_checkpoints_v1/manifest.json` présent -> `resume_walk_forward_fn` ;
-    sinon -> `run_walk_forward_fn`. `persist_walk_forward_run()` n'est rappelée QUE si
-    `aggregate.json` était absent au départ, et au plus une fois.
-
-    Monte-Carlo/Parameter Stability : jamais appelés ici (hors scope de cette tranche) — le
-    statut final ne peut donc être `EVIDENCE_COMPLETE_AWAITING_POLICY` que si ces preuves
-    existent déjà sur disque, produites par une exécution antérieure distincte."""
-    if not isinstance(plan, GateVCampaignPlan) or plan != _rebuild_plan(plan):
-        raise ValueError("plan doit être un GateVCampaignPlan validé, non forgé.")
-    for name, collaborator in (
-        ("run_walk_forward_fn", run_walk_forward_fn),
-        ("resume_walk_forward_fn", resume_walk_forward_fn),
-        ("load_market_data_fn", load_market_data_fn),
-    ):
-        if collaborator is None or not callable(collaborator):
-            raise ValueError(f"{name} est obligatoire et doit être un collaborateur injecté callable.")
-    if (
-        getattr(base_config, "base_params", None) != plan.base_params
-        or getattr(base_config, "mode", None) != plan.search_mode
-    ):
-        raise ValueError(
-            "base_config.base_params/mode divergent du plan de campagne — refusé avant tout "
-            "appel coûteux. search_space_hash/budget_per_fold restent vérifiés a posteriori sur "
-            "les faits réellement produits par _walk_forward_complete() (ADR 0024 Décision 13), "
-            "jamais devinés depuis un champ de base_config qui ne les porte pas (ADR 0024 "
-            "Décision 5 : aucun paramètre déduit silencieusement)."
-        )
-
-    campaign_dir = Path(campaign_root) / plan.campaign_id
-    if load_json_tolerant(campaign_dir / "plan.json") != _plan_record(plan):
-        raise ValueError("plan.json validé doit être persisté avant toute exécution.")
-    split_plan = load_dataset_split_plan(plan.split_plan_path, strict=True)
-    if (
-        split_plan is None or split_plan.split_plan_id != plan.split_plan_id
-        or split_plan.dataset_snapshot_id != plan.dataset_snapshot_id
-        or split_plan.validation is None
-    ):
-        raise ValueError("split_plan_path ne correspond plus au plan de campagne persisté.")
-    fold_definitions = compute_fold_definitions(
-        split_plan.validation, plan.walk_forward_specification, plan.readiness_spec,
-    )
-    if (
-        tuple(fold.fold_id for fold in fold_definitions) != plan.expected_fold_ids
-        or _fold_definitions_hash(fold_definitions) != plan.expected_fold_definitions_hash
-    ):
-        raise ValueError("Les folds recalculés divergent du plan de campagne persisté.")
-
-    manifest_path = campaign_dir / "manifest.json"
-    manifest = load_gate_v_campaign_manifest(manifest_path, plan)
-    if manifest is None:
-        manifest = build_gate_v_campaign_manifest(plan)
-    if manifest.walk_forward_validation_run_id is not None:
-        return manifest  # Déjà rattachée — idempotent, aucune référence n'est remplacée.
-    if manifest.technical_failure_reason is not None:
-        raise ValueError(
-            f"Campagne {plan.campaign_id!r} déjà marquée TECHNICAL_FAILURE — reprise manuelle "
-            "requise, jamais un nouvel essai automatique."
-        )
-
+    """AF-V-08 Slice 3 — phase Walk-Forward (ADR 0024 Décision 5/6/8, comportement inchangé,
+    extraite telle quelle de `execute_gate_v_campaign()` pour la Slice 4). Retourne soit un
+    manifeste avec `walk_forward_validation_run_id` attaché, soit un manifeste EN PAUSE
+    (`stopped_early`, `walk_forward_validation_run_id` toujours `None`) — l'appelant ne tente
+    JAMAIS Monte-Carlo tant que ce second cas se produit."""
     running_manifest = dataclasses.replace(
         manifest, execution_started=True, running=True, status="RUNNING",
     )
@@ -1192,3 +1133,366 @@ def execute_gate_v_campaign(
         evidence_paths_by_validation_run_id=evidence_paths,
     )
     return final_manifest
+
+
+def _load_complete_walk_forward_run(
+    plan: GateVCampaignPlan, manifest: GateVCampaignManifest, campaign_dir: Path,
+) -> ValidationRun:
+    """Précondition absolue Monte-Carlo (ADR 0024 §3, amendement AF-V-08) : recharge et
+    revalide strictement la ValidationRun Walk-Forward de CETTE campagne — jamais une preuve
+    partielle/étrangère/incohérente. Réutilise `_validate_scoped_run()`/`_walk_forward_complete()`
+    (Slice 2), jamais réimplémentés."""
+    wf_id = manifest.walk_forward_validation_run_id
+    if wf_id is None:
+        raise ValueError(
+            "Aucune preuve Walk-Forward rattachée à cette campagne — Monte-Carlo refusé "
+            "(ADR 0024 §3)."
+        )
+    wf_path = campaign_dir / _VALIDATIONS_DIRNAME / wf_id / _VALIDATION_RUN_FILENAME
+    wf_run = load_validation_run(wf_path)
+    if wf_run is None:
+        raise ValueError(
+            f"ValidationRun Walk-Forward {wf_id!r} absente ou illisible à {wf_path} — "
+            "Monte-Carlo refusé (ADR 0024 §3)."
+        )
+    validated = _validate_scoped_run(plan, wf_id, VALIDATION_TYPE_WALK_FORWARD, {wf_id: wf_run})
+    if validated is None or not _walk_forward_complete(plan, validated):
+        raise ValueError(
+            f"ValidationRun Walk-Forward {wf_id!r} incomplète, étrangère ou incohérente avec "
+            "cette campagne — Monte-Carlo refusé (ADR 0024 §3)."
+        )
+    return validated
+
+
+def _validate_trades_within_fold_test_window(
+    fold_id: str, definition, fold_trades: "pd.DataFrame",
+) -> None:
+    """ADR 0021 Décision 4 : chaque trade TEST appartient à `[effective_boundary,
+    effective_test_end)` de SON fold — les fenêtres TEST ne se chevauchant JAMAIS entre folds
+    (même Décision, code gelé, jamais revérifié ici), cette borne PAR FOLD suffit à exclure toute
+    duplication inter-fold sans identité de trade forte (`oos_trades.csv` ne porte aucune colonne
+    d'identifiant, `net_ret_pct` seul n'identifie jamais un trade — deux trades distincts peuvent
+    légitimement avoir le même rendement)."""
+    if fold_trades.empty:
+        return
+    if "date_entree" not in fold_trades.columns:
+        raise ValueError(f"Fold {fold_id!r} : colonne date_entree absente des trades TEST.")
+    effective_boundary = _evidence_field(definition, "effective_boundary")
+    effective_test_end = _evidence_field(definition, "effective_test_end")
+    boundary = datetime.fromisoformat(effective_boundary)
+    test_end = datetime.fromisoformat(effective_test_end)
+    for index, raw in enumerate(fold_trades["date_entree"]):
+        if raw is None or (isinstance(raw, float) and math.isnan(raw)):
+            raise ValueError(f"Fold {fold_id!r}, trade {index} : date_entree absente.")
+        try:
+            entry = datetime.fromisoformat(str(raw))
+        except ValueError as exc:
+            raise ValueError(
+                f"Fold {fold_id!r}, trade {index} : date_entree={raw!r} illisible."
+            ) from exc
+        if not (boundary <= entry < test_end):
+            raise ValueError(
+                f"Fold {fold_id!r}, trade {index} : date_entree={raw!r} hors de la fenêtre TEST "
+                f"[{effective_boundary}, {effective_test_end}) — trade étranger à ce fold, ou "
+                "dupliqué depuis un autre fold, refusé."
+            )
+
+
+def _assemble_monte_carlo_trades(
+    plan: GateVCampaignPlan, wf_run: ValidationRun, wf_output_dir: Path, initial_capital: float,
+) -> Tuple[float, ...]:
+    """Consomme UNIQUEMENT les trades TEST persistés (`folds/<fold_id>/oos_trades.csv`, jamais
+    `train_candidates.csv`), dans l'ordre `plan.expected_fold_ids` (ordre chronologique garanti
+    par `compute_fold_definitions()`, ADR 0021) — chaque trade conservé exactement une fois,
+    vérifié contre les comptes déjà persistés dans la preuve Walk-Forward (ADR 0024 Décision 6,
+    amendement AF-V-08) ET contre la fenêtre TEST de son propre fold. Un fold zéro-trade produit
+    un `oos_trades.csv` réellement vide (`engine.py::run_backtest()` -> `pd.DataFrame()` sans
+    colonnes) — `pandas.errors.EmptyDataError` à la relecture est donc un état ATTENDU pour ce cas
+    précis, jamais une erreur technique."""
+    fold_results_by_id = {
+        _evidence_field(fold, "fold_id"): fold for fold in wf_run.evidence.fold_results
+    }
+    all_returns = []
+    for fold_id in plan.expected_fold_ids:
+        fold_result = fold_results_by_id.get(fold_id)
+        if fold_result is None:
+            raise ValueError(f"Fold {fold_id!r} absent de la preuve Walk-Forward — Monte-Carlo refusé.")
+        path = (
+            wf_output_dir / _WALK_FORWARD_FOLDS_DIRNAME / fold_id / _WALK_FORWARD_OOS_TRADES_FILENAME
+        )
+        if not path.is_file():
+            raise ValueError(f"{path} absent — trades TEST introuvables pour {fold_id!r}.")
+        try:
+            fold_trades = pd.read_csv(path)
+        except pd.errors.EmptyDataError:
+            fold_trades = pd.DataFrame()
+        _validate_trades_within_fold_test_window(
+            fold_id, _evidence_field(fold_result, "definition"), fold_trades,
+        )
+        fold_returns = _derive_fold_test_trade_returns_pct(fold_trades, initial_capital)
+        expected_n = _evidence_field(fold_result, "n_trades")
+        if len(fold_returns) != expected_n:
+            raise ValueError(
+                f"Fold {fold_id!r} : {len(fold_returns)} trade(s) TEST lu(s) depuis {path} != "
+                f"{expected_n} attendu(s) (FoldResult.n_trades)."
+            )
+        all_returns.extend(fold_returns)
+    expected_total = _evidence_field(wf_run.evidence.aggregate, "total_oos_trades")
+    if len(all_returns) != expected_total:
+        raise ValueError(
+            f"{len(all_returns)} trade(s) TEST concaténé(s) != {expected_total} attendu(s) "
+            "(AggregateResult.total_oos_trades)."
+        )
+    return tuple(all_returns)
+
+
+def _run_monte_carlo_phase(
+    plan: GateVCampaignPlan, campaign_root: Union[str, Path], campaign_dir: Path,
+    manifest: GateVCampaignManifest, base_config,
+) -> GateVCampaignManifest:
+    """AF-V-08 Slice 4 — phase Monte-Carlo, APRÈS une preuve Walk-Forward complète et validée.
+    `run_monte_carlo_simulation()`/`build_monte_carlo_specification()` appelées DIRECTEMENT,
+    jamais injectées (ADR 0024 Décision 5 : fonctions pures, sans I/O, sans moteur, sans accès
+    les données réservées de validation finale). `source_trades_from_optimized_params=True` EN DUR (jamais un paramètre de
+    cette fonction ni de `execute_gate_v_campaign()`) — les trades TEST proviennent
+    structurellement du Top-1 TRAIN-optimisé de chaque fold (ADR 0021 Décision 6)."""
+    wf_run = _load_complete_walk_forward_run(plan, manifest, campaign_dir)
+
+    running_manifest = dataclasses.replace(
+        manifest, execution_started=True, running=True, status="RUNNING",
+    )
+    save_gate_v_campaign_manifest(campaign_root, plan, running_manifest)
+
+    mc_validation_run_id = gate_v_validation_run_id(plan, VALIDATION_TYPE_MONTE_CARLO)
+    mc_run_path = (
+        campaign_dir / _VALIDATIONS_DIRNAME / mc_validation_run_id / _VALIDATION_RUN_FILENAME
+    )
+    existing_run = load_validation_run(mc_run_path)
+    if existing_run is not None and existing_run.validation_run_id != mc_validation_run_id:
+        raise ValueError(f"ValidationRun persistée à {mc_run_path} étrangère à cette campagne.")
+
+    if existing_run is not None:
+        # Même reconciliation qu'en phase Walk-Forward (crash après save_validation_run(), avant
+        # mise à jour du manifeste) : la preuve déterministe déjà persistée est retrouvée et
+        # rattachée, jamais recalculée.
+        mc_run = existing_run
+    else:
+        initial_capital = _initial_capital_from_base_config(base_config)
+        wf_output_dir = campaign_dir / _WALK_FORWARD_DIRNAME
+        trades = _assemble_monte_carlo_trades(plan, wf_run, wf_output_dir, initial_capital)
+        mc_specification = build_monte_carlo_specification(
+            manifest.walk_forward_validation_run_id, True, plan.monte_carlo_verdict_policy_id,
+        )
+        mc_evidence = run_monte_carlo_simulation(trades, mc_specification)
+        mc_run = build_validation_run(
+            validation_run_id=mc_validation_run_id, research_run_id=plan.research_run_id,
+            split_plan_id=plan.split_plan_id, dataset_snapshot_id=plan.dataset_snapshot_id,
+            strategy_name=plan.strategy_name, strategy_params=dict(plan.base_params),
+            specification=mc_specification, evidence=mc_evidence,
+            validation_type=VALIDATION_TYPE_MONTE_CARLO,
+        )
+        if not _monte_carlo_complete(plan, wf_run, mc_run):
+            raise ValueError(
+                f"Preuve Monte-Carlo construite pour {plan.campaign_id!r} incomplète ou "
+                "incohérente avec le plan de campagne — refus de persister (ADR 0024 Décision 13)."
+            )
+        save_validation_run(mc_run_path, mc_run)
+
+    final_manifest = dataclasses.replace(
+        running_manifest, monte_carlo_validation_run_id=mc_validation_run_id, running=False,
+    )
+    persisted_runs, evidence_paths = _load_manifest_proofs(plan, final_manifest, campaign_dir)
+    status = derive_gate_v_campaign_status(plan, final_manifest, persisted_runs)
+    final_manifest = dataclasses.replace(final_manifest, status=status)
+    save_gate_v_campaign_manifest(
+        campaign_root, plan, final_manifest,
+        evidence_by_validation_run_id=persisted_runs,
+        evidence_paths_by_validation_run_id=evidence_paths,
+    )
+    return final_manifest
+
+
+def execute_gate_v_campaign(
+    plan: GateVCampaignPlan,
+    *,
+    campaign_root: Union[str, Path],
+    base_config,
+    data_manifest_path: Union[str, Path],
+    load_market_data_fn,
+    run_walk_forward_fn,
+    resume_walk_forward_fn,
+    progress_cb=None,
+    stop_flag_fn=None,
+) -> GateVCampaignManifest:
+    """AF-V-08 Slices 3-4 — Niveau B, phases Walk-Forward puis Monte-Carlo (ADR 0024 Décision 5).
+    Parameter Stability reste hors scope (Slice 5) — le statut final ne peut donc être
+    `EVIDENCE_COMPLETE_AWAITING_POLICY` que si cette preuve existe déjà sur disque, produite par
+    une exécution antérieure distincte, jamais fabriquée ici.
+
+    `run_walk_forward_fn`/`resume_walk_forward_fn`/`load_market_data_fn` sont INJECTÉS,
+    keyword-only, SANS valeur par défaut — jamais importés ici (un appelant réel passe
+    `walk_forward.run_walk_forward_with_artifacts_v1`/`resume_walk_forward_with_artifacts_v1` et
+    un vrai chargeur des données de marché réelles). `run_monte_carlo_simulation()` reste, elle,
+    appelée DIRECTEMENT (fonction pure, sans I/O, ADR 0024 Décision 5) — jamais injectée.
+
+    Un appel unique enchaîne les deux phases si la Walk-Forward se termine sans interruption
+    coopérative dans ce même appel ; un `stop_flag_fn` déclenché entre deux folds retourne un
+    manifeste EN PAUSE avant tout calcul Monte-Carlo (jamais de Monte-Carlo sur un Walk-Forward
+    partiel)."""
+    if not isinstance(plan, GateVCampaignPlan) or plan != _rebuild_plan(plan):
+        raise ValueError("plan doit être un GateVCampaignPlan validé, non forgé.")
+    for name, collaborator in (
+        ("run_walk_forward_fn", run_walk_forward_fn),
+        ("resume_walk_forward_fn", resume_walk_forward_fn),
+        ("load_market_data_fn", load_market_data_fn),
+    ):
+        if collaborator is None or not callable(collaborator):
+            raise ValueError(f"{name} est obligatoire et doit être un collaborateur injecté callable.")
+    if (
+        getattr(base_config, "base_params", None) != plan.base_params
+        or getattr(base_config, "mode", None) != plan.search_mode
+    ):
+        raise ValueError(
+            "base_config.base_params/mode divergent du plan de campagne — refusé avant tout "
+            "appel coûteux. search_space_hash/budget_per_fold restent vérifiés a posteriori sur "
+            "les faits réellement produits par _walk_forward_complete() (ADR 0024 Décision 13), "
+            "jamais devinés depuis un champ de base_config qui ne les porte pas (ADR 0024 "
+            "Décision 5 : aucun paramètre déduit silencieusement)."
+        )
+
+    campaign_dir = Path(campaign_root) / plan.campaign_id
+    if load_json_tolerant(campaign_dir / "plan.json") != _plan_record(plan):
+        raise ValueError("plan.json validé doit être persisté avant toute exécution.")
+    split_plan = load_dataset_split_plan(plan.split_plan_path, strict=True)
+    if (
+        split_plan is None or split_plan.split_plan_id != plan.split_plan_id
+        or split_plan.dataset_snapshot_id != plan.dataset_snapshot_id
+        or split_plan.validation is None
+    ):
+        raise ValueError("split_plan_path ne correspond plus au plan de campagne persisté.")
+    fold_definitions = compute_fold_definitions(
+        split_plan.validation, plan.walk_forward_specification, plan.readiness_spec,
+    )
+    if (
+        tuple(fold.fold_id for fold in fold_definitions) != plan.expected_fold_ids
+        or _fold_definitions_hash(fold_definitions) != plan.expected_fold_definitions_hash
+    ):
+        raise ValueError("Les folds recalculés divergent du plan de campagne persisté.")
+
+    manifest_path = campaign_dir / "manifest.json"
+    manifest = load_gate_v_campaign_manifest(manifest_path, plan)
+    if manifest is None:
+        manifest = build_gate_v_campaign_manifest(plan)
+    if manifest.technical_failure_reason is not None:
+        raise ValueError(
+            f"Campagne {plan.campaign_id!r} déjà marquée TECHNICAL_FAILURE — reprise manuelle "
+            "requise, jamais un nouvel essai automatique."
+        )
+
+    if manifest.walk_forward_validation_run_id is None:
+        manifest = _run_walk_forward_phase(
+            plan, campaign_root, campaign_dir, manifest, split_plan, base_config,
+            data_manifest_path, load_market_data_fn, run_walk_forward_fn, resume_walk_forward_fn,
+            progress_cb, stop_flag_fn,
+        )
+        if manifest.walk_forward_validation_run_id is None:
+            return manifest  # Arrêt coopératif -- jamais de Monte-Carlo sur un WF partiel.
+
+    if manifest.monte_carlo_validation_run_id is None:
+        manifest = _run_monte_carlo_phase(plan, campaign_root, campaign_dir, manifest, base_config)
+
+    return manifest
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AF-V-08 Slice 4, vague 1 — dérivation du rendement % par trade TEST (Human Gate 2026-09-27,
+# ADR 0022 amendement du 2026-09-27, corrige Décision 1 de cette même ADR). `resultat_net` et
+# `capital_apres` (persistés dans oos_trades.csv, engine.py) sont chacun arrondis
+# INDÉPENDAMMENT à 2 décimales à l'écriture — la trajectoire de capital réellement sérialisée
+# (capital_apres) est la source primaire du rendement, jamais resultat_net directement, qui
+# devient un simple invariant d'audit de cette trajectoire.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_TRADE_RETURN_INTEGRITY_TOLERANCE = 0.015
+"""Écart maximal toléré, en unité monétaire, entre `capital_apres - capital_before` et
+`resultat_net` pour un même trade (ADR 0022 amendement AF-V-08 2026-09-27). Trois quantités
+indépendamment arrondies au centime (`capital_before`, `capital_apres`, `resultat_net`)
+contribuent chacune jusqu'à 0,005 dans le pire cas -> 0,015 conservateur (le premier trade d'un
+fold n'a en réalité que deux quantités arrondies, `capital_before` étant alors `initial_capital`,
+une valeur de configuration exacte -- 0,015 reste sûr, seulement plus large que nécessaire dans
+ce cas précis)."""
+
+
+def _as_finite_float(value, field_name: str) -> float:
+    """Conversion stricte vers un flottant fini — accepte tout scalaire numérique réel
+    (`int`/`float` Python, `numpy.float64`/`numpy.int64` issus de `pandas.read_csv()`, qui ne
+    sont pas tous des sous-classes de `int`/`float` Python), rejette `bool` explicitement (jamais
+    une valeur booléenne silencieusement acceptée comme 0/1) et toute valeur non convertible/
+    non finie (NaN/Inf/chaîne/`None`)."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} ne peut pas être un booléen : {value!r}.")
+    try:
+        as_float = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} non numérique ou absent : {value!r}.") from None
+    if not math.isfinite(as_float):
+        raise ValueError(f"{field_name} non fini : {value!r}.")
+    return as_float
+
+
+def _derive_fold_test_trade_returns_pct(
+    fold_trades: "pd.DataFrame", initial_capital: float,
+) -> Tuple[float, ...]:
+    """Rendement % de chaque trade TEST d'UN fold, dérivé de la trajectoire de capital
+    réellement persistée (`capital_apres_i / capital_before_i - 1`) — jamais de `resultat_net`
+    directement. `capital_before` repart de `initial_capital` pour le premier trade
+    (`flat_each_fold_v1`, ADR 0021 Décision 14 — capital gelé, jamais réinitialisé ici), puis
+    chaîne depuis `capital_apres` du trade précédent DU MÊME FOLD — cette fonction est appelée
+    UNE FOIS PAR FOLD, jamais sur une concaténation multi-fold (le capital ne traverse jamais une
+    frontière de fold).
+
+    Un rendement réel `<= -100 %` n'est jamais censuré (fait persisté). Un `capital_before <= 0`
+    au trade SUIVANT rend le rapport financièrement non défini -> `ValueError` fail-closed, avant
+    tout calcul sur ce trade."""
+    initial_capital = _as_finite_float(initial_capital, "initial_capital")
+    if initial_capital <= 0:
+        raise ValueError(f"initial_capital doit être strictement positif : {initial_capital!r}.")
+    if fold_trades.empty:
+        return ()
+    for column in ("resultat_net", "capital_apres"):
+        if column not in fold_trades.columns:
+            raise ValueError(f"Colonne obligatoire absente des trades TEST : {column!r}.")
+
+    returns = []
+    capital_before = initial_capital
+    for _, row in fold_trades.iterrows():
+        resultat_net = _as_finite_float(row["resultat_net"], "resultat_net")
+        capital_apres = _as_finite_float(row["capital_apres"], "capital_apres")
+        if capital_before <= 0:
+            raise ValueError(
+                f"capital_before={capital_before!r} <= 0 — rendement du trade suivant non "
+                "défini financièrement, refusé avant tout calcul (fail-closed)."
+            )
+        if abs((capital_apres - capital_before) - resultat_net) > _TRADE_RETURN_INTEGRITY_TOLERANCE:
+            raise ValueError(
+                f"Incohérence entre capital_before={capital_before!r}, "
+                f"capital_apres={capital_apres!r} et resultat_net={resultat_net!r} — écart "
+                f"supérieur à la tolérance d'arrondi ({_TRADE_RETURN_INTEGRITY_TOLERANCE})."
+            )
+        returns.append((capital_apres / capital_before - 1.0) * 100.0)
+        capital_before = float(capital_apres)
+    return tuple(returns)
+
+
+def _initial_capital_from_base_config(base_config) -> float:
+    """Même clé/valeur par défaut que `optimizer.py::_run_single()`
+    (`gp.get("initial_capital", 10_000.0)`) — jamais une autre valeur par défaut inventée ici."""
+    global_params = getattr(base_config, "global_params", None)
+    if not isinstance(global_params, dict):
+        raise ValueError("base_config.global_params est obligatoire et doit être un dictionnaire.")
+    value = _as_finite_float(
+        global_params.get("initial_capital", 10_000.0), "global_params['initial_capital']",
+    )
+    if value <= 0:
+        raise ValueError(f"initial_capital doit être strictement positif : {value!r}.")
+    return value
