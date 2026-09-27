@@ -1,7 +1,10 @@
-"""Deterministic preparation for a GATE V campaign (ADR 0024).
+"""GATE V campaign preparation and orchestration (ADR 0024).
 
-This module only builds a plan from existing metadata. It does not run a
-scientific campaign or read market data.
+Niveau A (`build_gate_v_campaign_plan()`) only builds a plan from existing metadata --
+deterministic, no execution, no market data. Niveau B (`execute_gate_v_campaign()`, AF-V-08
+Slice 3) DOES trigger real execution, but only through explicitly injected collaborators
+(`run_walk_forward_fn`/`resume_walk_forward_fn`/`load_market_data_fn`) -- this module itself
+never imports an execution engine or opens market data directly.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Mapping, Optional, Union
+from typing import Mapping, Optional, Tuple, Union
 
 from atomic_json_store import (
     load_json_tolerant, save_atomic, save_atomic_overwrite, validate_portable_identifier,
@@ -30,6 +33,10 @@ from validation_run import (
     VALIDATION_TYPE_OOS,
     VALIDATION_TYPE_PARAMETER_STABILITY,
     VALIDATION_TYPE_WALK_FORWARD,
+    AggregateResult,
+    FoldDefinition,
+    FoldResult,
+    FoldSelection,
     MonteCarloEvidence,
     MonteCarloSpecification,
     OosValidationSpecification,
@@ -39,10 +46,19 @@ from validation_run import (
     build_parameter_stability_specification,
     ValidationRun,
     WalkForwardEvidence,
+    WalkForwardRunOutcome,
     WalkForwardSpecification,
     load_validation_run,
+    save_validation_run,
 )
-from walk_forward import build_walk_forward_specification, compute_fold_definitions
+from walk_forward import (
+    FoldArtifacts,
+    WalkForwardCapturedRunV1,
+    build_walk_forward_specification,
+    build_walk_forward_validation_run,
+    compute_fold_definitions,
+    persist_walk_forward_run,
+)
 
 
 _REQUIRED = object()
@@ -105,6 +121,16 @@ class GateVCampaignPlan:
     oos_evidence_validation_run_id: Optional[str]
     oos_evidence_hash: Optional[str]
     oos_evidence_path: Optional[str]
+
+
+def _fold_definitions_hash(fold_definitions) -> str:
+    """Same serialization used at plan-build time (Décision 3) and reused, never duplicated,
+    by `execute_gate_v_campaign()`'s pre-execution fold-drift check (Slice 3)."""
+    payload = json.dumps(
+        [dataclasses.asdict(fold) for fold in fold_definitions],
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _required_text(value, field_name: str) -> str:
@@ -254,11 +280,7 @@ def build_gate_v_campaign_plan(
         split_plan.validation, specification, readiness_spec,
     )
     expected_fold_ids = tuple(fold.fold_id for fold in fold_definitions)
-    fold_payload = json.dumps(
-        [dataclasses.asdict(fold) for fold in fold_definitions],
-        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-    )
-    expected_fold_definitions_hash = hashlib.sha256(fold_payload.encode("utf-8")).hexdigest()
+    expected_fold_definitions_hash = _fold_definitions_hash(fold_definitions)
     zone_payload = json.dumps(
         dataclasses.asdict(split_plan.validation), sort_keys=True,
         separators=(",", ":"), ensure_ascii=False,
@@ -916,3 +938,257 @@ def load_gate_v_campaign_manifest(
     if derive_gate_v_campaign_status(plan, manifest, persisted_runs) != manifest.status:
         raise ValueError("Le statut du manifeste ne correspond plus aux preuves persistées.")
     return dataclasses.replace(manifest, expected_fold_ids=tuple(manifest.expected_fold_ids))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Niveau B (ADR 0024 Décision 5) — AF-V-08 Slice 3 : PHASE WALK-FORWARD UNIQUEMENT.
+# Monte-Carlo/Parameter Stability restent hors scope (slices suivantes) — ce câblage ne peut
+# donc jamais, à lui seul, faire passer une campagne à EVIDENCE_COMPLETE_AWAITING_POLICY, sauf si
+# ces preuves existent déjà, produites hors de cette exécution (jamais fabriquées ici).
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Contrat de chemins Walk-Forward (ADR 0021 Décision 12, ADR 0024 Décision 6/8/amendement AF-V-08)
+# — dupliqué ici en littéraux documentés plutôt qu'importé depuis les noms privés de
+# `walk_forward.py` (jamais réimplémenté : ce sont les MÊMES chaînes, jamais une seconde
+# convention inventée).
+_WALK_FORWARD_DIRNAME = "walk_forward"
+_WALK_FORWARD_CHECKPOINT_DIRNAME = ".gate_v_checkpoints_v1"
+_WALK_FORWARD_MANIFEST_FILENAME = "manifest.json"
+_WALK_FORWARD_AGGREGATE_FILENAME = "aggregate.json"
+_WALK_FORWARD_FOLDS_DIRNAME = "folds"
+_WALK_FORWARD_TEST_RESULT_FILENAME = "test_result.json"
+_VALIDATIONS_DIRNAME = "validations"
+_VALIDATION_RUN_FILENAME = "validation_run.json"
+
+
+def _reload_persisted_walk_forward_outcome(
+    output_dir: Path, expected_fold_ids: Tuple[str, ...],
+) -> Tuple[WalkForwardRunOutcome, AggregateResult]:
+    """Relit un run Walk-Forward DÉJÀ persisté par `persist_walk_forward_run()` (ADR 0021
+    Décision 12, EXISTANTE, jamais rappelée ici) — aucun second calcul, aucune API de capture V1
+    rappelée. La cohérence scientifique complète (Top-1, search_space_hash, zéro-trade, hash des
+    définitions, totaux d'agrégat) est revérifiée ENSUITE par `_walk_forward_complete()`, jamais
+    supposée ici : cette fonction ne fait que désérialiser des JSON déjà écrits."""
+    fold_results = []
+    for fold_id in expected_fold_ids:
+        path = (
+            output_dir / _WALK_FORWARD_FOLDS_DIRNAME / fold_id / _WALK_FORWARD_TEST_RESULT_FILENAME
+        )
+        raw = load_json_tolerant(path)
+        if raw is None:
+            raise ValueError(
+                f"Persistance Walk-Forward annoncée complète mais {path} absent ou illisible."
+            )
+        try:
+            definition = FoldDefinition(**raw["definition"])
+            selection = FoldSelection(**raw["selection"])
+            remainder = {k: v for k, v in raw.items() if k not in ("definition", "selection")}
+            fold_results.append(FoldResult(definition=definition, selection=selection, **remainder))
+        except (KeyError, TypeError) as exc:
+            raise ValueError(f"{path} : contenu incohérent avec FoldResult.") from exc
+    aggregate_path = output_dir / _WALK_FORWARD_AGGREGATE_FILENAME
+    aggregate_raw = load_json_tolerant(aggregate_path)
+    if aggregate_raw is None:
+        raise ValueError(f"{aggregate_path} annoncé présent mais illisible.")
+    try:
+        aggregate = AggregateResult(**aggregate_raw)
+    except TypeError as exc:
+        raise ValueError(f"{aggregate_path} : contenu incohérent avec AggregateResult.") from exc
+    return WalkForwardRunOutcome(fold_results=tuple(fold_results), stopped_early=False), aggregate
+
+
+def _validate_captured_run(
+    plan: GateVCampaignPlan, captured: WalkForwardCapturedRunV1, expected_validation_run_id: str,
+) -> None:
+    """Revalide strictement un `WalkForwardCapturedRunV1` retourné par un collaborateur injecté
+    — jamais fait confiance aveuglément avant persistance (ADR 0024 Décision 5)."""
+    if not isinstance(captured, WalkForwardCapturedRunV1):
+        raise ValueError(
+            "run_walk_forward_fn/resume_walk_forward_fn doit retourner un WalkForwardCapturedRunV1."
+        )
+    if captured.validation_run_id != expected_validation_run_id:
+        raise ValueError(
+            f"validation_run_id retourné {captured.validation_run_id!r} != attendu "
+            f"{expected_validation_run_id!r} — preuve étrangère à cette campagne refusée."
+        )
+    if captured.aggregate is None:
+        raise ValueError("WalkForwardCapturedRunV1.aggregate est None — jamais persisté comme preuve.")
+    got_ids = tuple(result.fold_id for result in captured.outcome.fold_results)
+    expected_prefix = plan.expected_fold_ids[: len(got_ids)]
+    if got_ids != expected_prefix:
+        raise ValueError(
+            f"Folds retournés {got_ids!r} ne correspondent pas au préfixe attendu "
+            f"{expected_prefix!r} de la campagne — fold absent, supplémentaire, dupliqué ou "
+            "mal ordonné."
+        )
+    if not captured.outcome.stopped_early and got_ids != plan.expected_fold_ids:
+        raise ValueError(
+            f"outcome.stopped_early=False mais seuls {got_ids!r} sur "
+            f"{plan.expected_fold_ids!r} attendus sont présents — un outcome partiel doit "
+            "être signalé stopped_early=True, jamais présenté comme complet."
+        )
+    artifact_ids = tuple(artifacts.fold_id for artifacts in captured.fold_artifacts)
+    if artifact_ids != got_ids:
+        raise ValueError(
+            "fold_artifacts et outcome.fold_results divergent — jamais réassociés silencieusement."
+        )
+
+
+def execute_gate_v_campaign(
+    plan: GateVCampaignPlan,
+    *,
+    campaign_root: Union[str, Path],
+    base_config,
+    data_manifest_path: Union[str, Path],
+    load_market_data_fn,
+    run_walk_forward_fn,
+    resume_walk_forward_fn,
+    progress_cb=None,
+    stop_flag_fn=None,
+) -> GateVCampaignManifest:
+    """AF-V-08 Slice 3 — squelette Niveau B, PHASE WALK-FORWARD UNIQUEMENT (ADR 0024 Décision 5).
+
+    `run_walk_forward_fn`/`resume_walk_forward_fn`/`load_market_data_fn` sont INJECTÉS,
+    keyword-only, SANS valeur par défaut — jamais importés ici (un appelant réel passe
+    `walk_forward.run_walk_forward_with_artifacts_v1`/`resume_walk_forward_with_artifacts_v1` et
+    un vrai chargeur des données de marché réelles). `run_walk_forward_fn`/`resume_walk_forward_fn` sont
+    appelés avec la signature réelle de ces deux fonctions (positionnels
+    `validation_zone, spec, readiness_spec, base_config, df`, puis les mots-clés
+    `data_manifest_path, output_dir, progress_cb, stop_flag_fn, validation_run_id`).
+
+    Choix run/resume/déjà-persisté (Décision 6/8, jamais réimplémenté par l'appelant) :
+    `.../walk_forward/aggregate.json` présent -> relecture directe, aucun appel ; sinon
+    `.../walk_forward/.gate_v_checkpoints_v1/manifest.json` présent -> `resume_walk_forward_fn` ;
+    sinon -> `run_walk_forward_fn`. `persist_walk_forward_run()` n'est rappelée QUE si
+    `aggregate.json` était absent au départ, et au plus une fois.
+
+    Monte-Carlo/Parameter Stability : jamais appelés ici (hors scope de cette tranche) — le
+    statut final ne peut donc être `EVIDENCE_COMPLETE_AWAITING_POLICY` que si ces preuves
+    existent déjà sur disque, produites par une exécution antérieure distincte."""
+    if not isinstance(plan, GateVCampaignPlan) or plan != _rebuild_plan(plan):
+        raise ValueError("plan doit être un GateVCampaignPlan validé, non forgé.")
+    for name, collaborator in (
+        ("run_walk_forward_fn", run_walk_forward_fn),
+        ("resume_walk_forward_fn", resume_walk_forward_fn),
+        ("load_market_data_fn", load_market_data_fn),
+    ):
+        if collaborator is None or not callable(collaborator):
+            raise ValueError(f"{name} est obligatoire et doit être un collaborateur injecté callable.")
+    if (
+        getattr(base_config, "base_params", None) != plan.base_params
+        or getattr(base_config, "mode", None) != plan.search_mode
+    ):
+        raise ValueError(
+            "base_config.base_params/mode divergent du plan de campagne — refusé avant tout "
+            "appel coûteux. search_space_hash/budget_per_fold restent vérifiés a posteriori sur "
+            "les faits réellement produits par _walk_forward_complete() (ADR 0024 Décision 13), "
+            "jamais devinés depuis un champ de base_config qui ne les porte pas (ADR 0024 "
+            "Décision 5 : aucun paramètre déduit silencieusement)."
+        )
+
+    campaign_dir = Path(campaign_root) / plan.campaign_id
+    if load_json_tolerant(campaign_dir / "plan.json") != _plan_record(plan):
+        raise ValueError("plan.json validé doit être persisté avant toute exécution.")
+    split_plan = load_dataset_split_plan(plan.split_plan_path, strict=True)
+    if (
+        split_plan is None or split_plan.split_plan_id != plan.split_plan_id
+        or split_plan.dataset_snapshot_id != plan.dataset_snapshot_id
+        or split_plan.validation is None
+    ):
+        raise ValueError("split_plan_path ne correspond plus au plan de campagne persisté.")
+    fold_definitions = compute_fold_definitions(
+        split_plan.validation, plan.walk_forward_specification, plan.readiness_spec,
+    )
+    if (
+        tuple(fold.fold_id for fold in fold_definitions) != plan.expected_fold_ids
+        or _fold_definitions_hash(fold_definitions) != plan.expected_fold_definitions_hash
+    ):
+        raise ValueError("Les folds recalculés divergent du plan de campagne persisté.")
+
+    manifest_path = campaign_dir / "manifest.json"
+    manifest = load_gate_v_campaign_manifest(manifest_path, plan)
+    if manifest is None:
+        manifest = build_gate_v_campaign_manifest(plan)
+    if manifest.walk_forward_validation_run_id is not None:
+        return manifest  # Déjà rattachée — idempotent, aucune référence n'est remplacée.
+    if manifest.technical_failure_reason is not None:
+        raise ValueError(
+            f"Campagne {plan.campaign_id!r} déjà marquée TECHNICAL_FAILURE — reprise manuelle "
+            "requise, jamais un nouvel essai automatique."
+        )
+
+    running_manifest = dataclasses.replace(
+        manifest, execution_started=True, running=True, status="RUNNING",
+    )
+    save_gate_v_campaign_manifest(campaign_root, plan, running_manifest)
+
+    wf_validation_run_id = gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD)
+    wf_output_dir = campaign_dir / _WALK_FORWARD_DIRNAME
+    wf_run_path = (
+        campaign_dir / _VALIDATIONS_DIRNAME / wf_validation_run_id / _VALIDATION_RUN_FILENAME
+    )
+    existing_run = load_validation_run(wf_run_path)
+    if existing_run is not None and existing_run.validation_run_id != wf_validation_run_id:
+        raise ValueError(f"ValidationRun persistée à {wf_run_path} étrangère à cette campagne.")
+
+    if existing_run is not None:
+        # Reprise sans recalcul (ADR 0024 §5 de la mission précédente) : save_validation_run()
+        # a pu réussir avant un crash antérieur à la mise à jour du manifeste — la preuve
+        # déterministe déjà persistée est retrouvée et rattachée, jamais recalculée.
+        wf_run = existing_run
+    else:
+        checkpoint_manifest_path = (
+            wf_output_dir / _WALK_FORWARD_CHECKPOINT_DIRNAME / _WALK_FORWARD_MANIFEST_FILENAME
+        )
+        aggregate_path = wf_output_dir / _WALK_FORWARD_AGGREGATE_FILENAME
+        if aggregate_path.is_file():
+            outcome, aggregate = _reload_persisted_walk_forward_outcome(
+                wf_output_dir, plan.expected_fold_ids,
+            )
+        else:
+            df = load_market_data_fn()
+            call_fn = resume_walk_forward_fn if checkpoint_manifest_path.is_file() else run_walk_forward_fn
+            captured = call_fn(
+                split_plan.validation, plan.walk_forward_specification, plan.readiness_spec,
+                base_config, df,
+                data_manifest_path=data_manifest_path, output_dir=wf_output_dir,
+                progress_cb=progress_cb, stop_flag_fn=stop_flag_fn,
+                validation_run_id=wf_validation_run_id,
+            )
+            _validate_captured_run(plan, captured, wf_validation_run_id)
+            if captured.outcome.stopped_early:
+                paused_manifest = dataclasses.replace(running_manifest, running=False)
+                persisted_runs, _paths = _load_manifest_proofs(plan, paused_manifest, campaign_dir)
+                status = derive_gate_v_campaign_status(plan, paused_manifest, persisted_runs)
+                paused_manifest = dataclasses.replace(paused_manifest, status=status)
+                save_gate_v_campaign_manifest(campaign_root, plan, paused_manifest)
+                return paused_manifest
+            persist_walk_forward_run(
+                captured.outcome, captured.fold_artifacts, captured.aggregate,
+                plan.walk_forward_specification, base_config, data_manifest_path, wf_output_dir,
+                validation_run_id=wf_validation_run_id,
+            )
+            outcome, aggregate = captured.outcome, captured.aggregate
+        wf_run = build_walk_forward_validation_run(
+            outcome, aggregate, plan.walk_forward_specification, split_plan, plan.research_run_id,
+            wf_validation_run_id, plan.strategy_name, dict(plan.base_params),
+        )
+        if not _walk_forward_complete(plan, wf_run):
+            raise ValueError(
+                f"Preuve Walk-Forward construite pour {plan.campaign_id!r} incomplète ou "
+                "incohérente avec le plan de campagne — refus de persister (ADR 0024 Décision 13)."
+            )
+        save_validation_run(wf_run_path, wf_run)
+
+    final_manifest = dataclasses.replace(
+        running_manifest, walk_forward_validation_run_id=wf_validation_run_id, running=False,
+    )
+    persisted_runs, evidence_paths = _load_manifest_proofs(plan, final_manifest, campaign_dir)
+    status = derive_gate_v_campaign_status(plan, final_manifest, persisted_runs)
+    final_manifest = dataclasses.replace(final_manifest, status=status)
+    save_gate_v_campaign_manifest(
+        campaign_root, plan, final_manifest,
+        evidence_by_validation_run_id=persisted_runs,
+        evidence_paths_by_validation_run_id=evidence_paths,
+    )
+    return final_manifest

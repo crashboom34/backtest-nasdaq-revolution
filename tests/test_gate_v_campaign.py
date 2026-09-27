@@ -13,6 +13,7 @@ import json
 import shutil
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,10 +21,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dataset_split import (
     build_dataset_split_plan,
     build_split_boundary,
+    load_dataset_split_plan,
     save_dataset_split_plan,
 )
 from gate_v_campaign import build_gate_v_campaign_plan
 import gate_v_campaign
+from market_data.backtest_manifest import build_backtest_manifest, save_backtest_manifest
+from optimizer import FilterConfig, OptimizationConfig, ScoreWeights, TrainTestConfig
 from strategy_contracts import DailyStateReadiness
 from validation_run import (
     AggregateResult,
@@ -39,14 +43,23 @@ from validation_run import (
     VALIDATION_TYPE_PARAMETER_STABILITY,
     VALIDATION_TYPE_WALK_FORWARD,
     WalkForwardEvidence,
+    WalkForwardRunOutcome,
     build_monte_carlo_specification,
     build_oos_validation_evidence,
     build_oos_validation_specification,
     build_parameter_stability_specification,
     build_validation_run,
+    load_validation_run,
     save_validation_run,
 )
-from walk_forward import WALK_FORWARD_SEMANTICS_VERSION, compute_fold_definitions
+from walk_forward import (
+    FoldArtifacts,
+    WALK_FORWARD_SEMANTICS_VERSION,
+    WalkForwardCapturedRunV1,
+    build_aggregate_result,
+    compute_fold_definitions,
+    persist_walk_forward_run,
+)
 
 
 _SNAPSHOT_ID = "synthetic_csv:sha256:" + "ab" * 32
@@ -1080,3 +1093,430 @@ def test_manifest_cannot_persist_complete_status_without_verified_evidence(tmp_p
     paths[ps_by_fold[plan.expected_fold_ids[0]]].unlink()
     with pytest.raises(ValueError, match="preuve|fichier|ValidationRun"):
         load_gate_v_campaign_manifest(path, plan)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AF-V-08 Slice 3 — execute_gate_v_campaign(), phase Walk-Forward uniquement.
+# Monte-Carlo/Parameter Stability restent hors scope (slices suivantes) : ces fixtures ne les
+# construisent ni ne les référencent jamais. Aucun test ici n'ouvre nasdaq_3m.csv ni n'accède
+# FINAL_HOLDOUT -- load_market_data_fn est toujours une doublure retournant un DataFrame vide.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _execute_data_manifest(tmp_path):
+    manifest = build_backtest_manifest(
+        provider="mt5", instrument="US100", provider_symbol="US100Cash",
+        source_timeframe="M3", snapshot_id="snap-gate-v-slice3",
+        content_hash="hash-gate-v-slice3", git_commit="deadbeefcafe",
+        strategy_version="perfect_revolution_v1",
+    )
+    path = tmp_path / "data_manifest.json"
+    save_backtest_manifest(path, manifest)
+    return path
+
+
+def _execute_base_config(plan):
+    return OptimizationConfig(
+        run_id="gate_v_slice3_test", strategy_module="strategies.perfect_revolution_v1",
+        strategy_name=plan.strategy_name, data_file="unused.csv",
+        base_params=dict(plan.base_params), param_ranges=[], mode=plan.search_mode,
+        score_weights=ScoreWeights(), filters=FilterConfig(), train_test=TrainTestConfig(),
+        global_params={}, n_workers=1,
+    )
+
+
+def _execute_ready_campaign(tmp_path, **plan_overrides):
+    from gate_v_campaign import save_gate_v_campaign_plan
+
+    inputs = _plan_kwargs(tmp_path)
+    inputs.update(plan_overrides)
+    plan = build_gate_v_campaign_plan(**inputs)
+    campaign_root = tmp_path / "gate_v_campaign"
+    save_gate_v_campaign_plan(campaign_root, plan)
+    split_plan = load_dataset_split_plan(plan.split_plan_path)
+    return plan, split_plan, campaign_root
+
+
+def _execute_fold_results_and_artifacts(plan, split_plan, fold_ids=None):
+    definitions = compute_fold_definitions(
+        split_plan.validation, plan.walk_forward_specification, plan.readiness_spec,
+    )
+    if fold_ids is not None:
+        definitions = [d for d in definitions if d.fold_id in fold_ids]
+    results, artifacts = [], []
+    for definition in definitions:
+        selection = FoldSelection(
+            fold_id=definition.fold_id, selected_params={"lookback": 12},
+            selected_params_hash="synthetic_hash", score_train=1.0, rank_in_train=1,
+            train_candidates_evaluated=2, train_candidates_unique=2, train_candidates_eligible=2,
+            search_space_hash=plan.search_space_hash, algorithm=plan.search_mode, fold_seed=None,
+        )
+        results.append(FoldResult(
+            fold_id=definition.fold_id, definition=definition, selection=selection,
+            n_trades=0, net_ret_pct=0.0, max_dd_pct=None, profit_factor=None,
+            win_rate=None, expectancy=None, score_test=0.0, zero_trade_oos=True,
+            forced_closes=0, coverage_bars=1,
+        ))
+        artifacts.append(FoldArtifacts(
+            fold_id=definition.fold_id,
+            train_candidates=[{
+                "params": {"lookback": 12}, "score": 1.0, "stats": {"n_trades": 0},
+                "filtered": False, "filter_reason": None,
+            }],
+            test_trades=pd.DataFrame({"resultat_net": pd.Series(dtype=float)}),
+            test_equity=pd.DataFrame({"capital": [10_000.0]}),
+        ))
+    return tuple(results), tuple(artifacts)
+
+
+def _execute_fake_run(plan, split_plan, *, stopped_early=False, fold_ids=None,
+                       wrong_validation_run_id=None):
+    """Doublure de run_walk_forward_fn/resume_walk_forward_fn -- ne touche jamais l'Optimizer/
+    le moteur réel, retourne un WalkForwardCapturedRunV1 synthétique."""
+    calls = []
+    results, artifacts = _execute_fold_results_and_artifacts(plan, split_plan, fold_ids=fold_ids)
+
+    def fn(validation_zone, spec, readiness_spec, base_config, df, *,
+           data_manifest_path, output_dir, progress_cb=None, stop_flag_fn=None,
+           validation_run_id):
+        calls.append(validation_run_id)
+        outcome = WalkForwardRunOutcome(fold_results=results, stopped_early=stopped_early)
+        aggregate = build_aggregate_result(results)
+        return WalkForwardCapturedRunV1(
+            outcome=outcome, fold_artifacts=artifacts,
+            validation_run_id=wrong_validation_run_id or validation_run_id,
+            aggregate=aggregate,
+        )
+    return fn, calls
+
+
+def _never_called(name):
+    def fn(*args, **kwargs):
+        raise AssertionError(f"{name} ne devait jamais être appelé dans ce scénario.")
+    return fn
+
+
+def _execute(plan, campaign_root, tmp_path, *, run_walk_forward_fn, resume_walk_forward_fn,
+             load_market_data_fn=None, base_config=None, data_manifest_path=None,
+             progress_cb=None, stop_flag_fn=None):
+    from gate_v_campaign import execute_gate_v_campaign
+
+    return execute_gate_v_campaign(
+        plan, campaign_root=campaign_root,
+        base_config=base_config or _execute_base_config(plan),
+        data_manifest_path=data_manifest_path or _execute_data_manifest(tmp_path),
+        load_market_data_fn=load_market_data_fn or (lambda: pd.DataFrame()),
+        run_walk_forward_fn=run_walk_forward_fn, resume_walk_forward_fn=resume_walk_forward_fn,
+        progress_cb=progress_cb, stop_flag_fn=stop_flag_fn,
+    )
+
+
+class TestExecuteGateVCampaignWalkForwardPhase:
+    """AF-V-08 Slice 3 : squelette Niveau B (ADR 0024 Décision 5), phase Walk-Forward
+    uniquement. Monte-Carlo/Parameter Stability : hors scope, jamais appelés ici."""
+
+    def test_fresh_calls_run_once_never_resume_and_attaches_evidence(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, run_calls = _execute_fake_run(plan, split_plan)
+        resume_fn = _never_called("resume_walk_forward_fn")
+
+        manifest = _execute(
+            plan, campaign_root, tmp_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=resume_fn,
+        )
+
+        assert len(run_calls) == 1
+        wf_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD)
+        assert manifest.walk_forward_validation_run_id == wf_id
+        assert manifest.execution_started is True
+        assert manifest.running is False
+        assert manifest.status == "EVIDENCE_INCOMPLETE"  # aucune preuve OOS/MC/PS ici
+        assert "PASS" not in manifest.status
+        wf_run_path = campaign_root / plan.campaign_id / "validations" / wf_id / "validation_run.json"
+        assert wf_run_path.is_file()
+        persisted = load_validation_run(wf_run_path)
+        assert persisted.validation_run_id == wf_id
+        assert (campaign_root / plan.campaign_id / "walk_forward" / "aggregate.json").is_file()
+
+    def test_resumes_when_checkpoint_present_never_calls_run(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        checkpoint_manifest = (
+            campaign_root / plan.campaign_id / "walk_forward"
+            / ".gate_v_checkpoints_v1" / "manifest.json"
+        )
+        checkpoint_manifest.parent.mkdir(parents=True)
+        checkpoint_manifest.write_text("{}", encoding="utf-8")
+        resume_fn, resume_calls = _execute_fake_run(plan, split_plan)
+        run_fn = _never_called("run_walk_forward_fn")
+
+        manifest = _execute(
+            plan, campaign_root, tmp_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=resume_fn,
+        )
+
+        assert len(resume_calls) == 1
+        assert manifest.walk_forward_validation_run_id is not None
+
+    def test_already_persisted_skips_run_resume_and_persist(self, tmp_path, monkeypatch):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        results, artifacts = _execute_fold_results_and_artifacts(plan, split_plan)
+        aggregate = build_aggregate_result(results)
+        outcome = WalkForwardRunOutcome(fold_results=results, stopped_early=False)
+        wf_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD)
+        wf_output_dir = campaign_root / plan.campaign_id / "walk_forward"
+        data_manifest_path = _execute_data_manifest(tmp_path)
+        persist_walk_forward_run(
+            outcome, artifacts, aggregate, plan.walk_forward_specification,
+            _execute_base_config(plan), data_manifest_path, wf_output_dir,
+            validation_run_id=wf_id,
+        )
+        persist_calls = []
+        monkeypatch.setattr(
+            gate_v_campaign, "persist_walk_forward_run",
+            lambda *a, **k: persist_calls.append(1) or (_ for _ in ()).throw(
+                AssertionError("persist_walk_forward_run ne devait jamais être rappelée")
+            ),
+        )
+
+        manifest = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+            run_walk_forward_fn=_never_called("run_walk_forward_fn"),
+            resume_walk_forward_fn=_never_called("resume_walk_forward_fn"),
+            load_market_data_fn=_never_called("load_market_data_fn"),
+        )
+
+        assert manifest.walk_forward_validation_run_id == wf_id
+        assert persist_calls == []
+
+    def test_fresh_complete_persists_walk_forward_exactly_once(self, tmp_path, monkeypatch):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run(plan, split_plan)
+        real_persist = gate_v_campaign.persist_walk_forward_run
+        persist_calls = []
+
+        def spy_persist(*args, **kwargs):
+            persist_calls.append(1)
+            return real_persist(*args, **kwargs)
+        monkeypatch.setattr(gate_v_campaign, "persist_walk_forward_run", spy_persist)
+
+        _execute(
+            plan, campaign_root, tmp_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        assert len(persist_calls) == 1
+
+    def test_partial_stop_never_persisted_as_complete_walk_forward(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, run_calls = _execute_fake_run(
+            plan, split_plan, stopped_early=True, fold_ids=[plan.expected_fold_ids[0]],
+        )
+
+        manifest = _execute(
+            plan, campaign_root, tmp_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        assert len(run_calls) == 1
+        assert manifest.walk_forward_validation_run_id is None
+        assert manifest.status == "EVIDENCE_INCOMPLETE"
+        assert manifest.running is False
+        assert manifest.execution_started is True
+        wf_output_dir = campaign_root / plan.campaign_id / "walk_forward"
+        assert not (wf_output_dir / "aggregate.json").exists()
+
+    def test_rejects_captured_run_with_missing_fold_claimed_complete(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run(
+            plan, split_plan, stopped_early=False, fold_ids=[plan.expected_fold_ids[0]],
+        )
+
+        with pytest.raises(ValueError, match="fold|stopped_early"):
+            _execute(
+                plan, campaign_root, tmp_path,
+                run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+            )
+
+    def test_rejects_captured_run_with_duplicate_fold(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        results, artifacts = _execute_fold_results_and_artifacts(plan, split_plan)
+        duplicated_results = (results[0], results[0])
+        duplicated_artifacts = (artifacts[0], artifacts[0])
+
+        def run_fn(validation_zone, spec, readiness_spec, base_config, df, *,
+                   data_manifest_path, output_dir, progress_cb=None, stop_flag_fn=None,
+                   validation_run_id):
+            return WalkForwardCapturedRunV1(
+                outcome=WalkForwardRunOutcome(fold_results=duplicated_results, stopped_early=False),
+                fold_artifacts=duplicated_artifacts, validation_run_id=validation_run_id,
+                aggregate=build_aggregate_result(duplicated_results),
+            )
+
+        with pytest.raises(ValueError, match="fold"):
+            _execute(
+                plan, campaign_root, tmp_path,
+                run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+            )
+
+    def test_rejects_wrong_validation_run_id_from_collaborator(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, _calls = _execute_fake_run(
+            plan, split_plan, wrong_validation_run_id="foreign_walk_forward_id",
+        )
+
+        with pytest.raises(ValueError, match="validation_run_id"):
+            _execute(
+                plan, campaign_root, tmp_path,
+                run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+            )
+
+    def test_rejects_base_config_diverging_from_plan(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        wrong_config = dataclasses.replace(_execute_base_config(plan), mode="general")
+
+        with pytest.raises(ValueError, match="base_config"):
+            _execute(
+                plan, campaign_root, tmp_path, base_config=wrong_config,
+                run_walk_forward_fn=_never_called("run"),
+                resume_walk_forward_fn=_never_called("resume"),
+                load_market_data_fn=_never_called("load_market_data_fn"),
+            )
+
+    def test_rejects_forged_plan(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        forged = dataclasses.replace(plan, campaign_id="forged_campaign_id")
+
+        with pytest.raises(ValueError, match="plan"):
+            _execute(
+                forged, campaign_root, tmp_path,
+                run_walk_forward_fn=_never_called("run"),
+                resume_walk_forward_fn=_never_called("resume"),
+                load_market_data_fn=_never_called("load_market_data_fn"),
+            )
+
+    def test_rejects_incoherent_aggregate_before_persisting_evidence(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        results, artifacts = _execute_fold_results_and_artifacts(plan, split_plan)
+        bad_aggregate = dataclasses.replace(build_aggregate_result(results), n_folds=999)
+
+        def run_fn(validation_zone, spec, readiness_spec, base_config, df, *,
+                   data_manifest_path, output_dir, progress_cb=None, stop_flag_fn=None,
+                   validation_run_id):
+            return WalkForwardCapturedRunV1(
+                outcome=WalkForwardRunOutcome(fold_results=results, stopped_early=False),
+                fold_artifacts=artifacts, validation_run_id=validation_run_id,
+                aggregate=bad_aggregate,
+            )
+
+        with pytest.raises(ValueError, match="incomplète|incohérente"):
+            _execute(
+                plan, campaign_root, tmp_path,
+                run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+            )
+        wf_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD)
+        wf_run_path = campaign_root / plan.campaign_id / "validations" / wf_id / "validation_run.json"
+        assert not wf_run_path.exists()
+
+    def test_persists_running_manifest_before_costly_walk_forward_call(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        base_run_fn, _calls = _execute_fake_run(plan, split_plan)
+        observed = {}
+
+        def spying_run_fn(*args, **kwargs):
+            record = json.loads(manifest_path.read_text(encoding="utf-8"))
+            observed["status"] = record["status"]
+            observed["running"] = record["running"]
+            observed["execution_started"] = record["execution_started"]
+            return base_run_fn(*args, **kwargs)
+
+        _execute(
+            plan, campaign_root, tmp_path,
+            run_walk_forward_fn=spying_run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        assert observed == {"status": "RUNNING", "running": True, "execution_started": True}
+
+    def test_technical_exception_propagates_and_leaves_manifest_running(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+
+        def failing_run_fn(*args, **kwargs):
+            raise RuntimeError("synthetic engine crash")
+
+        with pytest.raises(RuntimeError, match="synthetic engine crash"):
+            _execute(
+                plan, campaign_root, tmp_path,
+                run_walk_forward_fn=failing_run_fn, resume_walk_forward_fn=_never_called("resume"),
+            )
+
+        from gate_v_campaign import load_gate_v_campaign_manifest
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        reloaded = load_gate_v_campaign_manifest(manifest_path, plan)
+        assert reloaded.status == "RUNNING"
+        assert reloaded.walk_forward_validation_run_id is None
+        # Jamais transformée en verdict scientifique : aucun scientific_verdict n'existe à ce
+        # niveau (ADR 0024), et le statut structurel n'est jamais TECHNICAL_FAILURE ici (aucun
+        # code de cette fonction n'attrape l'exception pour la reclasser -- ADR 0024 Décision 7 :
+        # "exception technique NON GÉRÉE").
+        assert reloaded.status != "TECHNICAL_FAILURE"
+
+    def test_refuses_retry_on_technical_failure_manifest(self, tmp_path):
+        from gate_v_campaign import build_gate_v_campaign_manifest, save_gate_v_campaign_manifest
+
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        failed = dataclasses.replace(
+            build_gate_v_campaign_manifest(plan), execution_started=True,
+            technical_failure_reason="synthetic interruption", status="TECHNICAL_FAILURE",
+        )
+        save_gate_v_campaign_manifest(campaign_root, plan, failed)
+
+        with pytest.raises(ValueError, match="TECHNICAL_FAILURE"):
+            _execute(
+                plan, campaign_root, tmp_path,
+                run_walk_forward_fn=_never_called("run"),
+                resume_walk_forward_fn=_never_called("resume"),
+                load_market_data_fn=_never_called("load_market_data_fn"),
+            )
+
+    def test_reconciles_already_persisted_validation_run_without_recompute(self, tmp_path):
+        plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+        run_fn, run_calls = _execute_fake_run(plan, split_plan)
+        data_manifest_path = _execute_data_manifest(tmp_path)
+
+        manifest = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+            run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
+        )
+        assert len(run_calls) == 1
+
+        # Simule un crash APRES save_validation_run() mais AVANT la mise a jour du manifeste
+        # (risque explicitement anticipe par la mission AF-V-08 precedente).
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        record["walk_forward_validation_run_id"] = None
+        record["status"] = "RUNNING"
+        record["running"] = True
+        manifest_path.write_text(json.dumps(record), encoding="utf-8")
+
+        reconciled = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+            run_walk_forward_fn=_never_called("run_walk_forward_fn"),
+            resume_walk_forward_fn=_never_called("resume_walk_forward_fn"),
+            load_market_data_fn=_never_called("load_market_data_fn"),
+        )
+
+        assert reconciled.walk_forward_validation_run_id == manifest.walk_forward_validation_run_id
+
+    def test_never_references_monte_carlo_or_parameter_stability_execution(self):
+        source = inspect.getsource(gate_v_campaign.execute_gate_v_campaign)
+        assert "run_monte_carlo_simulation" not in source
+        assert "analyze_parameter_stability" not in source
+        signature = inspect.signature(gate_v_campaign.execute_gate_v_campaign)
+        assert "run_monte_carlo_fn" not in signature.parameters
+        assert "analyze_parameter_stability_fn" not in signature.parameters
+
+    def test_collaborators_are_keyword_only_without_default(self):
+        signature = inspect.signature(gate_v_campaign.execute_gate_v_campaign)
+        for name in ("run_walk_forward_fn", "resume_walk_forward_fn", "load_market_data_fn"):
+            param = signature.parameters[name]
+            assert param.kind == inspect.Parameter.KEYWORD_ONLY
+            assert param.default is inspect.Parameter.empty

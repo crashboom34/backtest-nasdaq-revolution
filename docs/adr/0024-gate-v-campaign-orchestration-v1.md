@@ -477,7 +477,7 @@ sur des doublures, sans jamais toucher `engine.py`/`nasdaq_3m.csv`.
 | Intégration bout-en-bout sans données réelles | Pipeline complet préparation -> exécution -> `EVIDENCE_COMPLETE_AWAITING_POLICY` sur doublures uniquement (Décision 12) |
 | Drapeaux de circularité jamais laissés à `False`/absents | `MonteCarloSpecification.source_trades_from_optimized_params` et `ParameterStabilitySpecification.source_candidates_from_optimized_search` valent `True` sur CHAQUE `ValidationRun` produite par une exécution complète factice (Décision 6, correctif BLOCKER) |
 | Contribution Parameter Stability incomplète si aucun voisinage exploitable | Fold factice avec `neighborhood_applicability="global_correlation_only"` (ou tous les `n_neighbors_total_by_param - n_neighbors_rejected_by_param == 0`) -> statut de campagne reste `EVIDENCE_INCOMPLETE` malgré `len(parameter_stability_validation_run_ids_by_fold) == len(expected_fold_ids)` ; ne devient `EVIDENCE_COMPLETE_AWAITING_POLICY` que si CHAQUE fold a `neighborhood_applicability="local_neighborhood_available"` ET au moins un paramètre avec un voisin non rejeté (Décision 6/7, correctif MAJEUR, ADR 0023 Décision 3) |
-| Sélection du bon collaborateur Walk-Forward | Sans `.../walk_forward/manifest.json` préexistant -> `run_walk_forward_fn` appelé, `resume_walk_forward_fn` jamais appelé (spy) ; avec `.../walk_forward/manifest.json` préexistant (fixture tmp_path) -> l'inverse (Décision 5/6) |
+| Sélection du bon collaborateur Walk-Forward (corrigé AF-V-08 Slice 3 : marqueur obsolète depuis l'amendement captured artifacts V1, jamais `.../walk_forward/manifest.json` seul) | Ni `.../walk_forward/.gate_v_checkpoints_v1/manifest.json` ni `.../walk_forward/aggregate.json` présents -> `run_walk_forward_fn` appelé, `resume_walk_forward_fn` jamais appelé (spy) ; `.../walk_forward/.gate_v_checkpoints_v1/manifest.json` présent ET `.../walk_forward/aggregate.json` absent -> l'inverse ; `.../walk_forward/aggregate.json` présent -> NI l'un NI l'autre appelé, relecture directe des artefacts persistés (Décision 5/6/8) |
 | `persist_walk_forward_run()` jamais rappelée après une reprise déjà persistée | Fixture tmp_path avec `.../walk_forward/aggregate.json` déjà présent (persistance antérieure complète simulée) -> `execute_gate_v_campaign()` ne rappelle PAS le collaborateur de persistance (spy, zéro appel), aucune `FileExistsError` levée (Décision 6/8, correctif BLOCKER) |
 | Persistance Walk-Forward appelée au plus une fois par campagne | Sur un run frais complet en une seule passe, le collaborateur de persistance est appelé EXACTEMENT une fois (spy) — jamais zéro, jamais deux (Décision 6) |
 | `build_aggregate_result()` réellement appelée dans la branche run frais | Sur un run frais factice, `walk_forward.build_aggregate_result` est appelé EXACTEMENT une fois (spy) AVANT l'appel au collaborateur de persistance, et l'`aggregate` transmis à ce dernier n'est JAMAIS `None` — sans ce test, un oubli de cet appel romprait silencieusement le marqueur de complétion (`aggregate.json`) sans faire échouer le test "appelée une fois" (Décision 6, gap comblé après confirmation revue scientifique) |
@@ -515,10 +515,19 @@ identifie déjà sans ambiguïté le run Walk-Forward source complet.
 
 ## Conséquences
 
-- **`AF-V-08` reste `implementation: NOT STARTED`** — cette ADR ne modifie aucun code au-delà du
-  correctif de traçabilité déjà appliqué (Décision 14, déjà committé séparément).
-- **Nouveau module `gate_v_campaign.py`** identifié, jamais encore créé — implémentation en
-  plusieurs tranches TDD (voir mission de suite).
+- **État réel d'implémentation (mis à jour AF-V-08 Slice 3, corrige une affirmation devenue
+  fausse)** : Slice 1 (`build_gate_v_campaign_plan()`) et Slice 2 (`GateVCampaignManifest`/
+  `derive_gate_v_campaign_status()`) sont IMPLEMENTED + TESTED + PUSHED sur `codex/af-v-08`
+  (commits `ee3f7b8`/`6d8cd29`). L'API additive Walk-Forward captured artifacts V1
+  (`run_walk_forward_with_artifacts_v1()`/`resume_walk_forward_with_artifacts_v1()`, ADR 0021
+  amendement) est également IMPLEMENTED + TESTED + PUSHED (commit `7958e29`). Slice 3
+  (`execute_gate_v_campaign()`, phase Walk-Forward uniquement) est en cours dans cette mission.
+  Slices 4 à 6 (Monte-Carlo, Parameter Stability, intégration bout-en-bout) restent NON commencées.
+  **`GATE V` reste NON PASSÉE** — aucune de ces tranches ne produit ni ne peut produire un verdict
+  `PASS`/Champion (Décision 15).
+- **`gate_v_campaign.py`** existe et contient à ce stade : Niveau A complet (Slice 1), le contrat
+  `GateVCampaignManifest` et le calcul pur de statut (Slice 2), et le squelette Niveau B limité à
+  la phase Walk-Forward (Slice 3) — implémentation des tranches suivantes toujours en attente.
 - **Dépendance explicite sur `AF-V-07`** (`ValidationPolicyVersion`) pour que `GATE V` passe
   RÉELLEMENT un jour — non bloquante pour CETTE ADR (`EVIDENCE_COMPLETE_AWAITING_POLICY` reste un
   état factuel valide et utile sans elle), mais nécessaire pour aller au-delà.
