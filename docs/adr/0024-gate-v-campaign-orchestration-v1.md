@@ -22,8 +22,13 @@ explicites, ne persiste rien elle-même. `persist_walk_forward_run()` (Slice 4) 
 FOLD, `folds/fold_NNN/{definition,selection,test_result}.json` et
 `{train_candidates,oos_trades,oos_equity}.csv` — `selection.json` porte `FoldSelection.selected_params`/
 `score_train` (le Top-1 TRAIN réel de CE fold), `train_candidates.csv` le pool TRAIN complet de CE
-fold. `resume_walk_forward_run()` (Slice 5) sait déjà reprendre un run Walk-Forward interrompu
-(SKIP/REPLAY_TEST/REDO) — **cette ADR ne réimplémente JAMAIS cette reprise, elle la RÉUTILISE**.
+fold. `resume_walk_forward_run()` (Slice 5) sait reprendre des artefacts historiques déjà
+persistés, mais les API historiques ne retournent pas les `FoldArtifacts` et n'écrivent aucun
+checkpoint pendant un run frais. **Amendement AF-V-08 du 2026-09-25, autorisé par Human Gate** :
+la campagne utilise les API additives `run_walk_forward_with_artifacts_v1()` et
+`resume_walk_forward_with_artifacts_v1()`, avec checkpoint par fold. Les API historiques gardent
+leurs signatures et comportements et partagent le même cœur interne. Aucun TRAIN/TEST n'est
+rejoué pour reconstruire des artefacts perdus. Voir ADR 0021, amendement AF-V-08.
 
 ## Décision 1 — Modèle de campagne : un `GateVCampaignPlan` immuable, distinct de toute `ValidationRun`
 
@@ -101,6 +106,12 @@ exige, sans AUCUN défaut :
 - `oos_evidence_validation_run_id: Optional[str]` — Décision 9, `None` tant qu'aucune preuve OOS
   fraîche n'est disponible.
 
+L'identité du plan lie les définitions complètes des folds, les bornes de `VALIDATION` (y compris
+la queue non exécutée), et une empreinte opaque de toutes les métadonnées du `DatasetSplitPlan`
+calculée par `dataset_split.py`. Elle lie aussi l'empreinte canonique de la `ValidationRun` OOS
+référencée, lorsqu'elle existe. Un même ID de source avec contenu modifié produit une autre
+identité de campagne ; le rechargement d'un plan détecte cette dérive.
+
 **Refuse (`ValueError` immédiat, AVANT toute validation de disque) toute construction avec un champ
 manquant ou vide** — mirroring la taxonomie fail-closed déjà établie (ADR 0021 Décision 11, ADR
 0022/0023 Décision 9).
@@ -131,9 +142,10 @@ d'exécution) :
 - Valide TOUTES les entrées obligatoires (Décision 3).
 - Charge le `DatasetSplitPlan` réel (`dataset_split.load_dataset_split_plan()`, DÉJÀ existant,
   jamais réimplémenté) — vérifie `split_plan.validation is not None` et
-  `split_plan.dataset_snapshot_id == dataset_snapshot_id` fourni — **lit UNIQUEMENT
-  `split_plan.validation`, ne référence JAMAIS `split_plan.final_holdout`** (Décision 10, vérifié
-  par un test d'absence de référence).
+  `split_plan.dataset_snapshot_id == dataset_snapshot_id` fourni — **utilise directement UNIQUEMENT
+  `split_plan.validation` pour construire les folds ; ne référence JAMAIS directement les bornes
+  terminales ni ne les transmet aux exécuteurs** (Décision 10, vérifié par un test d'absence de
+  référence dans le module ; validation opaque des métadonnées par `dataset_split.py`).
 - Calcule `expected_fold_ids` en appelant `walk_forward.compute_fold_definitions()` (fonction PURE
   déjà existante, ADR 0021 — aucun backtest, aucune donnée marché) sur `split_plan.validation` +
   une `WalkForwardSpecification` construite depuis les entrées du plan.
@@ -152,19 +164,19 @@ d'exécution) :
   collaborateur touchant réellement le moteur/les données) sont INJECTÉS, jamais importés
   directement dans le corps de la fonction d'orchestration** — mirroring le PRINCIPE établi par
   `validation_oos.py::run_oos_validation(run_backtest_fn: Callable, ...)` (injection = testabilité
-  sans donnée réelle), **jamais sa signature exacte** : contrairement à `run_backtest_fn` (un seul
-  collaborateur, une seule fonction réelle derrière), Walk-Forward expose DEUX fonctions réelles de
-  signatures et de types de retour DIFFÉRENTS (`walk_forward.run_walk_forward(...) ->
-  WalkForwardRunOutcome` vs `walk_forward.resume_walk_forward_run(..., data_manifest_path,
-  output_dir) -> Tuple[WalkForwardRunOutcome, AggregateResult]`, vérifié dans le code source, ADR
-  0021 Slices 3/5) — **une seule fonction injectée ne peut structurellement pas représenter les
-  deux**. `execute_gate_v_campaign()` accepte donc DEUX collaborateurs SÉPARÉS, keyword-only, SANS
-  valeur par défaut, et choisit lui-même lequel appeler selon qu'un `manifest.json` Walk-Forward
-  existe déjà sous `.../walk_forward/` (Décision 6, logique de sélection détaillée ; reprise à
-  l'identique par Décision 8) — jamais l'appelant, qui ne fournit que les DEUX
-  fonctions, jamais un choix déjà fait en amont. Un futur appelant réel passe directement
-  `walk_forward.run_walk_forward`/`walk_forward.resume_walk_forward_run` ; un test passe deux
-  doublures synthétiques (Décision 12).
+  sans donnée réelle), **jamais sa signature exacte**. `execute_gate_v_campaign()` accepte DEUX
+  collaborateurs SÉPARÉS, keyword-only, SANS valeur par défaut : démarrage et reprise ne sont pas
+  interchangeables, même si le contrat additif leur donne le même type de retour. Il choisit la
+  reprise si `.../walk_forward/.gate_v_checkpoints_v1/manifest.json` existe, y compris quand le
+  `manifest.json` final Walk-Forward n'a pas encore été écrit ; il choisit le démarrage si aucun
+  état Walk-Forward n'existe. Un manifeste final sans checkpoint capture cohérent est une erreur
+  de provenance à traiter avant tout recalcul. Jamais l'appelant ne choisit la phase en amont.
+  Depuis l'amendement AF-V-08, un futur appelant
+  réel passe `walk_forward.run_walk_forward_with_artifacts_v1` et
+  `walk_forward.resume_walk_forward_with_artifacts_v1` : chacune retourne un
+  `WalkForwardCapturedRunV1` contenant l'outcome, les artefacts par fold et l'agrégat. Les API
+  historiques restent compatibles mais ne fournissent pas les données requises ici. Un test passe
+  deux doublures synthétiques (Décision 12).
 - **`run_monte_carlo_simulation()`/`analyze_parameter_stability()` NE SONT PAS injectées** —
   appelées DIRECTEMENT (import module-level), contrairement à Walk-Forward : ce sont des fonctions
   PURES/déterministes opérant sur des trades déjà en mémoire (aucun accès disque/marché/moteur
@@ -182,23 +194,28 @@ d'exécution) :
 
 ## Décision 6 — Connecter Walk-Forward, Monte-Carlo et Parameter Stability (mapping scientifique précis)
 
-**Walk-Forward** : `execute_gate_v_campaign()` teste d'abord si `.../walk_forward/manifest.json`
-existe déjà sur disque (test EXISTANT, `Path.is_file()`, jamais une hypothèse) :
-- **Absent** → appelle `run_walk_forward_fn` (= `walk_forward.run_walk_forward` en usage réel) avec
-  `split_plan.validation`, la `WalkForwardSpecification` du plan, `base_params`, et
-  `output_dir = .../walk_forward/` — obtient un `WalkForwardRunOutcome`. **`run_walk_forward()`
-  retourne SEULEMENT un `WalkForwardRunOutcome` (JAMAIS un `AggregateResult` — vérifié,
-  `walk_forward.py` ligne 799-808), contrairement à `resume_walk_forward_run()` (précision MINEURE,
-  revue scientifique)** : `execute_gate_v_campaign()` DOIT donc appeler explicitement
-  `walk_forward.build_aggregate_result(outcome.fold_results)` (EXISTANT, `walk_forward.py` ligne
-  863) dans CETTE branche pour obtenir l'`AggregateResult` — jamais un `aggregate=None` transmis à
-  `persist_walk_forward_run()` ci-dessous, qui casserait silencieusement le marqueur de complétion
-  (`aggregate.json` n'est écrit QUE si `aggregate is not None`, `walk_forward.py` lignes 1210-1214)
-  dont dépend la garde de non-double-persistance ci-dessous.
-- **Présent** → appelle `resume_walk_forward_fn` (= `walk_forward.resume_walk_forward_run` en usage
-  réel, signature RÉELLE distincte — Décision 5) avec les DEUX paramètres supplémentaires qu'elle
-  exige (`data_manifest_path`, `output_dir`) — obtient le même couple
-  `WalkForwardRunOutcome`/`AggregateResult`.
+**Walk-Forward (amendement AF-V-08)** : le marqueur de reprise du calcul est désormais
+`.../walk_forward/.gate_v_checkpoints_v1/manifest.json`, distinct du `manifest.json` final écrit
+par `persist_walk_forward_run()`. `execute_gate_v_campaign()` décide ainsi, après validation des
+identifiants et fingerprints :
+- `aggregate.json` final déjà présent : la persistance est complète ; relire et valider les
+  artefacts de cette campagne, sans appel de calcul ni de persistance ;
+- checkpoint présent, agrégat final absent : appeler `resume_walk_forward_fn` (API
+  `resume_walk_forward_with_artifacts_v1` en usage réel) ; chaque fold dont le checkpoint complet
+  est valide est relu sans TRAIN/TEST, seuls les folds absents sont exécutés ;
+- ni checkpoint ni agrégat final : appeler `run_walk_forward_fn` (API
+  `run_walk_forward_with_artifacts_v1` en usage réel), qui capture pour chaque fold son résultat,
+  son pool TRAIN, son Top-1 et ses DataFrames TEST lors de l'unique exécution.
+
+Les deux collaborateurs reçoivent les entrées réelles nécessaires (`validation_zone`,
+`WalkForwardSpecification`, `readiness_spec`, `base_config`, DataFrame de marché chargée par le
+collaborateur injecté, `data_manifest_path`, `output_dir`, `validation_run_id`) ; aucun de ces
+objets n'est deviné depuis `base_params` ou `search_space_hash`. Ils retournent un
+`WalkForwardCapturedRunV1` avec `outcome`, `fold_artifacts` associés par `fold_id`, et `aggregate`
+calculé depuis tous les folds attendus. Une vérification pré-exécution compare `base_config` au
+plan (`base_params`, `search_mode`, empreinte réelle du search space, budget) et refuse toute
+divergence avant un appel coûteux. Un outcome partiel reste incomplet et n'est jamais persisté
+comme un run achevé.
 
 **Persistance appelée AU PLUS UNE FOIS par campagne (correctif BLOCKER, revue architecture)** :
 `persist_walk_forward_run()` (Slice 4) est un appel UNIQUE, tout-ou-rien — elle écrit
@@ -207,14 +224,14 @@ chaque fichier par fold, `state.json`, et enfin `aggregate.json` EN DERNIER
 (`walk_forward.py` lignes 1210-1214) ; sa propre docstring documente qu'elle n'est "pas conçue pour
 ré-écrire" un run déjà persisté — **elle N'EST DONC JAMAIS rappelée après un `resume_walk_forward_fn`
 qui aurait déjà été précédé d'un appel `persist_walk_forward_run()` réussi**, sous peine de
-`FileExistsError` dès sa toute première écriture (`manifest.json`, déjà présent par construction
-puisque c'est CE fichier qui a déclenché le choix `resume_walk_forward_fn` ci-dessus). Règle
+`FileExistsError` dès sa toute première écriture (`manifest.json`, déjà présent dans ce cas). Règle
 précise appliquée par `execute_gate_v_campaign()` : APRÈS avoir obtenu un `WalkForwardRunOutcome`
 COMPLET (fresh ou résumé — un outcome partiel/interrompu n'est JAMAIS transmis à la persistance),
 teste si `.../walk_forward/aggregate.json` (dernier fichier écrit par `persist_walk_forward_run()`,
 donc marqueur fiable de complétion totale) existe déjà : si OUI, la persistance Walk-Forward de
 cette campagne est DÉJÀ terminée, `persist_walk_forward_run()` n'est PAS rappelée ; si NON, elle est
-appelée EXACTEMENT une fois, sur l'outcome complet. Voir Décision 8 pour la reprise et la limite
+appelée EXACTEMENT une fois, sur l'outcome complet ET les `fold_artifacts` capturés pendant ce
+même calcul. Voir Décision 8 pour la reprise et la limite
 résiduelle connue (crash pendant cet unique appel).
 
 Assemble la `ValidationRun` Walk-Forward via `build_walk_forward_validation_run()` (EXISTANT, Slice
@@ -250,7 +267,7 @@ POSITIONNELS SANS défaut (`validation_run.py` — `MonteCarloSpecification`/`Pa
 champs `bool` sans valeur par défaut). **`execute_gate_v_campaign()` fixe les DEUX à `True`, en dur,
 jamais un paramètre configurable de `GateVCampaignPlan`** : dans une campagne `GATE V` réelle, les
 trades TEST Walk-Forward proviennent STRUCTURELLEMENT du Top-1 TRAIN-optimisé de chaque fold (ADR
-0021 Décision 6, "S1 = Top-1 TRAIN"), et le pool `train_candidates.csv` consommé par Parameter
+0021 Décision 6, "S1 = Top-1 TRAIN"), et le pool brut capturé consommé par Parameter
 Stability EST le pool de CETTE MÊME recherche optimisée — il ne peut structurellement JAMAIS en être
 autrement dans ce câblage. Mettre `False` ici (ou laisser un appelant le choisir) masquerait
 exactement la circularité que ADR 0022 Décision 1/ADR 0023 Décision 1 ont introduit ces drapeaux
@@ -260,10 +277,13 @@ construction l'argmax in-sample du pool analysé) — une évidence `ValidationR
 
 **Parameter Stability — mapping EXACT demandé par l'utilisateur (Décision 12)** :
 - **Un pool par fold, jamais fusionné entre folds** : pour CHAQUE fold `f` de `expected_fold_ids`
-  DÉJÀ terminé (Décision 7), charge `folds/fold_f/train_candidates.csv` (pool TRAIN complet de CE
-  fold) et `folds/fold_f/selection.json` (`FoldSelection.selected_params`/`score_train` — le Top-1
-  RÉELLEMENT sélectionné pour CE MÊME fold, jamais un Top-1 d'un autre fold ni un "meilleur global"
-  inventé).
+  DÉJÀ terminé (Décision 7), utilise `WalkForwardCapturedRunV1.fold_artifacts[f].train_candidates`
+  (pool TRAIN complet de CE fold, capturé à l'unique exécution ou relu depuis son checkpoint V1)
+  et `outcome.fold_results[f].selection` (`selected_params`/`score_train` — le Top-1 RÉELLEMENT
+  sélectionné pour CE MÊME fold). Les CSV/JSON finaux restent les artefacts publiés par
+  `persist_walk_forward_run()`, mais ne sont pas la source numérique de Parameter Stability :
+  `read_csv()` peut arrondir un `score_train` d'une ULP et rompre l'identité exacte avec le Top-1.
+  Aucun Top-1 d'un autre fold ni "meilleur global" n'est reconstruit.
 - Assemble `ParameterStabilitySpecification` via `build_parameter_stability_specification()`
   (EXISTANT, ÉTENDU pour cette mission — voir Décision 14) avec `source_validation_run_id` = le
   `validation_run_id` Walk-Forward de la campagne, `source_fold_id = f` (traçabilité corrigée,
@@ -327,15 +347,20 @@ lire "GATE V est passée" (Décision 15).
 
 ## Décision 8 — Reprise après interruption, sans doublon
 
-**Walk-Forward** : délègue ENTIÈREMENT à `resume_walk_forward_fn`/`resume_walk_forward_run()`
-(EXISTANT, Slice 5 — SKIP/REPLAY_TEST/REDO déjà prouvé sans doublon) pour la reprise de la
-recherche TRAIN/TEST elle-même — `execute_gate_v_campaign()` choisit `resume_walk_forward_fn`
-plutôt que `run_walk_forward_fn` dès qu'un `manifest.json` Walk-Forward existe déjà sous
-`.../walk_forward/`, jamais une logique de reprise réinventée (Décision 5/6).
+**Walk-Forward (amendement AF-V-08)** : les deux nouvelles API partagent le cœur d'exécution
+avec les fonctions historiques et capturent un `FoldArtifacts` pendant l'unique TRAIN/TEST de
+chaque fold. Un checkpoint atomique par fold est écrit immédiatement sous
+`.../walk_forward/.gate_v_checkpoints_v1/` ; il porte résultat, pool TRAIN, Top-1, trades et
+equity TEST et provenance. Le manifeste de checkpoint fige le fingerprint avant le premier fold.
+La reprise valide d'abord le fingerprint et TOUS les checkpoints présents, puis saute chaque fold
+déjà complet et valide. Elle exécute uniquement les folds absents. Un crash avant l'écriture du
+checkpoint d'un fold peut nécessiter de refaire CE fold non validé ; aucun fold déjà validé n'est
+recalculé. Le checkpoint reste distinct de la persistance finale et n'est jamais une preuve
+scientifique complète à lui seul.
 
 **Limite résiduelle connue et acceptée, non corrigée par cette ADR (finding BLOCKER, revue
 architecture — périmètre de la correction expliqué ici)** : la reprise ci-dessus couvre une
-interruption PENDANT la recherche TRAIN/TEST (potentiellement longue, heures). Elle NE couvre PAS
+interruption PENDANT la recherche TRAIN/TEST après un checkpoint validé. Elle NE couvre PAS
 une interruption PENDANT l'unique appel `persist_walk_forward_run()` lui-même (Décision 6) — cette
 fonction (Slice 4, EXISTANTE, explicitement non modifiée par cette mission : "jamais réimplémentée")
 n'a aucune tolérance à une ré-écriture partielle, chaque `save_atomic()` refusant tout fichier déjà
@@ -344,8 +369,9 @@ avant `fold_003/`) laisserait `.../walk_forward/` dans un état ni "absent" (don
 `run_walk_forward_fn` propre) ni "complet" (`aggregate.json` absent, donc pas de skip Décision 6) —
 un second appel `persist_walk_forward_run()` échouerait immédiatement (`FileExistsError` sur les
 fichiers déjà écrits). **Ce cas précis reste une limitation connue, documentée, à résolution
-MANUELLE** (supprimer `.../walk_forward/` et relancer `run_walk_forward_fn` depuis zéro pour cette
-campagne) — accepté comme risque résiduel proportionné : `persist_walk_forward_run()` n'exécute que
+MANUELLE** (isoler les artefacts finaux partiels puis reprendre depuis les checkpoints VALIDÉS,
+sans relancer les folds valides ; ne jamais supprimer ces checkpoints) — accepté comme risque
+résiduel proportionné : `persist_walk_forward_run()` n'exécute que
 des écritures disque atomiques rapides (pas de recherche TRAIN, pas d'accès réseau), une fenêtre
 d'exposition très inférieure à celle de la recherche elle-même. La rendre elle-même tolérante à une
 reprise partielle exigerait de modifier le contrat gelé de Slice 4 (AF-V-02) — hors périmètre de
@@ -372,13 +398,27 @@ qu'un futur appelant fournisse un `validation_run_id` réel via un NOUVEAU `Gate
 n'appelle JAMAIS `validation_oos.run_oos_validation()`** — aucun import de ce module, aucune
 notion d'exécuter un OOS depuis cette orchestration, EN AUCUN CAS (mirroring Décision 5/13).
 
+La référence OOS est contrôlée sur disque : type, identifiants, statut `completed`, spécification
+présente, bornes cohérentes avec l'evidence et avec la zone terminale du split courant. Ce dernier
+contrôle est délégué à `dataset_split.py`, qui compare uniquement des métadonnées de fenêtres ;
+aucune donnée de marché n'est ouverte. Sa présence ne prouve ni la fraîcheur scientifique du
+snapshot, ni un verdict `PASS` (Décision 15).
+
 ## Décision 10 — Impossibilité structurelle d'accéder à `FINAL_HOLDOUT`
 
-`gate_v_campaign.py` lit `DatasetSplitPlan.validation` (Niveau A) et transmet cette SEULE zone à
-`compute_fold_definitions()`/`run_walk_forward_fn`/`resume_walk_forward_fn` — ne lit, ne transmet,
-ne référence JAMAIS `DatasetSplitPlan.final_holdout`. **`gate_v_campaign.py` n'importe jamais
+`gate_v_campaign.py` lit directement `DatasetSplitPlan.validation` (Niveau A) et transmet cette
+SEULE zone à `compute_fold_definitions()`/`run_walk_forward_fn`/`resume_walk_forward_fn` — ne lit,
+ne transmet, ne référence JAMAIS directement `DatasetSplitPlan.final_holdout`. Les métadonnées
+terminales sont validées de façon opaque par `dataset_split.py`, sans accès aux données marché.
+**`gate_v_campaign.py` n'importe jamais
 `validation_oos.py`** (le seul module autorisé à connaître le holdout, `validation_oos.py`
 docstring module) — vérifié par un test d'import statique dédié (Décision 13).
+
+La validation structurelle du split et de la référence OOS est déléguée aux fonctions de
+`dataset_split.py` : elles vérifient les bornes de toutes les zones, fournissent une empreinte
+opaque du split et contrôlent la concordance d'une fenêtre OOS externe. L'orchestrateur ne lit ni
+ne transmet les bornes terminales aux exécuteurs Walk-Forward ; ces contrôles portent uniquement
+sur les métadonnées du plan, jamais sur les données de marché.
 
 **Portée exacte de cette garantie (finding MAJEUR, revue architecture — précision ajoutée, aucune
 garantie retirée)** : le test d'import statique ne prouve l'absence d'accès `FINAL_HOLDOUT` que
@@ -409,7 +449,7 @@ d'import dans `scripts/autopilot/`.
 Mirroring le PRINCIPE déjà établi pour `validation_oos.run_oos_validation(run_backtest_fn)`, jamais
 sa signature exacte (Décision 5) : tous les tests de `execute_gate_v_campaign()` injectent
 `run_walk_forward_fn`/`resume_walk_forward_fn`/`load_market_data_fn` FACTICES (retournent un
-`WalkForwardRunOutcome`/`Tuple[WalkForwardRunOutcome, AggregateResult]`/`DataFrame` synthétique
+`WalkForwardCapturedRunV1`/`DataFrame` synthétique
 construit à la main, jamais `nasdaq_3m.csv`) — AUCUN test de cette mission ne charge de donnée
 réelle ni n'appelle le moteur réel. `run_monte_carlo_simulation()`/`analyze_parameter_stability()`
 restent les fonctions RÉELLES (non injectées, Décision 5) exercées directement sur des trades

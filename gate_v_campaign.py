@@ -14,9 +14,11 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union
+from typing import Mapping, Optional, Union
 
-from atomic_json_store import load_json_tolerant, save_atomic, validate_portable_identifier
+from atomic_json_store import (
+    load_json_tolerant, save_atomic, save_atomic_overwrite, validate_portable_identifier,
+)
 from dataset_split import (
     assert_oos_window_matches_split, dataset_split_plan_fingerprint, load_dataset_split_plan,
 )
@@ -24,8 +26,19 @@ from strategy_contracts import DailyStateReadiness
 from validation_run import (
     MONTE_CARLO_SEMANTICS_VERSION,
     PARAMETER_STABILITY_SEMANTICS_VERSION,
+    VALIDATION_TYPE_MONTE_CARLO,
     VALIDATION_TYPE_OOS,
+    VALIDATION_TYPE_PARAMETER_STABILITY,
+    VALIDATION_TYPE_WALK_FORWARD,
+    MonteCarloEvidence,
+    MonteCarloSpecification,
     OosValidationSpecification,
+    ParameterStabilityEvidence,
+    ParameterStabilitySpecification,
+    build_monte_carlo_specification,
+    build_parameter_stability_specification,
+    ValidationRun,
+    WalkForwardEvidence,
     WalkForwardSpecification,
     load_validation_run,
 )
@@ -405,3 +418,501 @@ def load_gate_v_campaign_plan(
     if record != _plan_record(plan):
         raise ValueError(f"plan.json contient des champs inattendus ou modifiés : {path}.")
     return plan
+
+
+GATE_V_CAMPAIGN_STATUSES = frozenset({
+    "NOT_READY", "READY_FOR_EXECUTION", "RUNNING", "EVIDENCE_INCOMPLETE",
+    "EVIDENCE_COMPLETE_AWAITING_POLICY", "TECHNICAL_FAILURE",
+})
+
+
+@dataclass(frozen=True)
+class GateVCampaignManifest:
+    """Factually scoped campaign progress; no scientific verdict or combined score."""
+
+    campaign_id: str
+    expected_fold_ids: tuple[str, ...]
+    status: str
+    oos_evidence_validation_run_id: Optional[str]
+    walk_forward_validation_run_id: Optional[str]
+    monte_carlo_validation_run_id: Optional[str]
+    parameter_stability_validation_run_ids_by_fold: dict[str, str]
+    execution_started: bool
+    running: bool
+    technical_failure_reason: Optional[str]
+
+
+def gate_v_validation_run_id(
+    plan: GateVCampaignPlan, validation_type: str, *, fold_id: Optional[str] = None,
+) -> str:
+    """Reserve a deterministic campaign-scoped ID for internally produced evidence."""
+    if not isinstance(plan, GateVCampaignPlan):
+        raise ValueError("plan doit être un GateVCampaignPlan validé.")
+    if validation_type not in {
+        VALIDATION_TYPE_WALK_FORWARD, VALIDATION_TYPE_MONTE_CARLO,
+        VALIDATION_TYPE_PARAMETER_STABILITY,
+    }:
+        raise ValueError("validation_type doit être une preuve interne GATE V reconnue.")
+    if validation_type == VALIDATION_TYPE_PARAMETER_STABILITY:
+        if fold_id not in plan.expected_fold_ids:
+            raise ValueError("source_fold_id doit appartenir aux folds attendus de la campagne.")
+        suffix = f"_{fold_id}"
+    elif fold_id is not None:
+        raise ValueError("fold_id n'est autorisé que pour Parameter Stability.")
+    else:
+        suffix = ""
+    return validate_portable_identifier(
+        f"{plan.campaign_id}_{validation_type}{suffix}", "validation_run_id",
+    )
+
+
+def build_gate_v_campaign_manifest(plan: GateVCampaignPlan) -> GateVCampaignManifest:
+    """Create the initial, unexecuted manifest from a validated campaign plan."""
+    if not isinstance(plan, GateVCampaignPlan):
+        raise ValueError("plan doit être un GateVCampaignPlan validé.")
+    return GateVCampaignManifest(
+        campaign_id=plan.campaign_id, expected_fold_ids=plan.expected_fold_ids,
+        status="READY_FOR_EXECUTION",
+        oos_evidence_validation_run_id=plan.oos_evidence_validation_run_id,
+        walk_forward_validation_run_id=None, monte_carlo_validation_run_id=None,
+        parameter_stability_validation_run_ids_by_fold={},
+        execution_started=False, running=False, technical_failure_reason=None,
+    )
+
+
+def _validate_gate_v_manifest_structure(
+    plan: GateVCampaignPlan, manifest: GateVCampaignManifest, *, enforce_status_markers: bool = False,
+) -> None:
+    if not isinstance(plan, GateVCampaignPlan) or not isinstance(manifest, GateVCampaignManifest):
+        raise ValueError("plan et manifest doivent être des contrats GATE V validés.")
+    if manifest.campaign_id != plan.campaign_id or tuple(manifest.expected_fold_ids) != plan.expected_fold_ids:
+        raise ValueError("Le manifeste appartient à une autre campagne ou à d'autres folds.")
+    if manifest.status not in GATE_V_CAMPAIGN_STATUSES:
+        raise ValueError(f"Statut de campagne inconnu : {manifest.status!r}.")
+    if manifest.oos_evidence_validation_run_id != plan.oos_evidence_validation_run_id:
+        raise ValueError("La référence OOS du manifeste diffère du plan de campagne.")
+    if not isinstance(manifest.execution_started, bool) or not isinstance(manifest.running, bool):
+        raise ValueError("Les marqueurs d'exécution du manifeste doivent être booléens.")
+    if manifest.running and not manifest.execution_started:
+        raise ValueError("Un manifeste RUNNING doit avoir démarré l'exécution.")
+    if manifest.technical_failure_reason is not None and (
+        not isinstance(manifest.technical_failure_reason, str)
+        or not manifest.technical_failure_reason.strip()
+        or not manifest.execution_started
+    ):
+        raise ValueError("technical_failure_reason exige une exécution démarrée et un motif non vide.")
+    if manifest.technical_failure_reason is not None and manifest.running:
+        raise ValueError("Une erreur technique ne peut pas rester RUNNING.")
+    if not isinstance(manifest.parameter_stability_validation_run_ids_by_fold, dict):
+        raise ValueError("Le mapping Parameter Stability doit être un dictionnaire fold -> run ID.")
+    unexpected = set(manifest.parameter_stability_validation_run_ids_by_fold) - set(plan.expected_fold_ids)
+    if unexpected:
+        raise ValueError(f"Le manifeste contient des folds étrangers à la campagne : {sorted(unexpected)}.")
+    for field_name, run_id, validation_type, fold_id in (
+        ("walk_forward_validation_run_id", manifest.walk_forward_validation_run_id,
+         VALIDATION_TYPE_WALK_FORWARD, None),
+        ("monte_carlo_validation_run_id", manifest.monte_carlo_validation_run_id,
+         VALIDATION_TYPE_MONTE_CARLO, None),
+        *((f"parameter_stability_validation_run_ids_by_fold[{fold_id}]", run_id,
+           VALIDATION_TYPE_PARAMETER_STABILITY, fold_id)
+          for fold_id, run_id in manifest.parameter_stability_validation_run_ids_by_fold.items()),
+    ):
+        if fold_id is not None and run_id is None:
+            raise ValueError(f"{field_name} ne peut pas être null pour un fold référencé.")
+        if run_id is not None and run_id != gate_v_validation_run_id(
+            plan, validation_type, fold_id=fold_id,
+        ):
+            raise ValueError(f"{field_name} est étranger à cette campagne ou à ce fold.")
+    if not manifest.execution_started and (
+        manifest.walk_forward_validation_run_id is not None
+        or manifest.monte_carlo_validation_run_id is not None
+        or manifest.parameter_stability_validation_run_ids_by_fold
+    ):
+        raise ValueError("Une preuve interne ne peut pas précéder le démarrage de la campagne.")
+    if manifest.walk_forward_validation_run_id is None and (
+        manifest.monte_carlo_validation_run_id is not None
+        or manifest.parameter_stability_validation_run_ids_by_fold
+    ):
+        raise ValueError("Monte-Carlo et Parameter Stability exigent une preuve source Walk-Forward.")
+    if manifest.status == "EVIDENCE_COMPLETE_AWAITING_POLICY" and (
+        manifest.oos_evidence_validation_run_id is None
+        or manifest.walk_forward_validation_run_id is None
+        or manifest.monte_carlo_validation_run_id is None
+        or set(manifest.parameter_stability_validation_run_ids_by_fold) != set(plan.expected_fold_ids)
+    ):
+        raise ValueError("Un manifeste complet doit référencer les quatre catégories et tous les folds.")
+    if enforce_status_markers:
+        if manifest.technical_failure_reason is not None:
+            expected_statuses = {"TECHNICAL_FAILURE"}
+        elif manifest.running:
+            expected_statuses = {"RUNNING"}
+        elif not manifest.execution_started:
+            expected_statuses = {"READY_FOR_EXECUTION"}
+        else:
+            expected_statuses = {"EVIDENCE_INCOMPLETE", "EVIDENCE_COMPLETE_AWAITING_POLICY"}
+        if manifest.status not in expected_statuses:
+            raise ValueError("Le statut du manifeste contredit ses marqueurs d'exécution.")
+
+
+def _evidence_field(value, name: str):
+    """Nested ValidationRun records may be dataclasses in memory or dicts after JSON load."""
+    return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+
+
+def _validate_scoped_run(
+    plan: GateVCampaignPlan, run_id: str, validation_type: str,
+    evidence_by_validation_run_id: Mapping[str, ValidationRun],
+) -> Optional[ValidationRun]:
+    run = evidence_by_validation_run_id.get(run_id)
+    if run is None:
+        return None
+    if not isinstance(run, ValidationRun) or run.validation_run_id != run_id:
+        raise ValueError(f"validation_run_id {run_id!r} incohérent ou étranger à la campagne.")
+    if (
+        run.validation_type != validation_type
+        or run.dataset_snapshot_id != plan.dataset_snapshot_id
+        or run.split_plan_id != plan.split_plan_id
+        or run.strategy_name != plan.strategy_name
+        or run.status != "completed"
+    ):
+        raise ValueError(f"Preuve {run_id!r} de type, statut ou provenance étrangère à la campagne.")
+    if validation_type != VALIDATION_TYPE_OOS and run.research_run_id != plan.research_run_id:
+        raise ValueError(f"Preuve {run_id!r} issue d'un autre ResearchRun/campagne.")
+    if validation_type != VALIDATION_TYPE_OOS and _evidence_field(
+        run.evidence, "scientific_verdict"
+    ) != "INCONCLUSIVE":
+        raise ValueError(f"Preuve {run_id!r} avec verdict scientifique sans policy enregistrée.")
+    if validation_type in (VALIDATION_TYPE_WALK_FORWARD, VALIDATION_TYPE_MONTE_CARLO) and (
+        run.strategy_params != plan.base_params
+    ):
+        raise ValueError(f"Paramètres de stratégie {validation_type} étrangers au plan.")
+    return run
+
+
+def _walk_forward_complete(plan: GateVCampaignPlan, run: ValidationRun) -> bool:
+    if not isinstance(run.specification, WalkForwardSpecification) or run.specification != plan.walk_forward_specification:
+        raise ValueError("La spécification Walk-Forward diffère du plan de campagne.")
+    if not isinstance(run.evidence, WalkForwardEvidence):
+        raise ValueError("Preuve Walk-Forward de type incohérent.")
+    evidence = run.evidence
+    if evidence.execution_status != "completed" or evidence.aggregate is None:
+        return False
+    folds = evidence.fold_results
+    if tuple(_evidence_field(fold, "fold_id") for fold in folds) != plan.expected_fold_ids:
+        return False
+    for fold in folds:
+        fold_id = _evidence_field(fold, "fold_id")
+        definition = _evidence_field(fold, "definition")
+        selection = _evidence_field(fold, "selection")
+        n_trades = _evidence_field(fold, "n_trades")
+        zero_trade = _evidence_field(fold, "zero_trade_oos")
+        if (not isinstance(n_trades, int) or isinstance(n_trades, bool) or n_trades < 0
+                or not isinstance(zero_trade, bool) or zero_trade != (n_trades == 0)):
+            raise ValueError(f"Fold {fold_id} : compte ou indicateur zéro trade TEST incohérent.")
+        if n_trades == 0 and (
+            _evidence_field(fold, "net_ret_pct") != 0.0
+            or any(_evidence_field(fold, name) is not None for name in (
+                "profit_factor", "win_rate", "expectancy",
+            ))
+        ):
+            raise ValueError(f"Fold {fold_id} : métrique inventée sur zéro trade TEST.")
+        if (
+            _evidence_field(definition, "fold_id") != fold_id
+            or _evidence_field(selection, "fold_id") != fold_id
+            or _evidence_field(selection, "rank_in_train") != 1
+            or _evidence_field(selection, "search_space_hash") != plan.search_space_hash
+            or _evidence_field(selection, "algorithm") != plan.search_mode
+            or not isinstance(_evidence_field(selection, "train_candidates_evaluated"), int)
+            or not 0 < _evidence_field(selection, "train_candidates_evaluated") <= plan.budget_per_fold
+        ):
+            raise ValueError(f"Top-1 TRAIN ou search_space_hash incohérent pour {fold_id}.")
+    definitions = [_evidence_field(fold, "definition") for fold in folds]
+    if any(definition is None for definition in definitions):
+        return False
+    payload = json.dumps(
+        [dataclasses.asdict(item) if dataclasses.is_dataclass(item) else item for item in definitions],
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    if hashlib.sha256(payload.encode("utf-8")).hexdigest() != plan.expected_fold_definitions_hash:
+        raise ValueError("Les bornes Walk-Forward ne correspondent pas aux folds de la campagne.")
+    aggregate = evidence.aggregate
+    if _evidence_field(aggregate, "n_folds") != len(plan.expected_fold_ids):
+        return False
+    if _evidence_field(aggregate, "total_oos_trades") != sum(
+        _evidence_field(fold, "n_trades") for fold in folds
+    ):
+        raise ValueError("Le compte des trades Walk-Forward diffère de l'agrégat.")
+    if _evidence_field(aggregate, "n_folds_zero_trade") != sum(
+        _evidence_field(fold, "zero_trade_oos") for fold in folds
+    ):
+        raise ValueError("Le compte des folds zéro trade Walk-Forward diffère de l'agrégat.")
+    return True
+
+
+def _parameter_stability_quality(
+    plan: GateVCampaignPlan, run: ValidationRun, fold_id: str, wf_id: str,
+    source_fold_result=None,
+) -> bool:
+    specification, evidence = run.specification, run.evidence
+    if not isinstance(specification, ParameterStabilitySpecification) or not isinstance(
+        evidence, ParameterStabilityEvidence,
+    ):
+        raise ValueError("Preuve Parameter Stability de type incohérent.")
+    if (
+        specification != build_parameter_stability_specification(
+            wf_id, plan.search_mode, True, source_fold_id=fold_id,
+        )
+        or evidence.search_mode != plan.search_mode
+    ):
+        raise ValueError(f"Provenance Parameter Stability incorrecte pour le fold {fold_id}.")
+    if evidence.execution_status != "completed":
+        return False
+    if source_fold_result is not None:
+        selection = _evidence_field(source_fold_result, "selection")
+        if (
+            selection is None
+            or evidence.best_params != _evidence_field(selection, "selected_params")
+            or evidence.best_score != _evidence_field(selection, "score_train")
+            or evidence.n_candidates_total != _evidence_field(selection, "train_candidates_evaluated")
+        ):
+            raise ValueError(f"Parameter Stability {fold_id} ne correspond pas au Top-1/pool TRAIN du fold.")
+    totals = evidence.n_neighbors_total_by_param
+    rejected = evidence.n_neighbors_rejected_by_param
+    if not isinstance(totals, dict) or not isinstance(rejected, dict):
+        raise ValueError(f"Compteurs de voisins invalides pour le fold {fold_id}.")
+    for param, total in totals.items():
+        rejection = rejected.get(param)
+        if (
+            not isinstance(total, int) or isinstance(total, bool) or total < 0
+            or not isinstance(rejection, int) or isinstance(rejection, bool)
+            or rejection < 0 or rejection > total
+            or total > evidence.n_candidates_total - 1
+        ):
+            raise ValueError(f"Compteurs de voisins incohérents pour le fold {fold_id}.")
+    if set(rejected) != set(totals):
+        raise ValueError(f"Compteurs de voisins incomplets pour le fold {fold_id}.")
+    usable = [param for param, total in totals.items() if total - rejected[param] > 0]
+    if evidence.neighborhood_applicability != "local_neighborhood_available" or not usable:
+        return False
+    for param in usable:
+        for summaries in (evidence.degradation_by_param, evidence.degradation_points_by_param):
+            summary = summaries.get(param) if isinstance(summaries, dict) else None
+            if summary is None or any(
+                not isinstance(_evidence_field(summary, percentile), (int, float))
+                or not math.isfinite(_evidence_field(summary, percentile))
+                for percentile in ("p5", "p25", "p50", "p75", "p95")
+            ):
+                return False
+    return True
+
+
+def derive_gate_v_campaign_status(
+    plan: GateVCampaignPlan, manifest: GateVCampaignManifest,
+    evidence_by_validation_run_id: Mapping[str, ValidationRun],
+) -> str:
+    """Pure structural status; never reads files or derives a scientific PASS/FAIL."""
+    _validate_gate_v_manifest_structure(plan, manifest)
+    if not isinstance(evidence_by_validation_run_id, Mapping):
+        raise ValueError("evidence_by_validation_run_id doit être un mapping de ValidationRun.")
+    oos_id = manifest.oos_evidence_validation_run_id
+    wf_id = manifest.walk_forward_validation_run_id
+    mc_id = manifest.monte_carlo_validation_run_id
+    oos = (_validate_scoped_run(plan, oos_id, VALIDATION_TYPE_OOS, evidence_by_validation_run_id)
+           if oos_id is not None else None)
+    wf = (_validate_scoped_run(plan, wf_id, VALIDATION_TYPE_WALK_FORWARD, evidence_by_validation_run_id)
+          if wf_id is not None else None)
+    mc = (_validate_scoped_run(plan, mc_id, VALIDATION_TYPE_MONTE_CARLO, evidence_by_validation_run_id)
+          if mc_id is not None else None)
+    if oos is not None and plan.oos_evidence_hash is not None:
+        payload = json.dumps(
+            dataclasses.asdict(oos), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        if hashlib.sha256(payload.encode("utf-8")).hexdigest() != plan.oos_evidence_hash:
+            raise ValueError("La preuve OOS ne correspond plus à l'empreinte du plan de campagne.")
+    wf_complete = _walk_forward_complete(plan, wf) if wf is not None else False
+    mc_complete = False
+    if mc is not None:
+        if not isinstance(mc.specification, MonteCarloSpecification) or not isinstance(mc.evidence, MonteCarloEvidence):
+            raise ValueError("Preuve Monte-Carlo de type incohérent.")
+        if mc.specification != build_monte_carlo_specification(
+            gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD), True,
+        ):
+            raise ValueError("Provenance Monte-Carlo étrangère à la campagne Walk-Forward.")
+        if wf is not None and wf.evidence.aggregate is not None:
+            expected_trades = _evidence_field(wf.evidence.aggregate, "total_oos_trades")
+            if (mc.evidence.n_input_trades != expected_trades
+                    or mc.evidence.zero_trade_input != (expected_trades == 0)):
+                raise ValueError("Le compte des trades Monte-Carlo diffère du Walk-Forward.")
+        if mc.evidence.zero_trade_input and any(
+            getattr(mc.evidence, field_name) is not None for field_name in (
+                "observed_net_ret_pct", "observed_max_dd_trade_close_basis_pct",
+                "observed_lag1_autocorrelation", "observed_longest_losing_streak",
+                "sequence_risk_max_dd_trade_close_basis_pct",
+                "sequence_risk_longest_losing_streak",
+                "sampling_uncertainty_net_ret_pct",
+                "sampling_uncertainty_max_dd_trade_close_basis_pct",
+            )
+        ):
+            raise ValueError("Monte-Carlo à zéro trade ne peut contenir de métrique inventée.")
+        mc_complete = mc.evidence.execution_status == "completed"
+        if not mc.evidence.zero_trade_input:
+            observed = (
+                mc.evidence.observed_net_ret_pct,
+                mc.evidence.observed_max_dd_trade_close_basis_pct,
+            )
+            distributions = (
+                mc.evidence.sequence_risk_max_dd_trade_close_basis_pct,
+                mc.evidence.sequence_risk_longest_losing_streak,
+                mc.evidence.sampling_uncertainty_net_ret_pct,
+                mc.evidence.sampling_uncertainty_max_dd_trade_close_basis_pct,
+            )
+            mc_complete = mc_complete and (
+                mc.evidence.n_input_trades > 0
+                and all(isinstance(value, (int, float)) and math.isfinite(value) for value in observed)
+                and isinstance(mc.evidence.observed_longest_losing_streak, int)
+                and mc.evidence.observed_longest_losing_streak >= 0
+                and all(summary is not None and all(
+                    isinstance(_evidence_field(summary, percentile), (int, float))
+                    and math.isfinite(_evidence_field(summary, percentile))
+                    for percentile in ("p5", "p25", "p50", "p75", "p95")
+                ) for summary in distributions)
+            )
+    ps_complete = set(manifest.parameter_stability_validation_run_ids_by_fold) == set(plan.expected_fold_ids)
+    source_folds = {
+        _evidence_field(fold, "fold_id"): fold for fold in wf.evidence.fold_results
+    } if wf is not None and isinstance(wf.evidence, WalkForwardEvidence) else {}
+    for fold_id, ps_id in manifest.parameter_stability_validation_run_ids_by_fold.items():
+        ps = _validate_scoped_run(
+            plan, ps_id,
+            VALIDATION_TYPE_PARAMETER_STABILITY, evidence_by_validation_run_id,
+        )
+        if ps is None or not _parameter_stability_quality(
+            plan, ps, fold_id, gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD),
+            source_folds.get(fold_id),
+        ):
+            ps_complete = False
+    if manifest.technical_failure_reason is not None:
+        return "TECHNICAL_FAILURE"
+    if manifest.running:
+        return "RUNNING"
+    if not manifest.execution_started:
+        return "READY_FOR_EXECUTION"
+    if oos is None or not wf_complete or not mc_complete or not ps_complete:
+        return "EVIDENCE_INCOMPLETE"
+    return "EVIDENCE_COMPLETE_AWAITING_POLICY"
+
+
+def _load_manifest_proofs(
+    plan: GateVCampaignPlan, manifest: GateVCampaignManifest, campaign_dir: Path,
+) -> tuple[dict[str, ValidationRun], dict[str, Path]]:
+    """Reload every referenced immutable proof from its campaign-scoped location."""
+    paths = {}
+    if manifest.oos_evidence_validation_run_id is not None:
+        if plan.oos_evidence_path is None:
+            raise ValueError("Chemin de la preuve OOS absent du plan chargé.")
+        paths[manifest.oos_evidence_validation_run_id] = Path(plan.oos_evidence_path)
+    internal_ids = [
+        manifest.walk_forward_validation_run_id,
+        manifest.monte_carlo_validation_run_id,
+        *manifest.parameter_stability_validation_run_ids_by_fold.values(),
+    ]
+    for run_id in internal_ids:
+        if run_id is not None:
+            paths[run_id] = campaign_dir / "validations" / run_id / "validation_run.json"
+    runs = {}
+    for run_id, path in paths.items():
+        run = load_validation_run(path)
+        if run is None or run.validation_run_id != run_id:
+            raise ValueError(f"Fichier de preuve ValidationRun absent ou incohérent : {path}.")
+        runs[run_id] = run
+    return runs, paths
+
+
+def save_gate_v_campaign_manifest(
+    campaign_root: Union[str, Path], plan: GateVCampaignPlan,
+    manifest: GateVCampaignManifest,
+    *, evidence_by_validation_run_id: Optional[Mapping[str, ValidationRun]] = None,
+    evidence_paths_by_validation_run_id: Optional[Mapping[str, Union[str, Path]]] = None,
+) -> Path:
+    """Atomically replace only this plan's campaign manifest after structural checks."""
+    _validate_gate_v_manifest_structure(plan, manifest, enforce_status_markers=True)
+    if plan != _rebuild_plan(plan):
+        raise ValueError("Le plan de campagne est incohérent ou forgé.")
+    if not isinstance(campaign_root, (str, Path)) or not str(campaign_root).strip():
+        raise ValueError("campaign_root est obligatoire et ne peut pas être vide.")
+    path = Path(campaign_root) / plan.campaign_id / "manifest.json"
+    if load_json_tolerant(path.parent / "plan.json") != _plan_record(plan):
+        raise ValueError("plan.json validé doit être persisté avant le manifeste.")
+    persisted_runs, canonical_paths = _load_manifest_proofs(plan, manifest, path.parent)
+    actual_status = derive_gate_v_campaign_status(plan, manifest, persisted_runs)
+    if actual_status != manifest.status:
+        raise ValueError("Le statut du manifeste contredit ses preuves persistées.")
+    if manifest.status == "EVIDENCE_COMPLETE_AWAITING_POLICY":
+        if evidence_by_validation_run_id is None or derive_gate_v_campaign_status(
+            plan, manifest, evidence_by_validation_run_id,
+        ) != "EVIDENCE_COMPLETE_AWAITING_POLICY":
+            raise ValueError("Le statut complet exige toutes les preuves vérifiées en mémoire.")
+        required_ids = {
+            manifest.oos_evidence_validation_run_id,
+            manifest.walk_forward_validation_run_id,
+            manifest.monte_carlo_validation_run_id,
+            *manifest.parameter_stability_validation_run_ids_by_fold.values(),
+        }
+        if not isinstance(evidence_paths_by_validation_run_id, Mapping) or not required_ids.issubset(
+            evidence_paths_by_validation_run_id
+        ):
+            raise ValueError("Le statut complet exige les fichiers de preuve persistés.")
+        for run_id in required_ids:
+            proof_path = Path(evidence_paths_by_validation_run_id[run_id])
+            if proof_path.resolve() != canonical_paths[run_id].resolve():
+                raise ValueError(f"Chemin de preuve non canonique pour {run_id}.")
+            persisted = persisted_runs[run_id]
+            expected_run = evidence_by_validation_run_id.get(run_id)
+            expected_record = (
+                json.loads(json.dumps(dataclasses.asdict(expected_run), ensure_ascii=False))
+                if isinstance(expected_run, ValidationRun) else None
+            )
+            if persisted is None or load_json_tolerant(proof_path) != expected_record:
+                raise ValueError(f"La preuve persistée {run_id} est absente ou différente.")
+    if path.exists():
+        previous = load_gate_v_campaign_manifest(path, plan)
+        if previous is None:
+            raise ValueError("Le manifeste existant est illisible ; écrasement refusé.")
+        if previous.execution_started and not manifest.execution_started:
+            raise ValueError("Une campagne démarrée ne peut pas revenir à READY_FOR_EXECUTION.")
+        for name in ("walk_forward_validation_run_id", "monte_carlo_validation_run_id"):
+            old_id, new_id = getattr(previous, name), getattr(manifest, name)
+            if old_id is not None and new_id != old_id:
+                raise ValueError(f"La référence de preuve {name} ne peut pas être effacée ou changée.")
+        for fold_id, old_id in previous.parameter_stability_validation_run_ids_by_fold.items():
+            if manifest.parameter_stability_validation_run_ids_by_fold.get(fold_id) != old_id:
+                raise ValueError(f"La référence de preuve Parameter Stability {fold_id} ne peut pas être effacée.")
+    record = dataclasses.asdict(manifest)
+    return save_atomic_overwrite(path, record, "gate_v_campaign_manifest")
+
+
+def load_gate_v_campaign_manifest(
+    path: Union[str, Path], plan: GateVCampaignPlan,
+) -> Optional[GateVCampaignManifest]:
+    """Load a manifest and reject foreign campaign/fold IDs before any execution."""
+    record = load_json_tolerant(path)
+    if record is None:
+        if Path(path).exists():
+            raise ValueError(f"manifest.json existant illisible ou corrompu : {path}.")
+        return None
+    try:
+        manifest = GateVCampaignManifest(**record)
+        _validate_gate_v_manifest_structure(plan, manifest, enforce_status_markers=True)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"manifest.json invalide ou étranger à la campagne : {path}.") from exc
+    if Path(path).parent.name != plan.campaign_id or Path(path).name != "manifest.json":
+        raise ValueError("manifest.json est situé hors du répertoire de sa campagne.")
+    if plan != _rebuild_plan(plan):
+        raise ValueError("Le plan de campagne chargé est incohérent ou forgé.")
+    if load_json_tolerant(Path(path).parent / "plan.json") != _plan_record(plan):
+        raise ValueError("plan.json validé doit être persisté avec manifest.json.")
+    persisted_runs, _paths = _load_manifest_proofs(plan, manifest, Path(path).parent)
+    if derive_gate_v_campaign_status(plan, manifest, persisted_runs) != manifest.status:
+        raise ValueError("Le statut du manifeste ne correspond plus aux preuves persistées.")
+    return dataclasses.replace(manifest, expected_fold_ids=tuple(manifest.expected_fold_ids))
