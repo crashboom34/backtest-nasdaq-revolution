@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import io
 import json
+import math
 import re
 import statistics
 from pathlib import Path
@@ -796,6 +798,34 @@ def _derive_fold_seed(
     return int(hashlib.sha256(payload.encode()).hexdigest(), 16)
 
 
+def _run_walk_forward_loop(
+    fold_definitions: Tuple[FoldDefinition, ...],
+    spec: WalkForwardSpecification,
+    validation_run_id: Optional[str],
+    stop_flag_fn,
+    execute_fold_fn,
+    on_fold_complete=None,
+) -> Tuple[WalkForwardRunOutcome, tuple]:
+    """Unique boucle inter-fold des API historiques et de capture V1.
+
+    `execute_fold_fn(fold, fold_seed)` retourne `(FoldResult, extra)` ; `extra` vaut
+    `None` pour les API historiques. Le callback de checkpoint, s'il existe, est appelé
+    après le calcul et avant de passer au fold suivant. La barrière `stop_flag_fn`
+    reste strictement entre deux folds et n'atteint jamais Optimizer.
+    """
+    results, extras = [], []
+    for fold in fold_definitions:
+        if stop_flag_fn is not None and stop_flag_fn():
+            return WalkForwardRunOutcome(tuple(results), stopped_early=True), tuple(extras)
+        fold_seed = _derive_fold_seed(spec.master_seed, validation_run_id, fold.fold_index)
+        result, extra = execute_fold_fn(fold, fold_seed)
+        if on_fold_complete is not None:
+            on_fold_complete(fold, result, extra)
+        results.append(result)
+        extras.append(extra)
+    return WalkForwardRunOutcome(tuple(results), stopped_early=False), tuple(extras)
+
+
 def run_walk_forward(
     validation_zone: SplitBoundary,
     spec: WalkForwardSpecification,
@@ -842,22 +872,18 @@ def run_walk_forward(
 
     fold_definitions = compute_fold_definitions(validation_zone, spec, readiness_spec)
 
-    fold_results = []
-    for fold in fold_definitions:
-        if stop_flag_fn is not None and stop_flag_fn():
-            return WalkForwardRunOutcome(
-                fold_results=tuple(fold_results), stopped_early=True,
-            )
-        fold_seed = _derive_fold_seed(spec.master_seed, validation_run_id, fold.fold_index)
-        # stop_flag_fn=None volontaire (pas la barrière inter-fold ci-dessus) : voir docstring —
-        # un fold démarré va toujours à son terme, jamais interrompu en cours de recherche TRAIN.
+    def execute(fold, fold_seed):
+        # Une fois démarré, le fold va toujours à son terme : barrière inter-fold seulement.
         result = execute_walk_forward_fold(
             fold, base_config, df, progress_cb=progress_cb, stop_flag_fn=None,
             fold_seed=fold_seed,
         )
-        fold_results.append(result)
+        return result, None
 
-    return WalkForwardRunOutcome(fold_results=tuple(fold_results), stopped_early=False)
+    outcome, _extras = _run_walk_forward_loop(
+        fold_definitions, spec, validation_run_id, stop_flag_fn, execute,
+    )
+    return outcome
 
 
 def build_aggregate_result(fold_results: Tuple[FoldResult, ...]) -> AggregateResult:
@@ -956,6 +982,21 @@ class FoldArtifacts:
     train_candidates: list
     test_trades: "pd.DataFrame"
     test_equity: "pd.DataFrame"
+
+
+@dataclasses.dataclass(frozen=True)
+class WalkForwardCapturedRunV1:
+    """Contrat additif AF-V-08 : faits et artefacts de la même exécution par fold.
+
+    `validation_run_id` lie explicitement la capture à sa campagne. L'agrégat est calculé
+    sur le préfixe si `outcome.stopped_early`; seul un outcome complet peut être publié par
+    l'orchestrateur GATE V comme preuve Walk-Forward complète.
+    """
+
+    outcome: WalkForwardRunOutcome
+    fold_artifacts: Tuple[FoldArtifacts, ...]
+    aggregate: AggregateResult
+    validation_run_id: str
 
 
 def execute_walk_forward_fold_with_artifacts(
@@ -1884,18 +1925,13 @@ def resume_walk_forward_run(
     # est levé avant que le moindre fold antérieur n'ait été réellement ré-exécuté.
     decisions = [decide_fold_resume_action(fold, output_dir) for fold in fold_definitions]
 
-    # Phase 2 — exécution, fold par fold, dans l'ordre de compute_fold_definitions().
-    fold_results = []
-    for fold, decision in zip(fold_definitions, decisions):
-        if stop_flag_fn is not None and stop_flag_fn():
-            outcome = WalkForwardRunOutcome(fold_results=tuple(fold_results), stopped_early=True)
-            return outcome, build_aggregate_result(outcome.fold_results)
+    # Phase 2 — la même boucle inter-fold que run_walk_forward() et la capture V1.
+    decisions_by_fold = {decision.fold_id: decision for decision in decisions}
 
+    def execute(fold, fold_seed):
+        decision = decisions_by_fold[fold.fold_id]
         if decision.action == RESUME_ACTION_SKIP:
-            fold_results.append(decision.fold_result)
-            continue
-
-        fold_seed = _derive_fold_seed(spec.master_seed, validation_run_id, fold.fold_index)
+            return decision.fold_result, None
 
         if decision.action == RESUME_ACTION_REPLAY_TEST:
             fold_result = run_fold_test(fold, decision.selection, base_config, df)
@@ -1903,7 +1939,352 @@ def resume_walk_forward_run(
             fold_result = _redo_fold_reusing_train_candidates(
                 fold, base_config, df, output_dir, progress_cb=progress_cb, fold_seed=fold_seed,
             )
-        fold_results.append(fold_result)
+        return fold_result, None
 
-    outcome = WalkForwardRunOutcome(fold_results=tuple(fold_results), stopped_early=False)
+    outcome, _extras = _run_walk_forward_loop(
+        fold_definitions, spec, validation_run_id, stop_flag_fn, execute,
+    )
     return outcome, build_aggregate_result(outcome.fold_results)
+
+
+# AF-V-08 : contrat additif, distinct des API historiques en mémoire et de la
+# persistance finale `persist_walk_forward_run()`. Un checkpoint n'est valide
+# qu'après l'écriture atomique de son unique JSON par fold. Une interruption
+# avant cette écriture laisse le fold non validé ; sa reprise peut le recalculer.
+WALK_FORWARD_CAPTURE_CONTRACT_VERSION = "walk-forward-capture-v1"
+_CAPTURE_CHECKPOINT_DIRNAME = ".gate_v_checkpoints_v1"
+
+
+def _capture_checkpoint_dir(output_dir: Union[str, Path]) -> Path:
+    return Path(output_dir) / _CAPTURE_CHECKPOINT_DIRNAME
+
+
+def _capture_fold_path(checkpoint_dir: Path, fold_id: str) -> Path:
+    return checkpoint_dir / _FOLDS_DIRNAME / f"{fold_id}.json"
+
+
+def _capture_jsonable(value):
+    """Encode les objets du pool TRAIN avec leurs types de clés et valeurs non finies."""
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value):
+            return {"kind": "float", "value": "nan"}
+        if math.isinf(value):
+            return {"kind": "float", "value": "+inf" if value > 0 else "-inf"}
+        return value
+    if isinstance(value, dict):
+        return {"kind": "dict", "items": [
+            [_capture_jsonable(key), _capture_jsonable(item)] for key, item in value.items()
+        ]}
+    if isinstance(value, list):
+        return [_capture_jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return {"kind": "tuple", "items": [_capture_jsonable(item) for item in value]}
+    if hasattr(value, "item"):
+        return _capture_jsonable(value.item())
+    raise TypeError(f"Valeur TRAIN non sérialisable sans perte : {type(value).__name__}")
+
+
+def _restore_captured_json(value):
+    if isinstance(value, list):
+        return [_restore_captured_json(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    kind = value.get("kind")
+    if kind == "dict" and set(value) == {"kind", "items"}:
+        result = {}
+        for pair in value["items"]:
+            if not isinstance(pair, list) or len(pair) != 2:
+                raise ValueError("Mapping TRAIN corrompu")
+            key, item = (_restore_captured_json(component) for component in pair)
+            if key in result:
+                raise ValueError("Clé TRAIN dupliquée")
+            result[key] = item
+        return result
+    if kind == "tuple" and set(value) == {"kind", "items"}:
+        return tuple(_restore_captured_json(item) for item in value["items"])
+    if kind == "float" and set(value) == {"kind", "value"}:
+        return {"nan": float("nan"), "+inf": float("inf"), "-inf": float("-inf")}[value["value"]]
+    raise ValueError("Valeur TRAIN encodée invalide")
+
+
+def _capture_frame_to_table(frame: pd.DataFrame) -> dict:
+    """JSON Table plus valeurs flottantes hexadécimales exactes et unité datetime."""
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("Les artefacts TEST doivent être des DataFrames pandas")
+    table = json.loads(frame.to_json(
+        orient="table", index=False, date_format="iso", date_unit="ns", double_precision=15,
+    ))
+    table["datetime_units"] = {
+        str(name): dtype.unit for name, dtype in frame.dtypes.items()
+        if pd.api.types.is_datetime64_any_dtype(dtype)
+    }
+    table["float64_hex_columns"] = {
+        str(name): [float(value).hex() for value in frame[name]]
+        for name, dtype in frame.dtypes.items() if pd.api.types.is_float_dtype(dtype)
+    }
+    return table
+
+
+def _capture_frame_from_table(data: dict) -> pd.DataFrame:
+    if not isinstance(data, dict) or "schema" not in data or "data" not in data:
+        raise ValueError("Table TEST absente ou invalide dans le checkpoint")
+    frame = pd.read_json(io.StringIO(json.dumps(data)), orient="table", precise_float=True)
+    for name, values in data.get("float64_hex_columns", {}).items():
+        if name not in frame or not isinstance(values, list) or len(values) != len(frame):
+            raise ValueError(f"Colonne flottante TEST corrompue : {name!r}")
+        frame[name] = [float.fromhex(value) for value in values]
+    for field in data["schema"].get("fields", ()):
+        if field.get("type") == "datetime":
+            name = field["name"]
+            unit = data.get("datetime_units", {}).get(name)
+            if unit not in {"s", "ms", "us", "ns"}:
+                raise ValueError(f"Unité datetime absente ou invalide pour {name!r}")
+            if field.get("tz"):
+                frame[name] = pd.to_datetime(frame[name], utc=True).dt.tz_convert(
+                    field["tz"]
+                ).astype(pd.DatetimeTZDtype(unit=unit, tz=field["tz"]))
+            else:
+                frame[name] = pd.to_datetime(frame[name]).astype(f"datetime64[{unit}]")
+    return frame
+
+
+def _validate_captured_fold(fold: FoldDefinition, result: FoldResult,
+                            artifacts: FoldArtifacts) -> None:
+    if (result.fold_id != fold.fold_id or result.definition != fold
+            or result.selection.fold_id != fold.fold_id
+            or artifacts.fold_id != fold.fold_id):
+        raise FoldArtifactConflict(
+            f"{fold.fold_id} : résultat, sélection et artefacts ne portent pas le même fold_id."
+        )
+    if (not isinstance(artifacts.train_candidates, list)
+            or len(artifacts.train_candidates) != result.selection.train_candidates_evaluated
+            or not artifacts.train_candidates
+            or not isinstance(artifacts.train_candidates[0], dict)
+            or artifacts.train_candidates[0].get("params") != result.selection.selected_params
+            or artifacts.train_candidates[0].get("score") != result.selection.score_train
+            or result.selection.selected_params_hash != params_hash(result.selection.selected_params)
+            or result.selection.rank_in_train != 1):
+        raise FoldArtifactConflict(
+            f"{fold.fold_id} : le vrai Top-1 et le pool TRAIN capturé ne correspondent pas."
+        )
+    if not isinstance(artifacts.test_trades, pd.DataFrame) or len(artifacts.test_trades) != result.n_trades:
+        raise FoldArtifactConflict(
+            f"{fold.fold_id} : nombre de trades TEST différent de FoldResult.n_trades."
+        )
+    if not isinstance(artifacts.test_equity, pd.DataFrame):
+        raise FoldArtifactConflict(f"{fold.fold_id} : equity TEST absente.")
+
+
+def _save_captured_fold(checkpoint_dir: Path, validation_run_id: str,
+                        fold: FoldDefinition, result: FoldResult,
+                        artifacts: FoldArtifacts) -> None:
+    _validate_captured_fold(fold, result, artifacts)
+    payload = {
+        "contract_version": WALK_FORWARD_CAPTURE_CONTRACT_VERSION,
+        "validation_run_id": validation_run_id,
+        "fold_id": fold.fold_id,
+        "fold_definition": dataclasses.asdict(fold),
+        "fold_result": dataclasses.asdict(result),
+        "train_candidates": _capture_jsonable(artifacts.train_candidates),
+        "test_trades_table": _capture_frame_to_table(artifacts.test_trades),
+        "test_equity_table": _capture_frame_to_table(artifacts.test_equity),
+    }
+    payload["payload_sha256"] = _capture_payload_sha256(payload)
+    save_atomic(_capture_fold_path(checkpoint_dir, fold.fold_id), payload,
+                "walk_forward_capture_fold_v1")
+
+
+def _capture_payload_sha256(payload: dict) -> str:
+    content = {key: value for key, value in payload.items() if key != "payload_sha256"}
+    serialized = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _load_captured_fold(checkpoint_dir: Path, validation_run_id: str,
+                        fold: FoldDefinition) -> Optional[Tuple[FoldResult, FoldArtifacts]]:
+    path = _capture_fold_path(checkpoint_dir, fold.fold_id)
+    if not path.is_file():
+        return None
+    payload = load_json_tolerant(path)
+    try:
+        if payload is None or payload.get("payload_sha256") != _capture_payload_sha256(payload):
+            raise ValueError("intégrité du checkpoint divergente")
+        if (payload is None or payload["contract_version"] != WALK_FORWARD_CAPTURE_CONTRACT_VERSION
+                or payload["validation_run_id"] != validation_run_id
+                or payload["fold_id"] != fold.fold_id
+                or payload["fold_definition"] != dataclasses.asdict(fold)):
+            raise ValueError("version, provenance ou géométrie divergente")
+        raw_result = payload["fold_result"]
+        definition = FoldDefinition(**raw_result["definition"])
+        selection = FoldSelection(**raw_result["selection"])
+        remainder = {k: v for k, v in raw_result.items()
+                     if k not in ("definition", "selection")}
+        result = FoldResult(definition=definition, selection=selection, **remainder)
+        artifacts = FoldArtifacts(
+            fold_id=fold.fold_id,
+            train_candidates=_restore_captured_json(payload["train_candidates"]),
+            test_trades=_capture_frame_from_table(payload["test_trades_table"]),
+            test_equity=_capture_frame_from_table(payload["test_equity_table"]),
+        )
+        _validate_captured_fold(fold, result, artifacts)
+    except (KeyError, TypeError, ValueError, FoldArtifactConflict) as exc:
+        raise FoldArtifactConflict(
+            f"{fold.fold_id} : checkpoint Walk-Forward V1 illisible ou incohérent à {path} ; "
+            "reprise refusée avant tout calcul."
+        ) from exc
+    return result, artifacts
+
+
+def _prepare_captured_run(
+    validation_zone: SplitBoundary,
+    spec: WalkForwardSpecification,
+    readiness_spec: Optional[DailyStateReadiness],
+    base_config,
+    data_manifest_path: Union[str, Path],
+    output_dir: Union[str, Path],
+    validation_run_id: str,
+    *,
+    resume: bool,
+) -> Tuple[Tuple[FoldDefinition, ...], Path, dict]:
+    if not isinstance(validation_run_id, str) or not validation_run_id.strip():
+        raise ValueError("validation_run_id est obligatoire pour la capture Walk-Forward V1")
+    fold_definitions = compute_fold_definitions(validation_zone, spec, readiness_spec)
+    checkpoint_dir = _capture_checkpoint_dir(output_dir)
+    current_manifest = build_walk_forward_manifest(
+        spec, base_config, data_manifest_path, validation_run_id=validation_run_id,
+    )
+    current_manifest["capture_contract_version"] = WALK_FORWARD_CAPTURE_CONTRACT_VERSION
+    capture_config = dataclasses.asdict(base_config)
+    capture_config.pop("data_file", None)  # Le manifeste de données fige le contenu, pas le chemin local.
+    current_manifest["capture_base_config"] = _capture_jsonable(capture_config)
+    current_manifest["capture_validation_zone"] = dataclasses.asdict(validation_zone)
+    current_manifest["capture_fold_definitions"] = [
+        dataclasses.asdict(fold) for fold in fold_definitions
+    ]
+    checkpoint_manifest = checkpoint_dir / _MANIFEST_FILENAME
+    if resume:
+        if not checkpoint_manifest.is_file():
+            raise WalkForwardResumeMismatch(
+                f"Reprise capture V1 impossible : {checkpoint_manifest} absent."
+            )
+        if load_json_tolerant(checkpoint_manifest) is None:
+            raise WalkForwardResumeMismatch(
+                f"Reprise capture V1 impossible : {checkpoint_manifest} illisible."
+            )
+        check_resume_fingerprint(checkpoint_dir, current_manifest)
+        folds_dir = checkpoint_dir / _FOLDS_DIRNAME
+        expected = {fold.fold_id for fold in fold_definitions}
+        if folds_dir.is_dir():
+            orphaned = sorted(path.stem for path in folds_dir.glob("*.json")
+                              if path.stem not in expected)
+            if orphaned:
+                raise WalkForwardOrphanedFoldArtifacts(
+                    f"Reprise capture V1 : checkpoints de folds étrangers {orphaned!r}."
+                )
+    else:
+        if checkpoint_manifest.exists() or (Path(output_dir) / _MANIFEST_FILENAME).exists():
+            raise FileExistsError(
+                f"Capture Walk-Forward déjà commencée sous {output_dir} ; utiliser "
+                "resume_walk_forward_with_artifacts_v1(), jamais relancer depuis zéro."
+            )
+        save_atomic(checkpoint_manifest, current_manifest, "walk_forward_capture_manifest_v1")
+    return fold_definitions, checkpoint_dir, current_manifest
+
+
+def _execute_captured_run(
+    validation_zone: SplitBoundary,
+    spec: WalkForwardSpecification,
+    readiness_spec: Optional[DailyStateReadiness],
+    base_config,
+    df,
+    data_manifest_path: Union[str, Path],
+    output_dir: Union[str, Path],
+    progress_cb,
+    stop_flag_fn,
+    validation_run_id: str,
+    *,
+    resume: bool,
+) -> WalkForwardCapturedRunV1:
+    folds, checkpoint_dir, _manifest = _prepare_captured_run(
+        validation_zone, spec, readiness_spec, base_config, data_manifest_path,
+        output_dir, validation_run_id, resume=resume,
+    )
+    # Valide tous les checkpoints avant le premier fold coûteux. Un fold tardif
+    # corrompu ne peut donc pas laisser des folds antérieurs déjà recalculés.
+    loaded = {}
+    if resume:
+        for fold in folds:
+            loaded[fold.fold_id] = _load_captured_fold(checkpoint_dir, validation_run_id, fold)
+
+    def execute(fold, fold_seed):
+        existing = loaded.get(fold.fold_id)
+        if existing is not None:
+            return existing
+        return execute_walk_forward_fold_with_artifacts(
+            fold, base_config, df, progress_cb=progress_cb, stop_flag_fn=None,
+            fold_seed=fold_seed,
+        )
+
+    def checkpoint(fold, result, artifacts):
+        if loaded.get(fold.fold_id) is None:
+            _save_captured_fold(checkpoint_dir, validation_run_id, fold, result, artifacts)
+
+    outcome, artifacts = _run_walk_forward_loop(
+        folds, spec, validation_run_id, stop_flag_fn, execute, checkpoint,
+    )
+    return WalkForwardCapturedRunV1(
+        outcome=outcome, fold_artifacts=artifacts,
+        aggregate=build_aggregate_result(outcome.fold_results),
+        validation_run_id=validation_run_id,
+    )
+
+
+def run_walk_forward_with_artifacts_v1(
+    validation_zone: SplitBoundary,
+    spec: WalkForwardSpecification,
+    readiness_spec: Optional[DailyStateReadiness],
+    base_config,
+    df,
+    *,
+    data_manifest_path: Union[str, Path],
+    output_dir: Union[str, Path],
+    progress_cb=None,
+    stop_flag_fn=None,
+    validation_run_id: str,
+) -> WalkForwardCapturedRunV1:
+    """Capture fraîche versionnée. Un TRAIN et un TEST seulement par fold attendu.
+
+    Chaque fold valide est checkpointé atomiquement, puis le bundle retourné peut être
+    transmis directement à `persist_walk_forward_run()` une seule fois. Aucun backtest
+    supplémentaire n'est nécessaire pour ses `fold_artifacts`.
+    """
+    return _execute_captured_run(
+        validation_zone, spec, readiness_spec, base_config, df, data_manifest_path,
+        output_dir, progress_cb, stop_flag_fn, validation_run_id, resume=False,
+    )
+
+
+def resume_walk_forward_with_artifacts_v1(
+    validation_zone: SplitBoundary,
+    spec: WalkForwardSpecification,
+    readiness_spec: Optional[DailyStateReadiness],
+    base_config,
+    df,
+    *,
+    data_manifest_path: Union[str, Path],
+    output_dir: Union[str, Path],
+    progress_cb=None,
+    stop_flag_fn=None,
+    validation_run_id: str,
+) -> WalkForwardCapturedRunV1:
+    """Reprend la capture V1 ; chaque checkpoint valide est relu sans calcul.
+
+    Un crash avant le JSON atomique laisse le fold non validé et peut exiger un
+    recalcul. Un crash après ce point ne recalcule jamais ce fold.
+    """
+    return _execute_captured_run(
+        validation_zone, spec, readiness_spec, base_config, df, data_manifest_path,
+        output_dir, progress_cb, stop_flag_fn, validation_run_id, resume=True,
+    )

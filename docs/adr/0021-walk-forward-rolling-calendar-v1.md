@@ -525,3 +525,31 @@ décider si une proportion trop élevée de folds à zéro trade rend le run glo
   systématique en V1 tant qu'elle n'est pas fournie (Décision 13) ; et l'invariant « un seul
   `base_params` partagé par tous les folds pour la résolution de readiness » (Décision 4), à
   confirmer avant tout élargissement futur du search space de Perfect Revolution.
+
+### Amendement AF-V-08 du 2026-09-25 — capture versionnée pour GATE V
+
+Les API historiques `run_walk_forward()` et `resume_walk_forward_run()` gardent exactement leurs
+signatures et leurs types de retour. Elles ne fournissent pas les `FoldArtifacts` nécessaires à
+`persist_walk_forward_run()` : `run_walk_forward()` ne retourne que les `FoldResult` et ne crée
+pas de checkpoint pendant une recherche fraîche. L'ADR 0024, dans sa rédaction initiale, ne
+pouvait donc pas câbler une campagne fraîche sans une seconde recherche TRAIN/TEST. Le Human Gate
+AF-V-08 du 2026-09-25 autorise une API additive, sans changer les comportements historiques.
+
+`run_walk_forward_with_artifacts_v1()` et `resume_walk_forward_with_artifacts_v1()` partagent
+le cœur de boucle et de calcul des fonctions historiques. Leur contrat de retour versionné,
+`WalkForwardCapturedRunV1`, contient `outcome`, `fold_artifacts` (un par fold, même ordre et
+`fold_id`), `aggregate` et `validation_run_id`. Chaque fold est évalué une seule fois ; les
+trades/equity TEST, le pool complet de candidats TRAIN et le Top-1 proviennent de CETTE exécution,
+sans reconstruction depuis les seuls résumés ni second appel à l'Optimizer ou au backtest TEST.
+
+Le chemin de capture écrit avant le premier fold un manifeste de fingerprint sous
+`output_dir/.gate_v_checkpoints_v1/manifest.json`, puis un checkpoint atomique après chaque
+fold terminé. Le fingerprint inclut les bornes complètes de la zone `VALIDATION` et les définitions
+de tous les folds, y compris lorsqu'une queue partielle ne forme pas de fold. La reprise vérifie
+ce fingerprint et les checkpoints présents AVANT tout nouveau calcul, saute les folds complets et
+ne calcule que les absents. Si un processus s'arrête avant que le checkpoint d'un fold soit
+entièrement écrit, ce fold n'est pas attesté et peut être recalculé ; les folds déjà validés ne
+sont jamais rejoués. Ces checkpoints sont des artefacts de reprise, pas la preuve Walk-Forward
+finale. `persist_walk_forward_run()` conserve son contrat de persistance finale et reçoit les
+`FoldArtifacts` capturés directement. Le cas d'un crash pendant cet unique appel final reste la
+limite documentée par l'ADR 0024 Décision 8.

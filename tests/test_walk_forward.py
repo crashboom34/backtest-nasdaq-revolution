@@ -3530,3 +3530,349 @@ class TestBuildWalkForwardValidationRun:
         )
 
         assert list(tmp_path.iterdir()) == []
+
+
+class TestWalkForwardCapturedRunV1:
+    """AF-V-08 : le même fold fournit résultat, pool TRAIN et TEST sans second calcul."""
+
+    @staticmethod
+    def _inputs(tmp_path):
+        _df, _spec_unused, zone, folds = _real_two_fold_setup()
+        spec = _spec(train_period="P1M", test_period="P1M", step_period="P1M",
+                     master_seed=42)
+        data_manifest_path, _manifest = _write_test_data_manifest(tmp_path)
+        return zone, folds, spec, _minimal_optimizer_config(), data_manifest_path
+
+    @staticmethod
+    def _fake_capture(calls):
+        def execute(fold, base_config, df, progress_cb=None, stop_flag_fn=None,
+                    fold_seed=None):
+            calls.append((fold.fold_id, fold_seed))
+            top1 = {"ema_trend_len": 140 + fold.fold_index}
+            selection = dataclasses.replace(
+                _fold_selection(fold, top1), train_candidates_evaluated=2,
+                train_candidates_unique=2, train_candidates_eligible=2,
+            )
+            result = _fold_result_stub(fold, selection=selection)
+            candidates = [
+                {"params": top1, "score": 1.4,
+                 "stats": {"n_trades": 3}, "filtered": False, "filter_reason": None},
+                {"params": {"ema_trend_len": 120 + fold.fold_index}, "score": 1.2,
+                 "stats": {"n_trades": 2}, "filtered": False, "filter_reason": None},
+            ]
+            trades = pd.DataFrame({
+                "source_fold_id": [fold.fold_id],
+                "origin": ["TEST"],
+                "resultat_net": [10.0],
+                "time_paris": [pd.Timestamp("2023-03-01", tz="Europe/Paris")],
+            })
+            equity = pd.DataFrame({"capital": [10010.0], "step": [fold.fold_index]})
+            return result, FoldArtifacts(fold.fold_id, candidates, trades, equity)
+        return execute
+
+    def test_capture_rejects_selected_params_outside_first_train_candidate(self, tmp_path, monkeypatch):
+        zone, _folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        base_execute = self._fake_capture(calls)
+        def wrong_order(*args, **kwargs):
+            result, artifacts = base_execute(*args, **kwargs)
+            artifacts.train_candidates.reverse()
+            return result, artifacts
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts",
+                            wrong_order)
+        with pytest.raises(walk_forward_module.FoldArtifactConflict, match="Top-1"):
+            walk_forward_module.run_walk_forward_with_artifacts_v1(
+                zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+                output_dir=tmp_path / "wf", validation_run_id="vr_wf_capture",
+            )
+
+    def test_resume_preserves_exact_test_trade_float_bits(self, tmp_path, monkeypatch):
+        zone, _folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        base_execute = self._fake_capture(calls)
+        exact_net = 1.2345678901234567
+        def execute(*args, **kwargs):
+            result, artifacts = base_execute(*args, **kwargs)
+            artifacts.test_trades.loc[0, "resultat_net"] = exact_net
+            return result, artifacts
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts", execute)
+        output_dir = tmp_path / "wf"
+        walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+        restored = walk_forward_module.resume_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+        assert restored.fold_artifacts[0].test_trades.loc[0, "resultat_net"].hex() == exact_net.hex()
+        assert len(calls) == 2
+
+    def test_resume_after_exception_does_not_recalculate_checkpointed_fold(
+        self, tmp_path, monkeypatch,
+    ):
+        zone, folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        base_execute = self._fake_capture(calls)
+        failed = {"once": False}
+        def execute(*args, **kwargs):
+            if args[0].fold_id == folds[1].fold_id and not failed["once"]:
+                failed["once"] = True
+                raise RuntimeError("synthetic interruption")
+            return base_execute(*args, **kwargs)
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts", execute)
+        output_dir = tmp_path / "wf"
+        with pytest.raises(RuntimeError, match="synthetic interruption"):
+            walk_forward_module.run_walk_forward_with_artifacts_v1(
+                zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+                output_dir=output_dir, validation_run_id="vr_wf_capture",
+            )
+        assert [fold_id for fold_id, _ in calls] == [folds[0].fold_id]
+        resumed = walk_forward_module.resume_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+        assert [fold_id for fold_id, _ in calls] == [fold.fold_id for fold in folds]
+        assert [result.fold_id for result in resumed.outcome.fold_results] == [
+            fold.fold_id for fold in folds
+        ]
+
+    def test_resume_rejects_modified_checkpoint_trade_before_any_execution(
+        self, tmp_path, monkeypatch,
+    ):
+        zone, folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts",
+                            self._fake_capture(calls))
+        output_dir = tmp_path / "wf"
+        walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+        checkpoint = output_dir / ".gate_v_checkpoints_v1" / "folds" / f"{folds[0].fold_id}.json"
+        payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+        payload["test_trades_table"]["float64_hex_columns"]["resultat_net"][0] = float(999).hex()
+        checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+        calls.clear()
+        with pytest.raises(walk_forward_module.FoldArtifactConflict, match="checkpoint|intégrité"):
+            walk_forward_module.resume_walk_forward_with_artifacts_v1(
+                zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+                output_dir=output_dir, validation_run_id="vr_wf_capture",
+            )
+        assert calls == []
+
+    def test_fresh_capture_has_one_checkpoint_per_fold_and_can_persist_without_reexecution(
+        self, tmp_path, monkeypatch,
+    ):
+        zone, folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts",
+                            self._fake_capture(calls))
+        output_dir = tmp_path / "wf"
+
+        captured = walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+
+        assert [c[0] for c in calls] == [f.fold_id for f in folds]
+        assert captured.outcome.stopped_early is False
+        assert captured.aggregate.n_folds == len(folds)
+        assert [a.fold_id for a in captured.fold_artifacts] == [f.fold_id for f in folds]
+        for fold, result, artifacts in zip(folds, captured.outcome.fold_results,
+                                           captured.fold_artifacts):
+            assert result.fold_id == fold.fold_id == artifacts.fold_id
+            assert result.selection.selected_params == artifacts.train_candidates[0]["params"]
+            assert artifacts.test_trades["origin"].tolist() == ["TEST"]
+            assert artifacts.test_trades["source_fold_id"].tolist() == [fold.fold_id]
+        checkpoint_files = sorted((output_dir / ".gate_v_checkpoints_v1" / "folds").glob("*.json"))
+        assert [p.stem for p in checkpoint_files] == [f.fold_id for f in folds]
+
+        # La persistance historique consomme la capture ; aucun callback de calcul n'est rappelé.
+        persist_walk_forward_run(
+            captured.outcome, captured.fold_artifacts, captured.aggregate, spec, config,
+            data_manifest_path, output_dir, validation_run_id="vr_wf_capture",
+        )
+        assert len(calls) == len(folds)
+        assert (output_dir / "aggregate.json").is_file()
+
+    def test_resume_skips_a_valid_fold_and_restores_raw_tables_without_type_loss(
+        self, tmp_path, monkeypatch,
+    ):
+        zone, folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts",
+                            self._fake_capture(calls))
+        output_dir = tmp_path / "wf"
+        stop_checks = {"count": 0}
+
+        def stop_after_one():
+            stop_checks["count"] += 1
+            return stop_checks["count"] > 1
+
+        partial = walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, stop_flag_fn=stop_after_one,
+            validation_run_id="vr_wf_capture",
+        )
+        assert partial.outcome.stopped_early is True
+        assert [c[0] for c in calls] == [folds[0].fold_id]
+
+        resumed = walk_forward_module.resume_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+        assert [c[0] for c in calls] == [f.fold_id for f in folds]
+        assert resumed.outcome.fold_results[0] == partial.outcome.fold_results[0]
+        assert resumed.outcome.stopped_early is False
+        pd.testing.assert_frame_equal(
+            resumed.fold_artifacts[0].test_trades,
+            partial.fold_artifacts[0].test_trades,
+        )
+        assert (resumed.fold_artifacts[0].test_trades["time_paris"].dtype
+                == partial.fold_artifacts[0].test_trades["time_paris"].dtype)
+        assert resumed.fold_artifacts[0].train_candidates == partial.fold_artifacts[0].train_candidates
+        assert resumed.fold_artifacts[0].test_equity.equals(partial.fold_artifacts[0].test_equity)
+
+        # Une seconde reprise n'exécute aucun fold valide et produit le même agrégat.
+        again = walk_forward_module.resume_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+        assert len(calls) == len(folds)
+        assert again.outcome == resumed.outcome
+        assert again.aggregate == resumed.aggregate
+
+    def test_foreign_provenance_is_rejected_before_any_fold_execution(self, tmp_path, monkeypatch):
+        zone, _folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts",
+                            self._fake_capture(calls))
+        output_dir = tmp_path / "wf"
+        walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+        calls.clear()
+        with pytest.raises(WalkForwardResumeMismatch, match="validation_run_id"):
+            walk_forward_module.resume_walk_forward_with_artifacts_v1(
+                zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+                output_dir=output_dir, validation_run_id="vr_foreign",
+            )
+        assert calls == []
+
+    def test_resume_rejects_changed_validation_tail_before_any_execution(self, tmp_path, monkeypatch):
+        """A changed partial tail must not be silently joined to old fold checkpoints."""
+        zone, folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts",
+                            self._fake_capture(calls))
+        output_dir = tmp_path / "wf"
+        walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+        calls.clear()
+        changed_zone = _zone(zone.start, "2023-04-15T00:00:00+00:00")
+        assert [f.fold_id for f in compute_fold_definitions(changed_zone, spec, None)] == [
+            f.fold_id for f in folds
+        ]
+        with pytest.raises(WalkForwardResumeMismatch):
+            walk_forward_module.resume_walk_forward_with_artifacts_v1(
+                changed_zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+                output_dir=output_dir, validation_run_id="vr_wf_capture",
+            )
+        assert calls == []
+
+    def test_capture_round_trips_realistic_training_stats_with_integer_year_keys(
+        self, tmp_path, monkeypatch,
+    ):
+        """Engine yearly stats use integer keys; checkpointing must retain the full pool."""
+        zone, _folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        base_execute = self._fake_capture(calls)
+
+        def execute(*args, **kwargs):
+            result, artifacts = base_execute(*args, **kwargs)
+            artifacts.train_candidates[0]["stats"]["yearly_pnl"] = {2023: 12.5}
+            artifacts.train_candidates[0]["stats"]["profit_factor"] = float("inf")
+            return result, artifacts
+
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts", execute)
+        output_dir = tmp_path / "wf"
+        walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+        restored = walk_forward_module.resume_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+        assert len(calls) == 2
+        stats = restored.fold_artifacts[0].train_candidates[0]["stats"]
+        assert stats["yearly_pnl"] == {2023: 12.5}
+        assert stats["profit_factor"] == float("inf")
+
+    def test_resume_rejects_changed_optimizer_config_before_any_execution(self, tmp_path, monkeypatch):
+        zone, _folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts",
+                            self._fake_capture(calls))
+        output_dir = tmp_path / "wf"
+        walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+        calls.clear()
+        changed = dataclasses.replace(config, global_params={"initial_capital": 20_000.0})
+        with pytest.raises(WalkForwardResumeMismatch):
+            walk_forward_module.resume_walk_forward_with_artifacts_v1(
+                zone, spec, None, changed, None, data_manifest_path=data_manifest_path,
+                output_dir=output_dir, validation_run_id="vr_wf_capture",
+            )
+        assert calls == []
+
+    def test_resume_rejects_corrupt_present_checkpoint_manifest(self, tmp_path, monkeypatch):
+        zone, _folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts",
+                            self._fake_capture(calls))
+        output_dir = tmp_path / "wf"
+        walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_wf_capture",
+        )
+        calls.clear()
+        (output_dir / ".gate_v_checkpoints_v1" / "manifest.json").write_text("{bad-json", encoding="utf-8")
+        with pytest.raises(WalkForwardResumeMismatch):
+            walk_forward_module.resume_walk_forward_with_artifacts_v1(
+                zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+                output_dir=output_dir, validation_run_id="vr_wf_capture",
+            )
+        assert calls == []
+
+    def test_historical_and_captured_fresh_api_return_identical_fold_results(
+        self, tmp_path, monkeypatch,
+    ):
+        df, spec, zone, _folds = _real_two_fold_setup()
+        config = _minimal_optimizer_config(mode="grid", param_ranges=_param_ranges_3_values())
+        data_manifest_path, _manifest = _write_test_data_manifest(tmp_path)
+        fake = _ScoreByParamRunBacktest()
+        import engine
+        monkeypatch.setattr(engine, "run_backtest", fake)
+        _patch_score_by_net_ret(monkeypatch)
+
+        historical = run_walk_forward(zone, spec, None, config, df)
+        old_calls = len(fake.calls)
+        fake.calls.clear()
+        captured = walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, df, data_manifest_path=data_manifest_path,
+            output_dir=tmp_path / "wf", validation_run_id="vr_wf_capture",
+        )
+        assert captured.outcome.fold_results == historical.fold_results
+        assert len(fake.calls) == old_calls  # même nombre TRAIN + un TEST par fold
+        assert len(captured.fold_artifacts) == len(historical.fold_results)
+        for result, artifacts in zip(captured.outcome.fold_results, captured.fold_artifacts):
+            assert artifacts.fold_id == result.fold_id
+            assert len(artifacts.train_candidates) == result.selection.train_candidates_evaluated
+            assert artifacts.test_trades["raison_sortie"].tolist() == ["fin-donnees"]
