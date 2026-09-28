@@ -1,14 +1,30 @@
 # GATE V Campaign Orchestration V1 (`AF-V-08`) : plan de campagne immuable, exécution en deux niveaux, reprise sans doublon, jamais une déclaration PASS
 
-Status: Proposé
+Status: Accepté — implémentation Slices 1-6 terminée et testée sur `codex/af-v-08` (2026-09-28),
+pas encore intégrée dans `master`
 
-**Contexte** : `AF-V-02`/`AF-V-03`/`AF-V-04` (Walk-Forward, Monte-Carlo, Parameter Stability) sont
-désormais tous construits et testés au niveau bibliothèque (`AI_HANDOFF.md` §33/34) — chacun
-délibérément conçu pour consommer des FAITS déjà calculés par un appelant, **aucun code existant ne
-relie aujourd'hui un run Walk-Forward réel à Monte-Carlo/Parameter Stability** (`AI_HANDOFF.md`
-§35, écart d'orchestration identifié le 2026-09-22). Cette ADR ferme cet écart — **au niveau
-CONCEPTION uniquement, aucune exécution réelle autorisée par cette mission** (ni backtest, ni
-recherche `Optimizer`, ni téléchargement, ni accès `FINAL_HOLDOUT`).
+**État actuel (2026-09-28)** : `AF-V-02`/`AF-V-03`/`AF-V-04` fournissent les mécanismes
+bibliothèque (Walk-Forward, Monte-Carlo, Parameter Stability). `AF-V-08` fournit désormais
+l'orchestration qui les relie réellement — `gate_v_campaign.py`
+(`build_gate_v_campaign_plan()`/`execute_gate_v_campaign()`) est IMPLEMENTED + TESTED + PUSHED sur
+`codex/af-v-08` (Slices 1-6, voir Conséquences pour le détail par tranche et les commits). Cette
+ADR documente désormais le contrat RÉELLEMENT implémenté, pas seulement une conception. Aucune
+exécution réelle n'est déclenchée automatiquement par ce câblage (Décision 11) : aucune campagne
+scientifique réelle n'a été exécutée, aucun accès `FINAL_HOLDOUT` réel n'a eu lieu, `AF-V-07`
+(politique de verdict) n'est pas implémentée, et **`GATE V` n'est PAS passée** — rien ici ne
+produit ni ne peut produire un verdict `PASS`/Champion (Décision 15). La branche n'est pas encore
+intégrée dans `master`.
+
+**Contexte historique (2026-09-22, au moment de la rédaction initiale de cette ADR, avant toute
+implémentation)** : `AF-V-02`/`AF-V-03`/`AF-V-04` (Walk-Forward, Monte-Carlo, Parameter Stability)
+étaient alors déjà tous construits et testés au niveau bibliothèque (`AI_HANDOFF.md` §33/34) —
+chacun délibérément conçu pour consommer des FAITS déjà calculés par un appelant, mais aucun code
+existant ne reliait encore un run Walk-Forward réel à Monte-Carlo/Parameter Stability
+(`AI_HANDOFF.md` §35, écart d'orchestration identifié le 2026-09-22). Cette ADR a été rédigée pour
+fermer cet écart — à ce moment-là, au niveau CONCEPTION uniquement, aucune exécution réelle
+n'était autorisée par la mission de rédaction (ni backtest, ni recherche `Optimizer`, ni
+téléchargement, ni accès `FINAL_HOLDOUT`). Ce paragraphe reste pour la traçabilité de la décision
+initiale — il ne décrit plus l'état actuel, voir « État actuel » ci-dessus.
 
 **Ticket** : `AF-V-08` — identifiant disponible confirmé (`grep -rn "AF-V-08" docs/` : aucune
 occurrence avant cette ADR), ne collisionne ni avec `AF-V-05` (Stress/Noise, réservé et distinct)
@@ -578,7 +594,10 @@ identifie déjà sans ambiguïté le run Walk-Forward source complet.
 - **Dépendance explicite sur `AF-V-07`** (`ValidationPolicyVersion`) pour que `GATE V` passe
   RÉELLEMENT un jour — non bloquante pour CETTE ADR (`EVIDENCE_COMPLETE_AWAITING_POLICY` reste un
   état factuel valide et utile sans elle), mais nécessaire pour aller au-delà.
-- **Points restant à valider explicitement par l'utilisateur avant implémentation, si un désaccord
-  matériel apparaît** : aucun identifié à ce stade — chaque choix découle directement des contrats
-  déjà réels et déjà revus (ADR 0021/0022/0023) ; voir le rapport de revue joint pour confirmation
-  indépendante avant de lever ce statut `Proposé`.
+- **Points ayant nécessité une validation explicite de l'utilisateur avant implémentation** :
+  aucun désaccord matériel n'est apparu — chaque choix de conception découlait directement des
+  contrats déjà réels et déjà revus (ADR 0021/0022/0023). La double revue indépendante initiale
+  (§ci-dessous, `AI_HANDOFF.md` §36) a confirmé l'ADR propre avant le début de l'implémentation ;
+  le statut est passé à `Accepté` une fois les Slices 1-6 implémentées, testées et poussées sur
+  `codex/af-v-08` (2026-09-28) — reste à faire : intégration fast-forward vers `master`, après
+  validation explicite de l'utilisateur (aucun merge n'a encore eu lieu).

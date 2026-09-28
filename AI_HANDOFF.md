@@ -2539,18 +2539,24 @@ voir §37 pour la proposition consolidée soumise à décision.
 ## 37. `AF-V-08` — Slices 1-6 + correctif `TECHNICAL_FAILURE` : IMPLEMENTED + TESTED sur `codex/af-v-08`, prêt pour intégration finale (2026-09-28)
 
 **Branche** : `codex/af-v-08`, worktree isolé `D:\alphaforge-af-v-08-codex` (jamais le checkout
-principal). 7 commits devant `origin/master` (`c8cb6a9`), 0 derrière, avant le commit Slice 6 de
-cette mission.
+principal). 8 commits devant `origin/master` (`c8cb6a9`), 0 derrière.
 
-**Commits de la branche** (dans l'ordre) : `ee3f7b8`/`6d8cd29`/`a5f16d5` (Slices 1-3), `7958e29`
-(API additive Walk-Forward captured artifacts V1, amendement ADR 0021), `8fda211` (Slice 4,
-Monte-Carlo — convention `trade_return_pct` par trajectoire de capital, ADR 0022 amendement),
-`ed21298` (Slice 5, Parameter Stability + relecture publique read-only
-`load_walk_forward_captured_run_v1()`), `3b6c63a` (correctif de stabilisation
-`TECHNICAL_FAILURE` — le marqueur n'était jamais persisté sur exception technique, contredisant
-ADR 0024 Décision 7 ; corrigé par un helper commun aux trois phases, rechargeant toujours le
-manifeste le plus récent depuis le disque), puis le commit Slice 6 de cette mission
-(intégration bout-en-bout SYNTHÉTIQUE, test-only).
+**Commits de la branche, dans l'ordre chronologique réel** :
+1. `ee3f7b8` — Slice 1 (`build_gate_v_campaign_plan()`, Niveau A).
+2. `6d8cd29` — Slice 2 (`GateVCampaignManifest`/`derive_gate_v_campaign_status()`).
+3. `7958e29` — API additive Walk-Forward captured artifacts V1
+   (`run_walk_forward_with_artifacts_v1()`/`resume_walk_forward_with_artifacts_v1()`, amendement
+   ADR 0021) — entre Slice 2 et Slice 3, requise par Slice 3 pour câbler une campagne fraîche sans
+   seconde recherche TRAIN/TEST.
+4. `a5f16d5` — Slice 3 (phase Walk-Forward de `execute_gate_v_campaign()`).
+5. `8fda211` — Slice 4 (phase Monte-Carlo — convention `trade_return_pct` par trajectoire de
+   capital, ADR 0022 amendement).
+6. `ed21298` — Slice 5 (phase Parameter Stability + relecture publique read-only
+   `load_walk_forward_captured_run_v1()`).
+7. `3b6c63a` — correctif de stabilisation `TECHNICAL_FAILURE` (le marqueur n'était jamais
+   persisté sur exception technique, contredisant ADR 0024 Décision 7 ; corrigé par un helper
+   commun aux trois phases, rechargeant toujours le manifeste le plus récent depuis le disque).
+8. `6ba966f` — Slice 6 (intégration bout-en-bout SYNTHÉTIQUE, test-only).
 
 **Slices 1-6, toutes IMPLEMENTED + TESTED + PUSHED** :
 1. `build_gate_v_campaign_plan()` — préparation déterministe, aucune donnée marché.

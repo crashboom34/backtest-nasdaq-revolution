@@ -830,11 +830,12 @@ réel — ce ticket a fermé cet écart d'orchestration (voir
 immuable, exécution en deux niveaux séparés, reprise sans doublon, jamais de déclaration
 `GATE V PASS`).
 
-**What to build** : `gate_v_campaign.py` — `GateVCampaignPlan`/`GateVCampaignManifest` typés,
+**What was built** : `gate_v_campaign.py` — `GateVCampaignPlan`/`GateVCampaignManifest` typés,
 `build_gate_v_campaign_plan()` (préparation déterministe, aucune donnée marché), et
-`execute_gate_v_campaign()` (exécution explicite future, collaborateurs injectés, jamais appelée
-automatiquement). Relie `walk_forward.py`/`monte_carlo.py`/`parameter_stability.py` déjà
-existants — assemble les `ValidationRun` produites sous un `research_run_id` commun.
+`execute_gate_v_campaign()` (exécution explicite, collaborateurs injectés, jamais appelée
+automatiquement — aucun `__main__`, aucun wiring `app.py`/`optimizer_process.py`/Autopilot).
+Relie `walk_forward.py`/`monte_carlo.py`/`parameter_stability.py` déjà existants — assemble les
+`ValidationRun` produites sous un `research_run_id` commun.
 
 **Dependencies** : `AF-V-02`, `AF-V-03`, `AF-V-04` (tous `DONE`). **Effort** : L (plusieurs
 tranches TDD). **Uncertainty** : low (chaque décision de conception découle des contrats déjà
