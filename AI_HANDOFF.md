@@ -2535,3 +2535,73 @@ la Slice 6, clôture du ticket).
 Aucun backtest réel, aucune recherche `Optimizer`, aucun téléchargement, aucun accès `FINAL_HOLDOUT`.
 `base_params`/`search_mode`/`search_space`/`budget_per_fold` réels restent des entrées à fournir —
 voir §37 pour la proposition consolidée soumise à décision.
+
+## 37. `AF-V-08` — Slices 1-6 + correctif `TECHNICAL_FAILURE` : IMPLEMENTED + TESTED sur `codex/af-v-08`, prêt pour intégration finale (2026-09-28)
+
+**Branche** : `codex/af-v-08`, worktree isolé `D:\alphaforge-af-v-08-codex` (jamais le checkout
+principal). 7 commits devant `origin/master` (`c8cb6a9`), 0 derrière, avant le commit Slice 6 de
+cette mission.
+
+**Commits de la branche** (dans l'ordre) : `ee3f7b8`/`6d8cd29`/`a5f16d5` (Slices 1-3), `7958e29`
+(API additive Walk-Forward captured artifacts V1, amendement ADR 0021), `8fda211` (Slice 4,
+Monte-Carlo — convention `trade_return_pct` par trajectoire de capital, ADR 0022 amendement),
+`ed21298` (Slice 5, Parameter Stability + relecture publique read-only
+`load_walk_forward_captured_run_v1()`), `3b6c63a` (correctif de stabilisation
+`TECHNICAL_FAILURE` — le marqueur n'était jamais persisté sur exception technique, contredisant
+ADR 0024 Décision 7 ; corrigé par un helper commun aux trois phases, rechargeant toujours le
+manifeste le plus récent depuis le disque), puis le commit Slice 6 de cette mission
+(intégration bout-en-bout SYNTHÉTIQUE, test-only).
+
+**Slices 1-6, toutes IMPLEMENTED + TESTED + PUSHED** :
+1. `build_gate_v_campaign_plan()` — préparation déterministe, aucune donnée marché.
+2. `GateVCampaignManifest` + `derive_gate_v_campaign_status()` — calcul pur de statut à 6 états.
+3. `execute_gate_v_campaign()` phase Walk-Forward — double injection (frais/reprise), garde
+   persist-once.
+4. Phase Monte-Carlo — mapping TEST-only exact, drapeau de circularité en dur.
+5. Phase Parameter Stability — un pool par fold jamais fusionné, relecture read-only de la
+   capture V1 (jamais `train_candidates.csv`), crash-reconciliation par fold.
+6. Fermeture de l'intégration bout-en-bout SYNTHÉTIQUE (cette mission) : un test d'intégration
+   principal construit une campagne complète depuis zéro sur fixtures synthétiques cohérentes —
+   plan → Walk-Forward (vraie orchestration `run_walk_forward_with_artifacts_v1()`, seul le
+   calcul bas-niveau d'un fold est remplacé par un résultat synthétique cohérent) → Monte-Carlo
+   (fonction réelle `run_monte_carlo_simulation()`) → Parameter Stability (fonction réelle
+   `analyze_parameter_stability()`, un voisin utilisable réel par fold) → statut
+   `EVIDENCE_COMPLETE_AWAITING_POLICY`, dérivé UNIQUEMENT par `derive_gate_v_campaign_status()`
+   (jamais forcé manuellement, prouvé par recalcul direct depuis les preuves persistées). Une
+   `ValidationRun` OOS SYNTHÉTIQUE déjà `completed` est construite et persistée AVANT le plan
+   (jamais via `validation_oos.run_oos_validation()`, jamais importé dans `gate_v_campaign.py`).
+   Relecture disque complète (plan/manifeste/OOS/WF/MC/PS/capture V1, tous rechargés
+   indépendamment puis restatut recalculé) et idempotence d'un second appel (zéro recalcul,
+   horodatages de fichiers inchangés) sont prouvées séparément. IDs déterministes vérifiés
+   (aucun `uuid`/`random`/horodatage courant dans `gate_v_validation_run_id()`). Production
+   `gate_v_campaign.py` inchangée par cette tranche — fermeture au niveau test uniquement, aucun
+   nouveau contrat scientifique nécessaire.
+
+**Tests** : suite complète (`--ignore=tests/test_engine.py`) verte, 1652 passed + 2 skipped après
+cette mission (baseline avant Slice 6 : 1647 passed + 2 skipped, +5 tests neufs de Slice 6, aucune
+régression). `tests/test_gate_v_campaign.py` seul : 170 passed.
+
+**Architecture** : deux niveaux stricts (A préparation déterministe / B exécution explicite),
+jamais de déclenchement automatique — `gate_v_campaign.py` n'a aucun `if __name__ == "__main__"`,
+n'est référencé ni par `app.py`, ni `optimizer_process.py`, ni `scripts/autopilot/` (vérifié). Les
+trois phases (Walk-Forward/Monte-Carlo/Parameter Stability) partagent désormais un helper commun
+de marquage `TECHNICAL_FAILURE` (jamais trois mécanismes séparés). Aucune deuxième source de
+vérité pour le statut de campagne : toujours `derive_gate_v_campaign_status()`.
+
+**Limitations connues, non corrigées par cette mission (dettes documentées, pas des bugs
+cachés)** : (1) un crash PENDANT l'appel unique `persist_walk_forward_run()` lui-même reste une
+limite résiduelle acceptée, résolution manuelle depuis les checkpoints V1 (ADR 0024 Décision 8) ;
+(2) aucune sérialisation inter-processus si deux exécuteurs tournent en concurrence sur la même
+campagne ; (3) l'échec d'encodage Windows console de
+`tests/test_autopilot_hooks.py::test_hook_blocks_a_force_push` est externe à AF-V-08 (prouvé
+différentiellement identique sur le parent Slice 4 `8fda211` et sur `ed21298` via un worktree
+détaché temporaire ; déterministiquement vert sous `PYTHONUTF8=1`/`PYTHONIOENCODING=utf-8`) —
+Autopilot n'a jamais été modifié pour le contourner.
+
+**Aucune campagne scientifique réelle exécutée. Aucun accès `FINAL_HOLDOUT` réel. Aucun `AF-V-07`
+implémenté. `GATE V` reste NON PASSÉE, aucun `PASS`/Champion produit ou possible sur cette
+branche (Décision 15, ADR 0024).**
+
+**Prochaine action unique** : revue finale + intégration fast-forward vers `master`, uniquement
+après validation explicite de l'utilisateur. Aucun merge n'a été effectué par cette mission ni
+par aucune des missions précédentes de cette branche.

@@ -817,13 +817,18 @@ track. **Effort** : S. **Uncertainty** : medium. **Skills recommended** : `domai
 
 ### AF-V-08 — Orchestration de campagne `GATE V` intégrée
 
-**Status** : **READY** (`AF-V-02`/`AF-V-03`/`AF-V-04 = DONE`, 2026-09-22 — débloqué, ADR 0024
-rédigée). Ticket créé le 2026-09-22 (décision explicite de l'utilisateur) : Walk-Forward/
-Monte-Carlo/Parameter Stability sont tous construits au niveau bibliothèque mais **aucun code
-n'existe encore pour les relier** à un run réel — ce ticket ferme cet écart d'orchestration,
-**préparation/conception uniquement, aucune exécution réelle** (voir `docs/adr/0024-gate-v-campaign-orchestration-v1.md`
-pour le protocole complet : plan de campagne immuable, exécution en deux niveaux séparés,
-reprise sans doublon, jamais de déclaration `GATE V PASS`).
+**Status** : **IMPLEMENTED + TESTED on `codex/af-v-08` — READY FOR FINAL INTEGRATION** (mise à
+jour 2026-09-28 : Slices 1-6 toutes implémentées + testées + poussées, correctif
+`TECHNICAL_FAILURE` intégré, intégration bout-en-bout SYNTHÉTIQUE validée sur fixtures — voir
+`docs/adr/0024-gate-v-campaign-orchestration-v1.md` §Conséquences pour le détail par slice).
+**Pas `DONE`** tant que cette branche n'est pas mergée dans `master` (décision explicite,
+aucune campagne scientifique réelle exécutée, `GATE V` reste non passée). Ticket créé le
+2026-09-22 (décision explicite de l'utilisateur) : Walk-Forward/Monte-Carlo/Parameter Stability
+étaient tous construits au niveau bibliothèque mais aucun code ne les reliait encore à un run
+réel — ce ticket a fermé cet écart d'orchestration (voir
+`docs/adr/0024-gate-v-campaign-orchestration-v1.md` pour le protocole complet : plan de campagne
+immuable, exécution en deux niveaux séparés, reprise sans doublon, jamais de déclaration
+`GATE V PASS`).
 
 **What to build** : `gate_v_campaign.py` — `GateVCampaignPlan`/`GateVCampaignManifest` typés,
 `build_gate_v_campaign_plan()` (préparation déterministe, aucune donnée marché), et

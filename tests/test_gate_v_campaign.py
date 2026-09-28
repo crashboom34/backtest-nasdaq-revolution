@@ -2842,3 +2842,200 @@ class TestExecuteGateVCampaignParameterStabilityPhase:
                 plan, campaign_root, tmp_path, data_manifest_path=dmp,
                 run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
             )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AF-V-08 Slice 6 -- fermeture de l'intégration bout-en-bout SYNTHÉTIQUE de la campagne GATE V.
+# Aucune donnée marché réelle, aucun FINAL_HOLDOUT réel, aucun AF-V-07, aucun PASS/Champion.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _e2e_ready_campaign(tmp_path, monkeypatch, *, pools_by_fold=None):
+    """Campagne prête avec preuve OOS SYNTHÉTIQUE déjà référencée par le plan (persistée AVANT le
+    plan, via le helper `_synthetic_oos_run()` DÉJÀ EXISTANT plus haut dans ce fichier -- jamais
+    dupliqué ici), et checkpoints V1 RÉELS écrits par la VRAIE
+    `run_walk_forward_with_artifacts_v1()` (même technique que Slice 5 : seul
+    `execute_walk_forward_fold_with_artifacts` est monkeypatché -- jamais toute la phase
+    Walk-Forward remplacée par un mock)."""
+    oos_path = tmp_path / "oos_synthetic" / "validation_run.json"
+    oos_run = _synthetic_oos_run(oos_path)
+
+    plan, _split_plan, campaign_root = _execute_ready_campaign(
+        tmp_path, oos_evidence_validation_run_id=oos_run.validation_run_id,
+        oos_evidence_path=oos_path,
+    )
+    monkeypatch.setattr(
+        walk_forward, "execute_walk_forward_fold_with_artifacts",
+        _ps_fake_execute_fold(plan, pools_by_fold or {}),
+    )
+    data_manifest_path = _execute_data_manifest(tmp_path)
+    return plan, campaign_root, data_manifest_path, oos_run
+
+
+class TestGateVCampaignSyntheticEndToEndIntegration:
+    """AF-V-08 Slice 6 -- plan -> Walk-Forward -> Monte-Carlo -> Parameter Stability -> manifeste
+    final, jusqu'à `EVIDENCE_COMPLETE_AWAITING_POLICY` sur fixtures synthétiques cohérentes."""
+
+    def test_synthetic_end_to_end_reaches_evidence_complete_awaiting_policy(
+        self, tmp_path, monkeypatch,
+    ):
+        plan, campaign_root, dmp, oos_run = _e2e_ready_campaign(tmp_path, monkeypatch)
+
+        final = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=walk_forward.run_walk_forward_with_artifacts_v1,
+            resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        assert final.status == "EVIDENCE_COMPLETE_AWAITING_POLICY"
+        assert final.execution_started is True
+        assert final.running is False
+        assert final.technical_failure_reason is None
+        assert final.oos_evidence_validation_run_id == oos_run.validation_run_id
+        assert final.walk_forward_validation_run_id is not None
+        assert final.monte_carlo_validation_run_id is not None
+        assert set(final.parameter_stability_validation_run_ids_by_fold) == set(plan.expected_fold_ids)
+        assert "PASS" not in final.status
+        assert "CHAMPION" not in final.status.upper()
+        assert not any(f.name.lower() == "champion" for f in dataclasses.fields(final))
+
+        # Le statut final provient UNIQUEMENT de derive_gate_v_campaign_status(), jamais forcé
+        # manuellement -- preuve directe en recalculant depuis les preuves réellement persistées.
+        campaign_dir = campaign_root / plan.campaign_id
+        persisted_runs, _paths = gate_v_campaign._load_manifest_proofs(plan, final, campaign_dir)
+        recomputed = gate_v_campaign.derive_gate_v_campaign_status(plan, final, persisted_runs)
+        assert recomputed == "EVIDENCE_COMPLETE_AWAITING_POLICY"
+
+    def test_disk_reload_fully_recomputes_evidence_complete_awaiting_policy(
+        self, tmp_path, monkeypatch,
+    ):
+        plan, campaign_root, dmp, oos_run = _e2e_ready_campaign(tmp_path, monkeypatch)
+        _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=walk_forward.run_walk_forward_with_artifacts_v1,
+            resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        campaign_dir = campaign_root / plan.campaign_id
+        reloaded_plan = gate_v_campaign.load_gate_v_campaign_plan(
+            campaign_dir / "plan.json", split_plan_path=plan.split_plan_path,
+            oos_evidence_path=plan.oos_evidence_path,
+        )
+        assert reloaded_plan == plan
+        reloaded_manifest = gate_v_campaign.load_gate_v_campaign_manifest(
+            campaign_dir / "manifest.json", reloaded_plan,
+        )
+        reloaded_oos = load_validation_run(Path(plan.oos_evidence_path))
+        assert reloaded_oos == oos_run
+        wf_path = (
+            campaign_dir / "validations" / reloaded_manifest.walk_forward_validation_run_id
+            / "validation_run.json"
+        )
+        assert load_validation_run(wf_path) is not None
+        mc_path = (
+            campaign_dir / "validations" / reloaded_manifest.monte_carlo_validation_run_id
+            / "validation_run.json"
+        )
+        assert load_validation_run(mc_path) is not None
+        for fold_id, ps_id in reloaded_manifest.parameter_stability_validation_run_ids_by_fold.items():
+            ps_path = campaign_dir / "validations" / ps_id / "validation_run.json"
+            assert load_validation_run(ps_path) is not None
+
+        # La capture Walk-Forward V1 elle-même reste relisible en lecture seule (Slice 5).
+        split_plan = load_dataset_split_plan(reloaded_plan.split_plan_path)
+        captured = load_walk_forward_captured_run_v1(
+            split_plan.validation, reloaded_plan.walk_forward_specification,
+            reloaded_plan.readiness_spec, _execute_base_config(reloaded_plan),
+            data_manifest_path=dmp, output_dir=campaign_dir / "walk_forward",
+            validation_run_id=reloaded_manifest.walk_forward_validation_run_id,
+        )
+        assert {a.fold_id for a in captured.fold_artifacts} == set(reloaded_plan.expected_fold_ids)
+
+        persisted_runs, _paths = gate_v_campaign._load_manifest_proofs(
+            reloaded_plan, reloaded_manifest, campaign_dir,
+        )
+        recomputed_status = gate_v_campaign.derive_gate_v_campaign_status(
+            reloaded_plan, reloaded_manifest, persisted_runs,
+        )
+        assert recomputed_status == "EVIDENCE_COMPLETE_AWAITING_POLICY"
+
+    def test_second_call_is_fully_idempotent_no_recompute(self, tmp_path, monkeypatch):
+        plan, campaign_root, dmp, _oos_run = _e2e_ready_campaign(tmp_path, monkeypatch)
+        first = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=walk_forward.run_walk_forward_with_artifacts_v1,
+            resume_walk_forward_fn=_never_called("resume"),
+        )
+        assert first.status == "EVIDENCE_COMPLETE_AWAITING_POLICY"
+
+        campaign_dir = campaign_root / plan.campaign_id
+        wf_path = campaign_dir / "validations" / first.walk_forward_validation_run_id / "validation_run.json"
+        mc_path = campaign_dir / "validations" / first.monte_carlo_validation_run_id / "validation_run.json"
+        ps_paths = {
+            fold_id: campaign_dir / "validations" / ps_id / "validation_run.json"
+            for fold_id, ps_id in first.parameter_stability_validation_run_ids_by_fold.items()
+        }
+        mtimes_before = {
+            path: path.stat().st_mtime_ns for path in (wf_path, mc_path, *ps_paths.values())
+        }
+
+        monkeypatch.setattr(
+            gate_v_campaign, "run_monte_carlo_simulation",
+            _never_called("run_monte_carlo_simulation"),
+        )
+        monkeypatch.setattr(
+            gate_v_campaign, "analyze_parameter_stability",
+            _never_called("analyze_parameter_stability"),
+        )
+
+        second = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        assert second == first
+        for path, before in mtimes_before.items():
+            assert path.stat().st_mtime_ns == before
+
+    def test_ids_are_deterministic_across_independent_rebuilds(self, tmp_path, monkeypatch):
+        first_dir = tmp_path / "first"
+        second_dir = tmp_path / "second"
+        plan1, campaign_root1, dmp1, _oos1 = _e2e_ready_campaign(first_dir, monkeypatch)
+        final1 = _execute(
+            plan1, campaign_root1, first_dir, data_manifest_path=dmp1,
+            run_walk_forward_fn=walk_forward.run_walk_forward_with_artifacts_v1,
+            resume_walk_forward_fn=_never_called("resume"),
+        )
+        plan2, campaign_root2, dmp2, _oos2 = _e2e_ready_campaign(second_dir, monkeypatch)
+        final2 = _execute(
+            plan2, campaign_root2, second_dir, data_manifest_path=dmp2,
+            run_walk_forward_fn=walk_forward.run_walk_forward_with_artifacts_v1,
+            resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        assert plan1.campaign_id == plan2.campaign_id
+        assert final1.walk_forward_validation_run_id == final2.walk_forward_validation_run_id
+        assert final1.monte_carlo_validation_run_id == final2.monte_carlo_validation_run_id
+        assert (
+            final1.parameter_stability_validation_run_ids_by_fold
+            == final2.parameter_stability_validation_run_ids_by_fold
+        )
+        source = inspect.getsource(gate_v_campaign.gate_v_validation_run_id)
+        assert "uuid" not in source.lower()
+        assert "random" not in source.lower()
+        assert "time.time" not in source and "datetime.now" not in source
+
+    def test_no_cli_entrypoint_or_automatic_wiring(self):
+        """Consolide ce que le check module-level existant
+        (`test_preparation_has_no_execution_collaborator_or_market_data_access`) ne couvre pas
+        encore : aucun point d'entrée CLI, aucun wiring depuis un launcher/app/Autopilot."""
+        source = inspect.getsource(gate_v_campaign)
+        assert "__main__" not in source
+        repo_root = Path(gate_v_campaign.__file__).resolve().parent
+        for candidate in ("app.py", "optimizer_process.py"):
+            path = repo_root / candidate
+            if path.is_file():
+                assert "gate_v_campaign" not in path.read_text(encoding="utf-8")
+        autopilot_dir = repo_root / "scripts" / "autopilot"
+        if autopilot_dir.is_dir():
+            for script in autopilot_dir.rglob("*.py"):
+                assert "gate_v_campaign" not in script.read_text(encoding="utf-8")
