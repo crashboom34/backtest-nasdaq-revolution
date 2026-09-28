@@ -1477,6 +1477,10 @@ class TestExecuteGateVCampaignWalkForwardPhase:
         assert manifest.status == "EVIDENCE_INCOMPLETE"
         assert manifest.running is False
         assert manifest.execution_started is True
+        # AF-V-08 checkpoint de stabilisation (2026-09-28) -- une interruption COOPÉRATIVE
+        # (stopped_early=True, aucune exception levée) n'est jamais une TECHNICAL_FAILURE.
+        assert manifest.status != "TECHNICAL_FAILURE"
+        assert manifest.technical_failure_reason is None
         wf_output_dir = campaign_root / plan.campaign_id / "walk_forward"
         assert not (wf_output_dir / "aggregate.json").exists()
 
@@ -1592,7 +1596,11 @@ class TestExecuteGateVCampaignWalkForwardPhase:
 
         assert observed == {"status": "RUNNING", "running": True, "execution_started": True}
 
-    def test_technical_exception_propagates_and_leaves_manifest_running(self, tmp_path):
+    def test_technical_exception_propagates_and_persists_technical_failure(self, tmp_path):
+        """AF-V-08 checkpoint de stabilisation (2026-09-28), corrige ADR 0024 Décision 7 :
+        une exception technique NON gérée survenue APRÈS le passage à `running=True` doit être
+        persistée comme `TECHNICAL_FAILURE` (jamais laissée `RUNNING`, jamais traduite en
+        `EVIDENCE_INCOMPLETE`) -- puis l'exception originale continue de remonter intacte."""
         plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
 
         def failing_run_fn(*args, **kwargs):
@@ -1607,13 +1615,12 @@ class TestExecuteGateVCampaignWalkForwardPhase:
         from gate_v_campaign import load_gate_v_campaign_manifest
         manifest_path = campaign_root / plan.campaign_id / "manifest.json"
         reloaded = load_gate_v_campaign_manifest(manifest_path, plan)
-        assert reloaded.status == "RUNNING"
+        assert reloaded.status == "TECHNICAL_FAILURE"
+        assert reloaded.running is False
+        assert reloaded.execution_started is True
+        assert isinstance(reloaded.technical_failure_reason, str) and reloaded.technical_failure_reason.strip()
+        assert "synthetic engine crash" in reloaded.technical_failure_reason
         assert reloaded.walk_forward_validation_run_id is None
-        # Jamais transformée en verdict scientifique : aucun scientific_verdict n'existe à ce
-        # niveau (ADR 0024), et le statut structurel n'est jamais TECHNICAL_FAILURE ici (aucun
-        # code de cette fonction n'attrape l'exception pour la reclasser -- ADR 0024 Décision 7 :
-        # "exception technique NON GÉRÉE").
-        assert reloaded.status != "TECHNICAL_FAILURE"
 
     def test_refuses_retry_on_technical_failure_manifest(self, tmp_path):
         from gate_v_campaign import build_gate_v_campaign_manifest, save_gate_v_campaign_manifest
@@ -2045,6 +2052,10 @@ class TestExecuteGateVCampaignMonteCarloPhase:
         assert mc_run.evidence.zero_trade_input is True
         assert mc_run.evidence.n_input_trades == 0
         assert mc_run.evidence.observed_net_ret_pct is None
+        # AF-V-08 checkpoint de stabilisation (2026-09-28) -- zéro trade Monte-Carlo est un fait
+        # scientifique honnête, jamais une TECHNICAL_FAILURE.
+        assert manifest.status != "TECHNICAL_FAILURE"
+        assert manifest.technical_failure_reason is None
 
     def test_persists_monte_carlo_exactly_once(self, tmp_path, monkeypatch):
         plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
@@ -2215,13 +2226,17 @@ class TestExecuteGateVCampaignMonteCarloPhase:
 
         assert observed == {"status": "RUNNING", "running": True}
 
-    def test_technical_exception_during_monte_carlo_propagates_without_fabricated_evidence(
+    def test_technical_exception_during_monte_carlo_propagates_and_persists_technical_failure(
         self, tmp_path, monkeypatch,
     ):
+        """AF-V-08 checkpoint de stabilisation (2026-09-28), corrige ADR 0024 Décision 7 : voir
+        `test_technical_exception_propagates_and_persists_technical_failure` (phase WF) pour la
+        justification complète -- même contrat, ici pour Monte-Carlo. La preuve Walk-Forward déjà
+        attachée AVANT le crash Monte-Carlo doit rester référencée."""
         plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
         run_fn, _calls = _execute_fake_run_with_trades(plan, split_plan, _MC_TRADES_BY_FOLD)
         data_manifest_path = _execute_data_manifest(tmp_path)
-        _execute(
+        completed_wf = _execute(
             plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
             run_walk_forward_fn=run_fn, resume_walk_forward_fn=_never_called("resume"),
         )
@@ -2246,11 +2261,14 @@ class TestExecuteGateVCampaignMonteCarloPhase:
             )
 
         from gate_v_campaign import load_gate_v_campaign_manifest
-        plan_reload = plan
-        reloaded = load_gate_v_campaign_manifest(manifest_path, plan_reload)
-        assert reloaded.status == "RUNNING"
+        reloaded = load_gate_v_campaign_manifest(manifest_path, plan)
+        assert reloaded.status == "TECHNICAL_FAILURE"
+        assert reloaded.running is False
+        assert reloaded.execution_started is True
+        assert isinstance(reloaded.technical_failure_reason, str) and reloaded.technical_failure_reason.strip()
+        assert "synthetic monte-carlo crash" in reloaded.technical_failure_reason
         assert reloaded.monte_carlo_validation_run_id is None
-        assert reloaded.status != "TECHNICAL_FAILURE"
+        assert reloaded.walk_forward_validation_run_id == completed_wf.walk_forward_validation_run_id
 
     def test_monte_carlo_phase_itself_never_references_parameter_stability(self):
         """`_run_monte_carlo_phase()` (la phase MC elle-même) reste totalement ignorante de
@@ -2404,6 +2422,40 @@ class TestExecuteGateVCampaignParameterStabilityPhase:
             assert run.specification.search_mode == plan.search_mode
             assert run.evidence.search_mode == plan.search_mode
 
+    def test_zero_neighbor_ps_stays_evidence_incomplete_never_technical_failure(
+        self, tmp_path, monkeypatch,
+    ):
+        """AF-V-08 checkpoint de stabilisation (2026-09-28), mission §7 item 10 -- un pool TRAIN
+        réduit au seul Top-1 (aucun voisin structurel, zéro voisin utilisable) sous `search_mode`
+        déterministe reste un résultat scientifique honnête défavorable (ADR 0023 Décision 3),
+        jamais une TECHNICAL_FAILURE. Aucun seuil >0 inventé au-delà du sens strict déjà défini."""
+        zero_neighbor_pool = [{
+            "params": {"lookback": 12}, "score": 1.0, "stats": {"n_trades": 3},
+            "filtered": False, "filter_reason": None,
+        }]
+        pools_by_fold = {f"fold_{i:03d}": zero_neighbor_pool for i in range(10)}
+        plan, campaign_root, dmp = _ps_setup(tmp_path, monkeypatch, pools_by_fold=pools_by_fold)
+
+        final = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=walk_forward.run_walk_forward_with_artifacts_v1,
+            resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        assert set(final.parameter_stability_validation_run_ids_by_fold) == set(plan.expected_fold_ids)
+        for ps_id in final.parameter_stability_validation_run_ids_by_fold.values():
+            path = campaign_root / plan.campaign_id / "validations" / ps_id / "validation_run.json"
+            run = load_validation_run(path)
+            assert run.evidence.neighborhood_applicability == "local_neighborhood_available"
+            usable = {
+                p: run.evidence.n_neighbors_total_by_param[p] - run.evidence.n_neighbors_rejected_by_param[p]
+                for p in run.evidence.n_neighbors_total_by_param
+            }
+            assert all(v == 0 for v in usable.values())
+        assert final.status == "EVIDENCE_INCOMPLETE"
+        assert final.status != "TECHNICAL_FAILURE"
+        assert final.technical_failure_reason is None
+
     def test_deterministic_grid_mode_with_real_neighbor_is_locally_applicable(
         self, tmp_path, monkeypatch,
     ):
@@ -2446,6 +2498,10 @@ class TestExecuteGateVCampaignParameterStabilityPhase:
             run = load_validation_run(path)
             assert run.evidence.neighborhood_applicability == "global_correlation_only"
         assert final.status == "EVIDENCE_INCOMPLETE"
+        # AF-V-08 checkpoint de stabilisation (2026-09-28) -- un résultat scientifique honnête
+        # défavorable (`global_correlation_only`) n'est jamais une TECHNICAL_FAILURE.
+        assert final.status != "TECHNICAL_FAILURE"
+        assert final.technical_failure_reason is None
 
     def test_already_attached_folds_are_idempotent_no_recompute(self, tmp_path, monkeypatch):
         plan, campaign_root, _manifest, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
@@ -2670,9 +2726,13 @@ class TestExecuteGateVCampaignParameterStabilityPhase:
             gvc.analyze_parameter_stability = old
         assert all(status == "RUNNING" and running is True for status, running in observed)
 
-    def test_technical_exception_during_ps_propagates_without_fabricated_evidence(
+    def test_technical_exception_during_ps_propagates_and_persists_technical_failure(
         self, tmp_path, monkeypatch,
     ):
+        """AF-V-08 checkpoint de stabilisation (2026-09-28), corrige ADR 0024 Décision 7 : même
+        contrat que la phase WF/MC, ici pour Parameter Stability -- crash sur le premier fold
+        (aucun fold PS encore attaché). Walk-Forward/Monte-Carlo, déjà complets AVANT cette phase,
+        restent référencés."""
         plan, campaign_root, dmp = _ps_setup(tmp_path, monkeypatch)
 
         def failing(*args, **kwargs):
@@ -2689,10 +2749,81 @@ class TestExecuteGateVCampaignParameterStabilityPhase:
         manifest_path = campaign_root / plan.campaign_id / "manifest.json"
         from gate_v_campaign import load_gate_v_campaign_manifest
         reloaded = load_gate_v_campaign_manifest(manifest_path, plan)
-        assert reloaded.status == "RUNNING"
+        assert reloaded.status == "TECHNICAL_FAILURE"
+        assert reloaded.running is False
+        assert reloaded.execution_started is True
+        assert isinstance(reloaded.technical_failure_reason, str) and reloaded.technical_failure_reason.strip()
+        assert "synthetic parameter-stability crash" in reloaded.technical_failure_reason
         assert reloaded.walk_forward_validation_run_id is not None
         assert reloaded.monte_carlo_validation_run_id is not None
-        assert reloaded.status != "TECHNICAL_FAILURE"
+        assert reloaded.parameter_stability_validation_run_ids_by_fold == {}
+
+    def test_technical_exception_during_ps_preserves_already_attached_folds(
+        self, tmp_path, monkeypatch,
+    ):
+        """AF-V-08 checkpoint de stabilisation (2026-09-28), mission §6 -- cas critique multi-fold :
+        le PREMIER fold est déjà persisté et attaché, exception technique pendant le calcul du
+        fold SUIVANT. Après l'exception : TECHNICAL_FAILURE, running=False, le premier fold
+        TOUJOURS référencé (aucune référence déjà persistée perdue), le fold en crash jamais
+        fabriqué. Preuve que `_mark_technical_failure_if_running()` recharge réellement le DERNIER
+        manifeste persisté (celui écrit fold par fold par `_run_parameter_stability_phase`),
+        jamais un objet `manifest` périmé détenu par l'appelant."""
+        plan, campaign_root, completed, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+        assert len(plan.expected_fold_ids) >= 2
+        first_two = plan.expected_fold_ids[:1]
+        crash_fold = plan.expected_fold_ids[1]
+        preserved_ids = {
+            fold_id: completed.parameter_stability_validation_run_ids_by_fold[fold_id]
+            for fold_id in first_two
+        }
+        # Supprime aussi le fichier persisté du fold en crash (pas seulement sa référence
+        # manifeste) -- sinon _run_parameter_stability_phase le retrouverait et le RÉCONCILIERAIT
+        # sans jamais rappeler analyze_parameter_stability, et le crash synthétique ne se
+        # produirait pas.
+        crash_ps_id = completed.parameter_stability_validation_run_ids_by_fold[crash_fold]
+        (
+            campaign_root / plan.campaign_id / "validations" / crash_ps_id / "validation_run.json"
+        ).unlink()
+
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for fold_id in plan.expected_fold_ids:
+            if fold_id not in first_two:
+                record["parameter_stability_validation_run_ids_by_fold"].pop(fold_id, None)
+        record["status"] = "RUNNING"
+        record["running"] = True
+        manifest_path.write_text(json.dumps(record), encoding="utf-8")
+
+        real_analyze = gate_v_campaign.analyze_parameter_stability
+        crash_message = f"synthetic parameter-stability crash on {crash_fold}"
+
+        def crash_on_third_fold(pool, best_params, spec):
+            if spec.source_fold_id == crash_fold:
+                raise RuntimeError(crash_message)
+            return real_analyze(pool, best_params, spec)
+        monkeypatch.setattr(gate_v_campaign, "analyze_parameter_stability", crash_on_third_fold)
+
+        with pytest.raises(RuntimeError, match=crash_message):
+            _execute(
+                plan, campaign_root, tmp_path, data_manifest_path=dmp,
+                run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+            )
+
+        from gate_v_campaign import load_gate_v_campaign_manifest
+        reloaded = load_gate_v_campaign_manifest(manifest_path, plan)
+        assert reloaded.status == "TECHNICAL_FAILURE"
+        assert reloaded.running is False
+        assert reloaded.execution_started is True
+        assert crash_message in reloaded.technical_failure_reason
+        assert reloaded.parameter_stability_validation_run_ids_by_fold == preserved_ids
+        assert crash_fold not in reloaded.parameter_stability_validation_run_ids_by_fold
+        crashed_ps_id = gate_v_campaign.gate_v_validation_run_id(
+            plan, VALIDATION_TYPE_PARAMETER_STABILITY, fold_id=crash_fold,
+        )
+        crashed_ps_path = (
+            campaign_root / plan.campaign_id / "validations" / crashed_ps_id / "validation_run.json"
+        )
+        assert not crashed_ps_path.exists()
 
     def test_refused_without_complete_monte_carlo(self, tmp_path, monkeypatch):
         plan, campaign_root, manifest, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)

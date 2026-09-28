@@ -361,6 +361,19 @@ EXACTEMENT à la liste imposée par l'utilisateur) :
 **Ce câblage ne déclare JAMAIS `GATE V PASS`** — aucun de ces six états n'implique/n'autorise à
 lire "GATE V est passée" (Décision 15).
 
+**Note d'implémentation — checkpoint de stabilisation AF-V-08 du 2026-09-28 (corrige un écart
+d'implémentation, aucun changement de décision scientifique)** : jusqu'à cette correction,
+`execute_gate_v_campaign()` laissait une exception technique remonter SANS jamais persister
+`TECHNICAL_FAILURE` — le manifeste restait `RUNNING` sur disque, contredisant le tableau
+ci-dessus. `_mark_technical_failure_if_running()` (helper commun aux trois phases WF/MC/PS,
+jamais trois mécanismes séparés) recharge désormais le manifeste LE PLUS RÉCENT depuis le disque
+dans le bloc `except` englobant les trois phases et, UNIQUEMENT s'il est réellement `running=True`
+(seul signal fiable qu'un calcul coûteux avait réellement démarré — jamais sur une précondition
+refusée avant ce point, Décision 5/6 ci-dessus, jamais changée), fixe `running=False` et
+`technical_failure_reason`, recalcule le statut via `derive_gate_v_campaign_status()` (EXISTANT),
+puis laisse l'exception originale remonter intacte. Aucune référence de preuve déjà attachée
+n'est jamais perdue ni recalculée.
+
 ## Décision 8 — Reprise après interruption, sans doublon
 
 **Walk-Forward (amendement AF-V-08)** : les deux nouvelles API partagent le cœur d'exécution

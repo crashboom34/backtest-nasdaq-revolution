@@ -1453,6 +1453,44 @@ def _run_parameter_stability_phase(
     return current_manifest
 
 
+def _mark_technical_failure_if_running(
+    plan: GateVCampaignPlan, campaign_root: Union[str, Path], campaign_dir: Path, reason: str,
+) -> None:
+    """AF-V-08 checkpoint de stabilisation (2026-09-28) — ADR 0024 Décision 7 : persiste
+    `TECHNICAL_FAILURE` si et seulement si le manifeste LE PLUS RÉCENT sur disque est réellement
+    `running=True`. `running=True` n'est écrit qu'IMMÉDIATEMENT AVANT le calcul coûteux propre à
+    chaque phase (WF/MC/PS, mêmes trois fonctions ci-dessus) — c'est donc le seul signal fiable
+    qu'une exécution a réellement démarré puis a été interrompue avant sa complétion normale
+    (`running=False`). Une exception de précondition levée AVANT ce passage à `running=True` (ex.
+    `_load_complete_walk_forward_run`/`_load_complete_monte_carlo_run` : preuve source manquante/
+    incohérente) ne trouve donc jamais `running=True` ici et ne devient jamais `TECHNICAL_FAILURE`
+    — cette validation fail-closed reste ce qu'elle était avant cette correction : une erreur
+    immédiate, sur un plan jamais réellement exécuté par CET appel.
+
+    Recharge TOUJOURS depuis le disque, jamais l'objet manifeste en mémoire détenu par
+    l'appelant : Parameter Stability persiste un manifeste par fold (`_run_parameter_stability_phase`,
+    Slice 5) et peut avoir rattaché plusieurs folds avant celui qui a effectivement crashé — ces
+    références déjà persistées ne sont jamais perdues ni recalculées ici, seul le marqueur
+    d'échec est ajouté à l'état déjà réel. Ne fabrique aucune `ValidationEvidence`, ne modifie
+    aucune preuve existante ; réutilise `_load_manifest_proofs()`/`derive_gate_v_campaign_status()`
+    (EXISTANTS), jamais réimplémentés — un état structurellement incohérent lève ici comme
+    partout ailleurs, avant l'exception technique originale qui continue alors de remonter
+    (appelant, voir `execute_gate_v_campaign()`)."""
+    manifest_path = campaign_dir / "manifest.json"
+    latest = load_gate_v_campaign_manifest(manifest_path, plan)
+    if latest is None or not latest.running:
+        return
+    failed = dataclasses.replace(latest, running=False, technical_failure_reason=reason)
+    persisted_runs, evidence_paths = _load_manifest_proofs(plan, failed, campaign_dir)
+    status = derive_gate_v_campaign_status(plan, failed, persisted_runs)
+    failed = dataclasses.replace(failed, status=status)
+    save_gate_v_campaign_manifest(
+        campaign_root, plan, failed,
+        evidence_by_validation_run_id=persisted_runs,
+        evidence_paths_by_validation_run_id=evidence_paths,
+    )
+
+
 def execute_gate_v_campaign(
     plan: GateVCampaignPlan,
     *,
@@ -1468,6 +1506,12 @@ def execute_gate_v_campaign(
     """AF-V-08 Slices 3-5 — Niveau B, phases Walk-Forward, Monte-Carlo puis Parameter Stability
     (ADR 0024 Décision 5). Le statut final ne peut être `EVIDENCE_COMPLETE_AWAITING_POLICY` que
     si une preuve OOS existe déjà sur disque, référencée par le plan — jamais fabriquée ici.
+
+    Checkpoint de stabilisation (2026-09-28, ADR 0024 Décision 7) : toute exception technique NON
+    gérée levée par les trois phases est persistée comme `TECHNICAL_FAILURE` UNIQUEMENT si l'une
+    d'elles avait réellement basculé `running=True` (voir `_mark_technical_failure_if_running()`),
+    jamais sur une précondition refusée avant tout calcul coûteux — puis l'exception originale
+    continue de remonter intacte.
 
     `run_walk_forward_fn`/`resume_walk_forward_fn`/`load_market_data_fn` sont INJECTÉS,
     keyword-only, SANS valeur par défaut — jamais importés ici (un appelant réel passe
@@ -1530,23 +1574,35 @@ def execute_gate_v_campaign(
             "requise, jamais un nouvel essai automatique."
         )
 
-    if manifest.walk_forward_validation_run_id is None:
-        manifest = _run_walk_forward_phase(
-            plan, campaign_root, campaign_dir, manifest, split_plan, base_config,
-            data_manifest_path, load_market_data_fn, run_walk_forward_fn, resume_walk_forward_fn,
-            progress_cb, stop_flag_fn,
-        )
+    try:
         if manifest.walk_forward_validation_run_id is None:
-            return manifest  # Arrêt coopératif -- jamais de Monte-Carlo sur un WF partiel.
+            manifest = _run_walk_forward_phase(
+                plan, campaign_root, campaign_dir, manifest, split_plan, base_config,
+                data_manifest_path, load_market_data_fn, run_walk_forward_fn, resume_walk_forward_fn,
+                progress_cb, stop_flag_fn,
+            )
+            if manifest.walk_forward_validation_run_id is None:
+                return manifest  # Arrêt coopératif -- jamais de Monte-Carlo sur un WF partiel.
 
-    if manifest.monte_carlo_validation_run_id is None:
-        manifest = _run_monte_carlo_phase(plan, campaign_root, campaign_dir, manifest, base_config)
+        if manifest.monte_carlo_validation_run_id is None:
+            manifest = _run_monte_carlo_phase(plan, campaign_root, campaign_dir, manifest, base_config)
 
-    if set(manifest.parameter_stability_validation_run_ids_by_fold) != set(plan.expected_fold_ids):
-        manifest = _run_parameter_stability_phase(
-            plan, campaign_root, campaign_dir, manifest, split_plan, base_config,
-            data_manifest_path,
+        if set(manifest.parameter_stability_validation_run_ids_by_fold) != set(plan.expected_fold_ids):
+            manifest = _run_parameter_stability_phase(
+                plan, campaign_root, campaign_dir, manifest, split_plan, base_config,
+                data_manifest_path,
+            )
+    except Exception as exc:
+        # ADR 0024 Décision 7, checkpoint de stabilisation (2026-09-28) : une exception technique
+        # NON gérée ne devient JAMAIS silencieusement EVIDENCE_INCOMPLETE -- persistée comme
+        # TECHNICAL_FAILURE UNIQUEMENT si une phase avait réellement basculé running=True
+        # (jamais sur une précondition refusée avant tout calcul coûteux, voir docstring de
+        # `_mark_technical_failure_if_running`), puis l'exception originale continue de remonter
+        # SANS être avalée ni reclassée en verdict scientifique.
+        _mark_technical_failure_if_running(
+            plan, campaign_root, campaign_dir, f"{type(exc).__name__}: {exc}",
         )
+        raise
 
     return manifest
 
