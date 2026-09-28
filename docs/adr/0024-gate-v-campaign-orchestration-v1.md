@@ -1,19 +1,22 @@
 # GATE V Campaign Orchestration V1 (`AF-V-08`) : plan de campagne immuable, exécution en deux niveaux, reprise sans doublon, jamais une déclaration PASS
 
-Status: Accepté — implémentation Slices 1-6 terminée et testée sur `codex/af-v-08` (2026-09-28),
-pas encore intégrée dans `master`
+Status: Accepté — implémentation Slices 1-6 + correctif `TECHNICAL_FAILURE` intégrée dans `master`
+le 2026-09-28 (fast-forward strict, `origin/master` = `daefc891f853bb0f3d06650b28033aa4218c52eb`)
 
 **État actuel (2026-09-28)** : `AF-V-02`/`AF-V-03`/`AF-V-04` fournissent les mécanismes
 bibliothèque (Walk-Forward, Monte-Carlo, Parameter Stability). `AF-V-08` fournit désormais
 l'orchestration qui les relie réellement — `gate_v_campaign.py`
-(`build_gate_v_campaign_plan()`/`execute_gate_v_campaign()`) est IMPLEMENTED + TESTED + PUSHED sur
-`codex/af-v-08` (Slices 1-6, voir Conséquences pour le détail par tranche et les commits). Cette
-ADR documente désormais le contrat RÉELLEMENT implémenté, pas seulement une conception. Aucune
-exécution réelle n'est déclenchée automatiquement par ce câblage (Décision 11) : aucune campagne
-scientifique réelle n'a été exécutée, aucun accès `FINAL_HOLDOUT` réel n'a eu lieu, `AF-V-07`
-(politique de verdict) n'est pas implémentée, et **`GATE V` n'est PAS passée** — rien ici ne
-produit ni ne peut produire un verdict `PASS`/Champion (Décision 15). La branche n'est pas encore
-intégrée dans `master`.
+(`build_gate_v_campaign_plan()`/`execute_gate_v_campaign()`) est IMPLEMENTED + TESTED + INTEGRATED
+DANS `master` (Slices 1-6 + correctif de stabilisation `TECHNICAL_FAILURE`, voir Conséquences pour
+le détail par tranche et les commits ; HEAD d'intégration `daefc891f853bb0f3d06650b28033aa4218c52eb`,
+fast-forward strict depuis `c8cb6a93c1e475ac07076fcdede99b95c7fde577`, aucun commit de merge, suite
+de tests validée avant ET après ce fast-forward). Cette ADR documente désormais le contrat
+RÉELLEMENT implémenté et intégré, pas seulement une conception. Aucune exécution réelle n'est
+déclenchée automatiquement par ce câblage (Décision 11) : aucune campagne scientifique réelle n'a
+été exécutée, aucun accès `FINAL_HOLDOUT` réel n'a eu lieu, `AF-V-07` (politique de verdict) n'est
+pas implémentée, et **`GATE V` n'est PAS passée** — rien ici ne produit ni ne peut produire un
+verdict `PASS`/Champion (Décision 15). L'intégration dans `master` ne change rien à cela : c'est
+l'orchestration qui est intégrée, jamais un verdict scientifique.
 
 **Contexte historique (2026-09-22, au moment de la rédaction initiale de cette ADR, avant toute
 implémentation)** : `AF-V-02`/`AF-V-03`/`AF-V-04` (Walk-Forward, Monte-Carlo, Parameter Stability)
@@ -560,37 +563,40 @@ identifie déjà sans ambiguïté le run Walk-Forward source complet.
 
 ## Conséquences
 
-- **État réel d'implémentation (mis à jour AF-V-08 Slice 6, corrige une affirmation devenue
-  fausse)** : Slice 1 (`build_gate_v_campaign_plan()`), Slice 2 (`GateVCampaignManifest`/
+- **État réel d'implémentation (mis à jour AF-V-08 intégration master, corrige une affirmation
+  devenue fausse)** : Slice 1 (`build_gate_v_campaign_plan()`), Slice 2 (`GateVCampaignManifest`/
   `derive_gate_v_campaign_status()`), Slice 3 (`execute_gate_v_campaign()`, phase Walk-Forward),
   Slice 4 (phase Monte-Carlo, convention de dérivation `trade_return_pct` par trajectoire de
   capital — ADR 0022 amendement) et Slice 5 (phase Parameter Stability + relecture publique
   read-only `load_walk_forward_captured_run_v1()`, ADR 0021 amendement du 2026-09-28) sont
-  IMPLEMENTED + TESTED + PUSHED sur `codex/af-v-08` (commits
+  IMPLEMENTED + TESTED + INTEGRATED dans `master` (commits
   `ee3f7b8`/`6d8cd29`/`a5f16d5`/`8fda211`/`ed21298`). L'API additive Walk-Forward captured
   artifacts V1 (`run_walk_forward_with_artifacts_v1()`/`resume_walk_forward_with_artifacts_v1()`,
-  ADR 0021 amendement) est également IMPLEMENTED + TESTED + PUSHED (commit `7958e29`). Le
+  ADR 0021 amendement) est également IMPLEMENTED + TESTED + INTEGRATED (commit `7958e29`). Le
   correctif de stabilisation `TECHNICAL_FAILURE` (persistance correcte du marqueur d'échec
   technique conformément à la Décision 7 ci-dessus, jamais laissé `RUNNING`) est IMPLEMENTED +
-  TESTED + PUSHED (commit `3b6c63a`). **Slice 6 (fermeture de l'intégration bout-en-bout
-  SYNTHÉTIQUE, cette mission) est implémentée** : un test d'intégration principal construit une
-  campagne complète depuis zéro sur fixtures synthétiques — plan → Walk-Forward (vraie
-  orchestration, calcul de fold synthétique) → Monte-Carlo (fonction réelle) → Parameter
+  TESTED + INTEGRATED (commit `3b6c63a`). **Slice 6 (fermeture de l'intégration bout-en-bout
+  SYNTHÉTIQUE) est implémentée et intégrée** (commit `6ba966f`) : un test d'intégration principal
+  construit une campagne complète depuis zéro sur fixtures synthétiques — plan → Walk-Forward
+  (vraie orchestration, calcul de fold synthétique) → Monte-Carlo (fonction réelle) → Parameter
   Stability (fonction réelle, un voisin utilisable réel par fold) → statut
   `EVIDENCE_COMPLETE_AWAITING_POLICY`, dérivé UNIQUEMENT par `derive_gate_v_campaign_status()`,
   jamais forcé — en référençant une `ValidationRun` OOS SYNTHÉTIQUE déjà `completed` et
   préexistante (jamais produite via `validation_oos.run_oos_validation()`, jamais importé ici,
   jamais un accès `FINAL_HOLDOUT` réel). Relecture disque complète et idempotence d'un second
-  appel (zéro recalcul) sont également prouvées. **Cette fermeture ferme la matrice TDD des
-  Slices 1-6, sans exécuter aucune campagne scientifique réelle, sans `AF-V-07`, sans `PASS`,
-  sans Champion. `GATE V` reste NON PASSÉE** — aucune de ces tranches ne produit ni ne peut
-  produire un verdict `PASS`/Champion (Décision 15).
-- **`gate_v_campaign.py`** existe et contient à ce stade : Niveau A complet (Slice 1), le contrat
-  `GateVCampaignManifest` et le calcul pur de statut (Slice 2), le squelette Niveau B pour la phase
-  Walk-Forward (Slice 3), son extension Monte-Carlo (Slice 4), son extension Parameter Stability
-  (Slice 5) et le correctif `TECHNICAL_FAILURE` — l'intégration bout-en-bout SYNTHÉTIQUE (Slice 6)
-  est fermée au niveau test, sans modification de ce fichier (aucun changement de contrat
-  scientifique nécessaire).
+  appel (zéro recalcul) sont également prouvées. **Intégrée dans `master` le 2026-09-28 par
+  fast-forward strict depuis `c8cb6a93c1e475ac07076fcdede99b95c7fde577` jusqu'à
+  `daefc891f853bb0f3d06650b28033aa4218c52eb` (9 commits, aucun commit de merge), suite de tests
+  validée avant ET après ce fast-forward. Cette fermeture ferme la matrice TDD des Slices 1-6,
+  sans exécuter aucune campagne scientifique réelle, sans `AF-V-07`, sans `PASS`, sans Champion.
+  `GATE V` reste NON PASSÉE** — aucune de ces tranches ne produit ni ne peut produire un verdict
+  `PASS`/Champion (Décision 15).
+- **`gate_v_campaign.py`** existe et contient à ce stade, INTÉGRÉ dans `master` : Niveau A complet
+  (Slice 1), le contrat `GateVCampaignManifest` et le calcul pur de statut (Slice 2), le squelette
+  Niveau B pour la phase Walk-Forward (Slice 3), son extension Monte-Carlo (Slice 4), son extension
+  Parameter Stability (Slice 5) et le correctif `TECHNICAL_FAILURE` — l'intégration bout-en-bout
+  SYNTHÉTIQUE (Slice 6) est fermée au niveau test, sans modification de ce fichier (aucun
+  changement de contrat scientifique nécessaire).
 - **Dépendance explicite sur `AF-V-07`** (`ValidationPolicyVersion`) pour que `GATE V` passe
   RÉELLEMENT un jour — non bloquante pour CETTE ADR (`EVIDENCE_COMPLETE_AWAITING_POLICY` reste un
   état factuel valide et utile sans elle), mais nécessaire pour aller au-delà.
@@ -598,6 +604,7 @@ identifie déjà sans ambiguïté le run Walk-Forward source complet.
   aucun désaccord matériel n'est apparu — chaque choix de conception découlait directement des
   contrats déjà réels et déjà revus (ADR 0021/0022/0023). La double revue indépendante initiale
   (§ci-dessous, `AI_HANDOFF.md` §36) a confirmé l'ADR propre avant le début de l'implémentation ;
-  le statut est passé à `Accepté` une fois les Slices 1-6 implémentées, testées et poussées sur
-  `codex/af-v-08` (2026-09-28) — reste à faire : intégration fast-forward vers `master`, après
-  validation explicite de l'utilisateur (aucun merge n'a encore eu lieu).
+  le statut est passé à `Accepté` une fois les Slices 1-6 implémentées et testées, puis
+  l'intégration dans `master` a eu lieu le 2026-09-28 après validation explicite de l'utilisateur
+  (fast-forward strict, aucun merge commit). Reste à faire, en tant que décision produit séparée et
+  non technique : lancer une campagne `GATE V` réelle et implémenter `AF-V-07`.

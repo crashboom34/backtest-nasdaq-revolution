@@ -2611,3 +2611,52 @@ branche (Décision 15, ADR 0024).**
 **Prochaine action unique** : revue finale + intégration fast-forward vers `master`, uniquement
 après validation explicite de l'utilisateur. Aucun merge n'a été effectué par cette mission ni
 par aucune des missions précédentes de cette branche.
+
+## 38. `AF-V-08` intégré dans `master` — ticket DONE, `GATE V` toujours NON PASSÉE (2026-09-28)
+
+**Décision explicite de l'utilisateur** : autorisation donnée pour exécuter le fast-forward
+préparé au §37, depuis le worktree d'intégration dédié
+(`C:\Users\Mira Alexandre\Desktop\backtest-nasdaq-revolution-master-integration`, branche locale
+`integration/master` suivant `origin/master`).
+
+**Intégration** : `origin/master` = `daefc891f853bb0f3d06650b28033aa4218c52eb`. Fast-forward
+strict depuis `c8cb6a93c1e475ac07076fcdede99b95c7fde577` (`git merge --ff-only
+origin/codex/af-v-08`, message `Fast-forward`) — **aucun commit de merge**. Les 9 commits listés
+au §37 sont désormais présents tels quels dans `master` : `ee3f7b8`, `6d8cd29`, `7958e29`,
+`a5f16d5`, `8fda211`, `ed21298`, `3b6c63a`, `6ba966f`, `daefc89`.
+
+**Tests** :
+- Pré-intégration (worktree `D:\alphaforge-af-v-08-codex`, HEAD `daefc891...`, environnement
+  `PYTHONUTF8=1`/`PYTHONIOENCODING=utf-8`) : **1652 passed, 2 skipped, 0 failed**.
+- Post-fast-forward local (worktree d'intégration, même environnement) : **1654 passed, 0
+  skipped, 0 failed**. Écart expliqué : les 2 tests auparavant skippés
+  (`tests/test_engine_load_data_from_source.py`, `tests/test_market_data_resample.py`, tous deux
+  conditionnés à la présence de `nasdaq_3m.csv`) passent réellement dans ce worktree
+  d'intégration UNIQUEMENT parce qu'il contient localement ce fichier volumineux non versionné —
+  un état préexistant de ce worktree, sans rapport avec le diff AF-V-08 (aucun des deux fichiers
+  de test concernés n'apparaît dans `git diff origin/master..origin/codex/af-v-08`). Même total
+  de tests (1654) des deux côtés, zéro échec des deux côtés — écart purement environnemental,
+  jamais une régression du code intégré.
+
+**Ticket `AF-V-08`** : **DONE**. `ADR 0024` : **Accepté** (implémentation intégrée dans `master`,
+statut inchangé — voir mise à jour ADR 0024 du même jour). `MASTER_ROADMAP.md` Track V mis à jour
+en conséquence (orchestration `IMPLEMENTED + TESTED + INTEGRATED IN MASTER`, mécanismes
+bibliothèque restant séparément `IMPLEMENTED + TESTED`).
+
+**Dettes connues, conservées telles quelles (non traitées par cette clôture)** :
+1. Un crash PENDANT l'appel unique `persist_walk_forward_run()` lui-même reste une limite
+   résiduelle acceptée — résolution manuelle depuis les checkpoints V1 (ADR 0024 Décision 8).
+2. Aucune sérialisation inter-processus si deux exécuteurs tournent en concurrence sur la même
+   campagne.
+3. L'échec d'encodage Windows console de
+   `tests/test_autopilot_hooks.py::test_hook_blocks_a_force_push` reste externe à AF-V-08
+   (prouvé différentiellement identique sur le parent et sur la branche ; Autopilot n'a jamais
+   été modifié pour le contourner).
+
+**Aucune campagne scientifique réelle exécutée. Aucun accès `FINAL_HOLDOUT` réel. Aucun `AF-V-07`
+implémenté. Aucun `PASS`. Aucun Champion. `GATE V` reste NON PASSÉE** — l'intégration dans
+`master` porte sur l'orchestration technique, jamais sur un verdict scientifique (Décision 15,
+ADR 0024).
+
+**Prochaine étape** : décision utilisateur sur la suite du Track V. Aucun lancement de campagne
+réelle, aucun `AF-V-07` et aucun accès `FINAL_HOLDOUT` sans nouvelle décision explicite.
