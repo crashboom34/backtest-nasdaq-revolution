@@ -29,6 +29,7 @@ from dataset_split import (
 )
 from strategy_contracts import DailyStateReadiness
 from monte_carlo import run_monte_carlo_simulation
+from parameter_stability import analyze_parameter_stability
 from validation_run import (
     MONTE_CARLO_SEMANTICS_VERSION,
     PARAMETER_STABILITY_SEMANTICS_VERSION,
@@ -61,6 +62,7 @@ from walk_forward import (
     build_walk_forward_specification,
     build_walk_forward_validation_run,
     compute_fold_definitions,
+    load_walk_forward_captured_run_v1,
     persist_walk_forward_run,
 )
 
@@ -1312,6 +1314,145 @@ def _run_monte_carlo_phase(
     return final_manifest
 
 
+def _load_complete_monte_carlo_run(
+    plan: GateVCampaignPlan, manifest: GateVCampaignManifest, campaign_dir: Path,
+    wf_run: ValidationRun,
+) -> ValidationRun:
+    """Précondition absolue Parameter Stability (ADR 0024 §5, amendement AF-V-08) : recharge et
+    revalide strictement la ValidationRun Monte-Carlo de CETTE campagne — jamais une preuve
+    partielle/étrangère/incohérente. Réutilise `_validate_scoped_run()`/`_monte_carlo_complete()`
+    (Slice 4), jamais réimplémentés."""
+    mc_id = manifest.monte_carlo_validation_run_id
+    if mc_id is None:
+        raise ValueError(
+            "Aucune preuve Monte-Carlo rattachée à cette campagne — Parameter Stability refusé "
+            "(ADR 0024 §5)."
+        )
+    mc_path = campaign_dir / _VALIDATIONS_DIRNAME / mc_id / _VALIDATION_RUN_FILENAME
+    mc_run = load_validation_run(mc_path)
+    if mc_run is None:
+        raise ValueError(
+            f"ValidationRun Monte-Carlo {mc_id!r} absente ou illisible à {mc_path} — "
+            "Parameter Stability refusé (ADR 0024 §5)."
+        )
+    validated = _validate_scoped_run(plan, mc_id, VALIDATION_TYPE_MONTE_CARLO, {mc_id: mc_run})
+    if validated is None or not _monte_carlo_complete(plan, wf_run, validated):
+        raise ValueError(
+            f"ValidationRun Monte-Carlo {mc_id!r} incomplète, étrangère ou incohérente avec "
+            "cette campagne — Parameter Stability refusé (ADR 0024 §5)."
+        )
+    return validated
+
+
+def _run_parameter_stability_phase(
+    plan: GateVCampaignPlan, campaign_root: Union[str, Path], campaign_dir: Path,
+    manifest: GateVCampaignManifest, split_plan, base_config, data_manifest_path,
+) -> GateVCampaignManifest:
+    """AF-V-08 Slice 5 — phase Parameter Stability, APRÈS Walk-Forward ET Monte-Carlo complets et
+    validés (ADR 0024 §5). Un pool TRAIN EXACT par fold, relu via
+    `load_walk_forward_captured_run_v1()` (jamais le CSV de candidats TRAIN par fold, dont la
+    sérialisation peut perdre une ULP sur `score` — ADR 0024 §3 amendement AF-V-08).
+    `analyze_parameter_stability()` appelée DIRECTEMENT, jamais injectée (fonction pure).
+
+    Le manifeste est mis à jour ATOMIQUEMENT après CHAQUE fold traité, jamais seulement à la fin
+    — réduit la fenêtre de crash. Une `ValidationRun` PS peut satisfaire ou non la condition de
+    qualité ADR 0023 Décision 3 : dans les deux cas, elle est persistée et référencée telle
+    quelle, JAMAIS filtrée/masquée (`_parameter_stability_quality()` ne lève que sur une
+    incohérence structurelle réelle, jamais sur un résultat scientifique honnête défavorable)."""
+    wf_run = _load_complete_walk_forward_run(plan, manifest, campaign_dir)
+    _load_complete_monte_carlo_run(plan, manifest, campaign_dir, wf_run)
+
+    wf_output_dir = campaign_dir / _WALK_FORWARD_DIRNAME
+    captured = load_walk_forward_captured_run_v1(
+        split_plan.validation, plan.walk_forward_specification, plan.readiness_spec, base_config,
+        data_manifest_path=data_manifest_path, output_dir=wf_output_dir,
+        validation_run_id=manifest.walk_forward_validation_run_id,
+    )
+    fold_artifacts_by_id = {artifacts.fold_id: artifacts for artifacts in captured.fold_artifacts}
+    fold_results_by_id = {
+        _evidence_field(fold, "fold_id"): fold for fold in wf_run.evidence.fold_results
+    }
+
+    current_manifest = manifest
+    for fold_id in plan.expected_fold_ids:
+        if fold_id in current_manifest.parameter_stability_validation_run_ids_by_fold:
+            continue  # Déjà rattaché -- idempotent, jamais recalculé.
+
+        running_manifest = dataclasses.replace(
+            current_manifest, execution_started=True, running=True, status="RUNNING",
+        )
+        save_gate_v_campaign_manifest(campaign_root, plan, running_manifest)
+
+        ps_id = gate_v_validation_run_id(plan, VALIDATION_TYPE_PARAMETER_STABILITY, fold_id=fold_id)
+        ps_run_path = campaign_dir / _VALIDATIONS_DIRNAME / ps_id / _VALIDATION_RUN_FILENAME
+        existing_run = load_validation_run(ps_run_path)
+        if existing_run is not None and existing_run.validation_run_id != ps_id:
+            raise ValueError(f"ValidationRun persistée à {ps_run_path} étrangère à cette campagne.")
+
+        if existing_run is not None:
+            # Reprise sans recalcul (même schéma que WF/MC) : save_validation_run() a pu réussir
+            # avant un crash antérieur à la mise à jour du manifeste pour CE fold.
+            ps_run = existing_run
+        else:
+            fold_artifacts = fold_artifacts_by_id.get(fold_id)
+            fold_result = fold_results_by_id.get(fold_id)
+            if fold_artifacts is None or fold_result is None:
+                raise ValueError(
+                    f"Fold {fold_id!r} absent de la capture Walk-Forward -- Parameter Stability "
+                    "refusé."
+                )
+            selection = _evidence_field(fold_result, "selection")
+            pool = tuple(fold_artifacts.train_candidates)
+            if not pool:
+                raise ValueError(f"Fold {fold_id!r} : pool TRAIN vide -- Parameter Stability refusé.")
+            if _evidence_field(selection, "rank_in_train") != 1:
+                raise ValueError(f"Fold {fold_id!r} : selection.rank_in_train != 1.")
+            if _evidence_field(selection, "train_candidates_evaluated") != len(pool):
+                raise ValueError(
+                    f"Fold {fold_id!r} : train_candidates_evaluated != len(pool) réellement capturé."
+                )
+            best_params = _evidence_field(selection, "selected_params")
+            if pool[0].get("params") != best_params or pool[0].get("score") != _evidence_field(
+                selection, "score_train",
+            ):
+                raise ValueError(f"Fold {fold_id!r} : premier candidat du pool != vrai Top-1.")
+            ps_spec = build_parameter_stability_specification(
+                manifest.walk_forward_validation_run_id, plan.search_mode, True,
+                plan.parameter_stability_verdict_policy_id, source_fold_id=fold_id,
+            )
+            ps_evidence = analyze_parameter_stability(pool, best_params, ps_spec)
+            ps_run = build_validation_run(
+                validation_run_id=ps_id, research_run_id=plan.research_run_id,
+                split_plan_id=plan.split_plan_id, dataset_snapshot_id=plan.dataset_snapshot_id,
+                strategy_name=plan.strategy_name, strategy_params=dict(plan.base_params),
+                specification=ps_spec, evidence=ps_evidence,
+                validation_type=VALIDATION_TYPE_PARAMETER_STABILITY,
+            )
+            # Peut retourner False pour un résultat scientifique honnête (ADR 0023 D3) -- ne
+            # lève QUE sur une incohérence structurelle réelle ; la valeur de retour n'est
+            # jamais utilisée pour décider de persister ou non (Décision 11 de la mission).
+            _parameter_stability_quality(
+                plan, ps_run, fold_id, manifest.walk_forward_validation_run_id, fold_result,
+            )
+            save_validation_run(ps_run_path, ps_run)
+
+        updated_map = dict(current_manifest.parameter_stability_validation_run_ids_by_fold)
+        updated_map[fold_id] = ps_id
+        current_manifest = dataclasses.replace(
+            running_manifest, parameter_stability_validation_run_ids_by_fold=updated_map,
+            running=False,
+        )
+        persisted_runs, evidence_paths = _load_manifest_proofs(plan, current_manifest, campaign_dir)
+        status = derive_gate_v_campaign_status(plan, current_manifest, persisted_runs)
+        current_manifest = dataclasses.replace(current_manifest, status=status)
+        save_gate_v_campaign_manifest(
+            campaign_root, plan, current_manifest,
+            evidence_by_validation_run_id=persisted_runs,
+            evidence_paths_by_validation_run_id=evidence_paths,
+        )
+    return current_manifest
+
+
 def execute_gate_v_campaign(
     plan: GateVCampaignPlan,
     *,
@@ -1324,21 +1465,21 @@ def execute_gate_v_campaign(
     progress_cb=None,
     stop_flag_fn=None,
 ) -> GateVCampaignManifest:
-    """AF-V-08 Slices 3-4 — Niveau B, phases Walk-Forward puis Monte-Carlo (ADR 0024 Décision 5).
-    Parameter Stability reste hors scope (Slice 5) — le statut final ne peut donc être
-    `EVIDENCE_COMPLETE_AWAITING_POLICY` que si cette preuve existe déjà sur disque, produite par
-    une exécution antérieure distincte, jamais fabriquée ici.
+    """AF-V-08 Slices 3-5 — Niveau B, phases Walk-Forward, Monte-Carlo puis Parameter Stability
+    (ADR 0024 Décision 5). Le statut final ne peut être `EVIDENCE_COMPLETE_AWAITING_POLICY` que
+    si une preuve OOS existe déjà sur disque, référencée par le plan — jamais fabriquée ici.
 
     `run_walk_forward_fn`/`resume_walk_forward_fn`/`load_market_data_fn` sont INJECTÉS,
     keyword-only, SANS valeur par défaut — jamais importés ici (un appelant réel passe
     `walk_forward.run_walk_forward_with_artifacts_v1`/`resume_walk_forward_with_artifacts_v1` et
-    un vrai chargeur des données de marché réelles). `run_monte_carlo_simulation()` reste, elle,
-    appelée DIRECTEMENT (fonction pure, sans I/O, ADR 0024 Décision 5) — jamais injectée.
+    un vrai chargeur des données de marché réelles). `run_monte_carlo_simulation()`/
+    `analyze_parameter_stability()` restent, elles, appelées DIRECTEMENT (fonctions pures, sans
+    I/O, ADR 0024 Décision 5) — jamais injectées.
 
-    Un appel unique enchaîne les deux phases si la Walk-Forward se termine sans interruption
+    Un appel unique enchaîne les trois phases si la Walk-Forward se termine sans interruption
     coopérative dans ce même appel ; un `stop_flag_fn` déclenché entre deux folds retourne un
-    manifeste EN PAUSE avant tout calcul Monte-Carlo (jamais de Monte-Carlo sur un Walk-Forward
-    partiel)."""
+    manifeste EN PAUSE avant tout calcul Monte-Carlo/Parameter Stability (jamais sur un
+    Walk-Forward partiel)."""
     if not isinstance(plan, GateVCampaignPlan) or plan != _rebuild_plan(plan):
         raise ValueError("plan doit être un GateVCampaignPlan validé, non forgé.")
     for name, collaborator in (
@@ -1400,6 +1541,12 @@ def execute_gate_v_campaign(
 
     if manifest.monte_carlo_validation_run_id is None:
         manifest = _run_monte_carlo_phase(plan, campaign_root, campaign_dir, manifest, base_config)
+
+    if set(manifest.parameter_stability_validation_run_ids_by_fold) != set(plan.expected_fold_ids):
+        manifest = _run_parameter_stability_phase(
+            plan, campaign_root, campaign_dir, manifest, split_plan, base_config,
+            data_manifest_path,
+        )
 
     return manifest
 

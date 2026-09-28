@@ -27,8 +27,9 @@ from dataset_split import (
 )
 from gate_v_campaign import build_gate_v_campaign_plan
 import gate_v_campaign
+import walk_forward
 from market_data.backtest_manifest import build_backtest_manifest, save_backtest_manifest
-from optimizer import FilterConfig, OptimizationConfig, ScoreWeights, TrainTestConfig
+from optimizer import FilterConfig, OptimizationConfig, ScoreWeights, TrainTestConfig, params_hash
 from strategy_contracts import DailyStateReadiness
 from validation_run import (
     AggregateResult,
@@ -53,12 +54,14 @@ from validation_run import (
     load_validation_run,
     save_validation_run,
 )
+from parameter_stability import analyze_parameter_stability
 from walk_forward import (
     FoldArtifacts,
     WALK_FORWARD_SEMANTICS_VERSION,
     WalkForwardCapturedRunV1,
     build_aggregate_result,
     compute_fold_definitions,
+    load_walk_forward_captured_run_v1,
     persist_walk_forward_run,
 )
 
@@ -1147,8 +1150,8 @@ def _execute_fold_results_and_artifacts(plan, split_plan, fold_ids=None):
     for definition in definitions:
         selection = FoldSelection(
             fold_id=definition.fold_id, selected_params={"lookback": 12},
-            selected_params_hash="synthetic_hash", score_train=1.0, rank_in_train=1,
-            train_candidates_evaluated=2, train_candidates_unique=2, train_candidates_eligible=2,
+            selected_params_hash=params_hash({"lookback": 12}), score_train=1.0, rank_in_train=1,
+            train_candidates_evaluated=1, train_candidates_unique=1, train_candidates_eligible=1,
             search_space_hash=plan.search_space_hash, algorithm=plan.search_mode, fold_seed=None,
         )
         results.append(FoldResult(
@@ -1197,8 +1200,8 @@ def _execute_fold_results_and_artifacts_with_trades(plan, split_plan, trades_by_
         n_trades = len(rows)
         selection = FoldSelection(
             fold_id=definition.fold_id, selected_params={"lookback": 12},
-            selected_params_hash="synthetic_hash", score_train=1.0, rank_in_train=1,
-            train_candidates_evaluated=2, train_candidates_unique=2, train_candidates_eligible=2,
+            selected_params_hash=params_hash({"lookback": 12}), score_train=1.0, rank_in_train=1,
+            train_candidates_evaluated=1, train_candidates_unique=1, train_candidates_eligible=1,
             search_space_hash=plan.search_space_hash, algorithm=plan.search_mode, fold_seed=None,
         )
         results.append(FoldResult(
@@ -1223,9 +1226,52 @@ def _execute_fold_results_and_artifacts_with_trades(plan, split_plan, trades_by_
     return tuple(results), tuple(artifacts)
 
 
+def _real_capture_delegate(results, artifacts, *, resume=False):
+    """AF-V-08 Slice 5 : doublure run_walk_forward_fn/resume_walk_forward_fn qui délègue à la
+    VRAIE `run_walk_forward_with_artifacts_v1()`/`resume_walk_forward_with_artifacts_v1()`, avec
+    UNIQUEMENT `execute_walk_forward_fold_with_artifacts` monkeypatché (même technique que
+    Parameter Stability -- jamais de logique de checkpoint dupliquée ici) -- écrit donc de VRAIS
+    checkpoints V1 sur disque, requis depuis que Parameter Stability s'enchaîne automatiquement
+    après Monte-Carlo dans le même appel `execute_gate_v_campaign()`."""
+    results_by_id = {r.fold_id: r for r in results}
+    artifacts_by_id = {a.fold_id: a for a in artifacts}
+
+    def low_level(fold, base_config, df, progress_cb=None, stop_flag_fn=None, fold_seed=None):
+        return results_by_id[fold.fold_id], artifacts_by_id[fold.fold_id]
+
+    real_fn = (
+        walk_forward.resume_walk_forward_with_artifacts_v1 if resume
+        else walk_forward.run_walk_forward_with_artifacts_v1
+    )
+
+    def fn(validation_zone, spec, readiness_spec, base_config, df, *,
+           data_manifest_path, output_dir, progress_cb=None, stop_flag_fn=None,
+           validation_run_id):
+        original = walk_forward.execute_walk_forward_fold_with_artifacts
+        walk_forward.execute_walk_forward_fold_with_artifacts = low_level
+        try:
+            return real_fn(
+                validation_zone, spec, readiness_spec, base_config, df,
+                data_manifest_path=data_manifest_path, output_dir=output_dir,
+                progress_cb=progress_cb, stop_flag_fn=stop_flag_fn,
+                validation_run_id=validation_run_id,
+            )
+        finally:
+            walk_forward.execute_walk_forward_fold_with_artifacts = original
+    return fn
+
+
 def _execute_fake_run_with_trades(plan, split_plan, trades_by_fold, *, wrong_validation_run_id=None):
     calls = []
     results, artifacts = _execute_fold_results_and_artifacts_with_trades(plan, split_plan, trades_by_fold)
+
+    if wrong_validation_run_id is None:
+        delegate = _real_capture_delegate(results, artifacts)
+
+        def fn(*args, **kwargs):
+            calls.append(kwargs["validation_run_id"])
+            return delegate(*args, **kwargs)
+        return fn, calls
 
     def fn(validation_zone, spec, readiness_spec, base_config, df, *,
            data_manifest_path, output_dir, progress_cb=None, stop_flag_fn=None,
@@ -1244,9 +1290,23 @@ def _execute_fake_run_with_trades(plan, split_plan, trades_by_fold, *, wrong_val
 def _execute_fake_run(plan, split_plan, *, stopped_early=False, fold_ids=None,
                        wrong_validation_run_id=None):
     """Doublure de run_walk_forward_fn/resume_walk_forward_fn -- ne touche jamais l'Optimizer/
-    le moteur réel, retourne un WalkForwardCapturedRunV1 synthétique."""
+    le moteur réel. Cas complet (pas d'arrêt anticipé, pas de sous-ensemble de folds, pas d'ID
+    forgé) : délègue à `_real_capture_delegate()` -- écrit de VRAIS checkpoints V1, requis par
+    Parameter Stability (Slice 5) qui s'enchaîne automatiquement après Monte-Carlo. Cas
+    dégénérés/négatifs (utilisés pour tester le rejet AVANT toute persistance -- Parameter
+    Stability jamais atteinte dans ces scénarios) : construit toujours un WalkForwardCapturedRunV1
+    synthétique en mémoire, comme avant Slice 5."""
     calls = []
     results, artifacts = _execute_fold_results_and_artifacts(plan, split_plan, fold_ids=fold_ids)
+    use_real_checkpoint = not stopped_early and fold_ids is None and wrong_validation_run_id is None
+
+    if use_real_checkpoint:
+        delegate = _real_capture_delegate(results, artifacts)
+
+        def fn(*args, **kwargs):
+            calls.append(kwargs["validation_run_id"])
+            return delegate(*args, **kwargs)
+        return fn, calls
 
     def fn(validation_zone, spec, readiness_spec, base_config, df, *,
            data_manifest_path, output_dir, progress_cb=None, stop_flag_fn=None,
@@ -1312,17 +1372,29 @@ class TestExecuteGateVCampaignWalkForwardPhase:
 
     def test_resumes_when_checkpoint_present_never_calls_run(self, tmp_path):
         plan, split_plan, campaign_root = _execute_ready_campaign(tmp_path)
-        checkpoint_manifest = (
-            campaign_root / plan.campaign_id / "walk_forward"
-            / ".gate_v_checkpoints_v1" / "manifest.json"
+        results, artifacts = _execute_fold_results_and_artifacts(plan, split_plan)
+        data_manifest_path = _execute_data_manifest(tmp_path)
+        wf_output_dir = campaign_root / plan.campaign_id / "walk_forward"
+        wf_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD)
+        # Checkpoint V1 RÉEL et déjà complet (simule une capture antérieure terminée mais dont
+        # la ValidationRun n'a jamais été persistée/rattachée) -- requis depuis Slice 5 puisque
+        # Parameter Stability relit ces checkpoints après Walk-Forward+Monte-Carlo.
+        _real_capture_delegate(results, artifacts)(
+            split_plan.validation, plan.walk_forward_specification, plan.readiness_spec,
+            _execute_base_config(plan), pd.DataFrame(),
+            data_manifest_path=data_manifest_path, output_dir=wf_output_dir,
+            validation_run_id=wf_id,
         )
-        checkpoint_manifest.parent.mkdir(parents=True)
-        checkpoint_manifest.write_text("{}", encoding="utf-8")
-        resume_fn, resume_calls = _execute_fake_run(plan, split_plan)
+        resume_delegate = _real_capture_delegate(results, artifacts, resume=True)
+        resume_calls = []
+
+        def resume_fn(*args, **kwargs):
+            resume_calls.append(kwargs["validation_run_id"])
+            return resume_delegate(*args, **kwargs)
         run_fn = _never_called("run_walk_forward_fn")
 
         manifest = _execute(
-            plan, campaign_root, tmp_path,
+            plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
             run_walk_forward_fn=run_fn, resume_walk_forward_fn=resume_fn,
         )
 
@@ -1337,6 +1409,17 @@ class TestExecuteGateVCampaignWalkForwardPhase:
         wf_id = gate_v_campaign.gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD)
         wf_output_dir = campaign_root / plan.campaign_id / "walk_forward"
         data_manifest_path = _execute_data_manifest(tmp_path)
+        # Checkpoint V1 RÉEL correspondant (requis depuis Slice 5 : Parameter Stability relit ces
+        # checkpoints après Walk-Forward+Monte-Carlo, même quand Walk-Forward est reconciliée
+        # depuis une ValidationRun déjà persistée plutôt que recalculée dans cet appel) -- écrit
+        # AVANT `persist_walk_forward_run()` : `_prepare_captured_run(resume=False)` refuse une
+        # capture fraîche si le manifeste LEGACY (`walk_forward/manifest.json`) existe déjà.
+        _real_capture_delegate(results, artifacts)(
+            split_plan.validation, plan.walk_forward_specification, plan.readiness_spec,
+            _execute_base_config(plan), pd.DataFrame(),
+            data_manifest_path=data_manifest_path, output_dir=wf_output_dir,
+            validation_run_id=wf_id,
+        )
         persist_walk_forward_run(
             outcome, artifacts, aggregate, plan.walk_forward_specification,
             _execute_base_config(plan), data_manifest_path, wf_output_dir,
@@ -1563,13 +1646,15 @@ class TestExecuteGateVCampaignWalkForwardPhase:
 
         # Simule un crash APRES save_validation_run() mais AVANT la mise a jour du manifeste
         # (risque explicitement anticipe par la mission AF-V-08 precedente). Depuis la Slice 4,
-        # un appel complet rattache AUSSI Monte-Carlo dans la foulee -- reinitialiser les DEUX
-        # references (jamais MC seule sans WF, regle structurelle deja existante, Slice 2) pour
-        # rester un manifeste valide a relire.
+        # un appel complet rattache AUSSI Monte-Carlo dans la foulee, et depuis la Slice 5
+        # Parameter Stability aussi -- reinitialiser les TROIS references (jamais MC/PS seules
+        # sans WF, regle structurelle deja existante, Slice 2) pour rester un manifeste valide a
+        # relire.
         manifest_path = campaign_root / plan.campaign_id / "manifest.json"
         record = json.loads(manifest_path.read_text(encoding="utf-8"))
         record["walk_forward_validation_run_id"] = None
         record["monte_carlo_validation_run_id"] = None
+        record["parameter_stability_validation_run_ids_by_fold"] = {}
         record["status"] = "RUNNING"
         record["running"] = True
         manifest_path.write_text(json.dumps(record), encoding="utf-8")
@@ -1584,12 +1669,13 @@ class TestExecuteGateVCampaignWalkForwardPhase:
         assert reconciled.walk_forward_validation_run_id == manifest.walk_forward_validation_run_id
         assert reconciled.monte_carlo_validation_run_id == manifest.monte_carlo_validation_run_id
 
-    def test_never_references_parameter_stability_execution(self):
-        """Depuis la Slice 4, `run_monte_carlo_simulation` EST légitimement référencée (appelée
-        directement, jamais injectée, ADR 0024 Décision 5) -- seule Parameter Stability (Slice 5)
-        reste totalement hors scope ici."""
+    def test_parameter_stability_wired_but_never_injected(self):
+        """Depuis la Slice 5, Parameter Stability s'enchaîne automatiquement après Walk-Forward+
+        Monte-Carlo dans `execute_gate_v_campaign()` (via `_run_parameter_stability_phase`) --
+        `run_monte_carlo_simulation()`/`analyze_parameter_stability()` restent, elles, appelées
+        DIRECTEMENT (fonctions pures, jamais injectées, ADR 0024 Décision 5)."""
         source = inspect.getsource(gate_v_campaign.execute_gate_v_campaign)
-        assert "analyze_parameter_stability" not in source
+        assert "_run_parameter_stability_phase" in source
         signature = inspect.signature(gate_v_campaign.execute_gate_v_campaign)
         assert "run_monte_carlo_fn" not in signature.parameters
         assert "analyze_parameter_stability_fn" not in signature.parameters
@@ -2166,8 +2252,11 @@ class TestExecuteGateVCampaignMonteCarloPhase:
         assert reloaded.monte_carlo_validation_run_id is None
         assert reloaded.status != "TECHNICAL_FAILURE"
 
-    def test_never_references_parameter_stability(self):
-        source = inspect.getsource(gate_v_campaign.execute_gate_v_campaign)
+    def test_monte_carlo_phase_itself_never_references_parameter_stability(self):
+        """`_run_monte_carlo_phase()` (la phase MC elle-même) reste totalement ignorante de
+        Parameter Stability -- seul l'orchestrateur `execute_gate_v_campaign()` (Slice 5) enchaîne
+        les deux phases, jamais la phase MC elle-même."""
+        source = inspect.getsource(gate_v_campaign._run_monte_carlo_phase)
         assert "analyze_parameter_stability" not in source
         assert "ParameterStabilitySpecification" not in source
         assert "parameter_stability_validation_run_ids_by_fold" not in source
@@ -2185,3 +2274,440 @@ class TestExecuteGateVCampaignMonteCarloPhase:
             if p.is_dir() and VALIDATION_TYPE_MONTE_CARLO in p.name
         ]
         assert len(mc_dirs) == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AF-V-08 Slice 5 — phase Parameter Stability, APRÈS Walk-Forward ET Monte-Carlo complets et
+# validés. Un pool TRAIN exact PAR fold, relu via load_walk_forward_captured_run_v1() (jamais
+# train_candidates.csv). Une ValidationRun PS PAR fold attendu, jamais fusionnée.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _ps_pool_for_fold(best_params, *, extra_candidates=None, extra_params=None):
+    """Pool TRAIN synthétique : `best_params` en position 0 (vrai Top-1, `score=1.0`), plus un
+    voisin structurel `score>0` non rejeté (même clés, un seul paramètre différent) -- produit
+    `neighborhood_applicability="local_neighborhood_available"` avec >=1 voisin utilisable sous
+    `search_mode="grid"` (`DETERMINISTIC_DISPATCH_MODES`)."""
+    neighbor_params = dict(best_params)
+    key = next(iter(best_params))
+    neighbor_params[key] = extra_params if extra_params is not None else best_params[key] - 2
+    candidates = [
+        {"params": dict(best_params), "score": 1.0, "stats": {"n_trades": 3},
+         "filtered": False, "filter_reason": None},
+        {"params": neighbor_params, "score": 0.8, "stats": {"n_trades": 2},
+         "filtered": False, "filter_reason": None},
+    ]
+    if extra_candidates:
+        candidates.extend(extra_candidates)
+    return candidates
+
+
+def _ps_fake_execute_fold(plan, pools_by_fold):
+    """Doublure de `execute_walk_forward_fold_with_artifacts()` (le SEUL point bas-niveau
+    monkeypatché) -- la VRAIE `run_walk_forward_with_artifacts_v1()` orchestre au-dessus, donc
+    écrit RÉELLEMENT les checkpoints V1 sur disque (source exacte que
+    `load_walk_forward_captured_run_v1()` doit pouvoir relire pour Parameter Stability)."""
+    def execute(fold, base_config, df, progress_cb=None, stop_flag_fn=None, fold_seed=None):
+        best_params = {"lookback": 12}
+        pool = pools_by_fold.get(fold.fold_id) or _ps_pool_for_fold(best_params)
+        selection = FoldSelection(
+            fold_id=fold.fold_id, selected_params=dict(pool[0]["params"]),
+            selected_params_hash=params_hash(pool[0]["params"]),
+            score_train=pool[0]["score"], rank_in_train=1,
+            train_candidates_evaluated=len(pool), train_candidates_unique=len(pool),
+            train_candidates_eligible=len(pool),
+            search_space_hash=plan.search_space_hash, algorithm=plan.search_mode,
+            fold_seed=fold_seed,
+        )
+        result = FoldResult(
+            fold_id=fold.fold_id, definition=fold, selection=selection,
+            n_trades=1, net_ret_pct=1.0, max_dd_pct=0.5, profit_factor=1.2, win_rate=50.0,
+            expectancy=1.0, score_test=1.0, zero_trade_oos=False, forced_closes=0, coverage_bars=1,
+        )
+        trades = pd.DataFrame({
+            "resultat_net": [50.0], "capital_apres": [10_050.0],
+            "date_entree": [fold.effective_boundary],
+        })
+        equity = pd.DataFrame({"capital": [10_000.0]})
+        return result, FoldArtifacts(fold.fold_id, pool, trades, equity)
+    return execute
+
+
+def _ps_setup(tmp_path, monkeypatch, *, pools_by_fold=None):
+    """Prépare campagne + doublure bas-niveau (checkpoints V1 RÉELLEMENT écrits par la VRAIE
+    `run_walk_forward_with_artifacts_v1()`) SANS appeler `execute_gate_v_campaign()` -- laisse
+    l'appelant faire son propre appel `_execute()` unique (nécessaire pour observer/interrompre
+    l'état pendant la phase Parameter Stability, qui s'enchaîne automatiquement après Monte-Carlo
+    dans le même appel)."""
+    plan, _split_plan, campaign_root = _execute_ready_campaign(tmp_path)
+    monkeypatch.setattr(
+        walk_forward, "execute_walk_forward_fold_with_artifacts",
+        _ps_fake_execute_fold(plan, pools_by_fold or {}),
+    )
+    data_manifest_path = _execute_data_manifest(tmp_path)
+    return plan, campaign_root, data_manifest_path
+
+
+def _execute_ps_ready_campaign(tmp_path, monkeypatch, *, pools_by_fold=None):
+    """Complète Walk-Forward + Monte-Carlo + Parameter Stability (les trois s'enchaînent dans un
+    seul appel `execute_gate_v_campaign()` une fois qu'aucune interruption ne se produit)."""
+    plan, campaign_root, data_manifest_path = _ps_setup(
+        tmp_path, monkeypatch, pools_by_fold=pools_by_fold,
+    )
+    manifest = _execute(
+        plan, campaign_root, tmp_path, data_manifest_path=data_manifest_path,
+        run_walk_forward_fn=walk_forward.run_walk_forward_with_artifacts_v1,
+        resume_walk_forward_fn=_never_called("resume"),
+    )
+    assert manifest.walk_forward_validation_run_id is not None
+    assert manifest.monte_carlo_validation_run_id is not None
+    return plan, campaign_root, manifest, data_manifest_path
+
+
+class TestExecuteGateVCampaignParameterStabilityPhase:
+    def test_one_validation_run_per_expected_fold(self, tmp_path, monkeypatch):
+        plan, campaign_root, _manifest, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+
+        final = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+
+        assert set(final.parameter_stability_validation_run_ids_by_fold) == set(plan.expected_fold_ids)
+        assert len(set(final.parameter_stability_validation_run_ids_by_fold.values())) == len(
+            plan.expected_fold_ids
+        )  # IDs distincts par fold
+
+    def test_pools_never_merged_across_folds_and_top1_exact(self, tmp_path, monkeypatch):
+        plan, campaign_root, _manifest, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+        final = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+        for fold_id, ps_id in final.parameter_stability_validation_run_ids_by_fold.items():
+            path = campaign_root / plan.campaign_id / "validations" / ps_id / "validation_run.json"
+            run = load_validation_run(path)
+            assert run.evidence.n_candidates_total == 2  # pool de CE fold seulement
+            assert run.evidence.best_params == {"lookback": 12}
+            assert run.specification.source_fold_id == fold_id
+
+    def test_specification_provenance_exact(self, tmp_path, monkeypatch):
+        plan, campaign_root, manifest, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+        final = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+        for fold_id, ps_id in final.parameter_stability_validation_run_ids_by_fold.items():
+            path = campaign_root / plan.campaign_id / "validations" / ps_id / "validation_run.json"
+            run = load_validation_run(path)
+            assert run.specification.source_validation_run_id == manifest.walk_forward_validation_run_id
+            assert run.specification.source_candidates_from_optimized_search is True
+            assert run.specification.search_mode == plan.search_mode
+            assert run.evidence.search_mode == plan.search_mode
+
+    def test_deterministic_grid_mode_with_real_neighbor_is_locally_applicable(
+        self, tmp_path, monkeypatch,
+    ):
+        plan, campaign_root, _manifest, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+        final = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+        for ps_id in final.parameter_stability_validation_run_ids_by_fold.values():
+            path = campaign_root / plan.campaign_id / "validations" / ps_id / "validation_run.json"
+            run = load_validation_run(path)
+            assert run.evidence.neighborhood_applicability == "local_neighborhood_available"
+            usable = {
+                p: run.evidence.n_neighbors_total_by_param[p] - run.evidence.n_neighbors_rejected_by_param[p]
+                for p in run.evidence.n_neighbors_total_by_param
+            }
+            assert any(v > 0 for v in usable.values())
+        assert final.status == "EVIDENCE_INCOMPLETE"  # OOS absente -- jamais EVIDENCE_COMPLETE ici
+
+    def test_general_search_mode_persists_but_stays_incomplete(self, tmp_path, monkeypatch):
+        # Campagne dédiée avec search_mode="general" -- neighborhood_applicability devient
+        # honnêtement global_correlation_only, jamais convertie en erreur.
+        general_dir = tmp_path / "general"
+        plan2, _split_plan2, campaign_root2 = _execute_ready_campaign(
+            general_dir, search_mode="general",
+        )
+        monkeypatch.setattr(
+            walk_forward, "execute_walk_forward_fold_with_artifacts",
+            _ps_fake_execute_fold(plan2, {}),
+        )
+        data_manifest_path = _execute_data_manifest(general_dir)
+        final = _execute(
+            plan2, campaign_root2, general_dir, data_manifest_path=data_manifest_path,
+            run_walk_forward_fn=walk_forward.run_walk_forward_with_artifacts_v1,
+            resume_walk_forward_fn=_never_called("resume"),
+        )
+        assert set(final.parameter_stability_validation_run_ids_by_fold) == set(plan2.expected_fold_ids)
+        for ps_id in final.parameter_stability_validation_run_ids_by_fold.values():
+            path = campaign_root2 / plan2.campaign_id / "validations" / ps_id / "validation_run.json"
+            run = load_validation_run(path)
+            assert run.evidence.neighborhood_applicability == "global_correlation_only"
+        assert final.status == "EVIDENCE_INCOMPLETE"
+
+    def test_already_attached_folds_are_idempotent_no_recompute(self, tmp_path, monkeypatch):
+        plan, campaign_root, _manifest, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+        first = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+        monkeypatch.setattr(
+            gate_v_campaign, "analyze_parameter_stability",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("analyze_parameter_stability ne devait jamais être rappelée")
+            ),
+        )
+        second = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+        assert second == first
+
+    def test_reconciles_one_fold_persisted_but_not_attached(self, tmp_path, monkeypatch):
+        """Crash APRES save_validation_run() PS d'UN fold, AVANT mise à jour du manifeste."""
+        plan, campaign_root, _manifest, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+        completed = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+        target_fold = plan.expected_fold_ids[0]
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        del record["parameter_stability_validation_run_ids_by_fold"][target_fold]
+        record["status"] = "RUNNING"
+        record["running"] = True
+        manifest_path.write_text(json.dumps(record), encoding="utf-8")
+
+        monkeypatch.setattr(
+            gate_v_campaign, "analyze_parameter_stability",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("analyze_parameter_stability ne devait jamais être rappelée")
+            ),
+        )
+        reconciled = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+        assert reconciled.parameter_stability_validation_run_ids_by_fold == (
+            completed.parameter_stability_validation_run_ids_by_fold
+        )
+
+    def test_partial_multi_fold_resume_computes_only_missing_fold(self, tmp_path, monkeypatch):
+        """fold attaché -> préservé ; fold persisté-non-attaché -> réconcilié SANS recalcul ;
+        fold réellement absent (fichier ET référence supprimés) -> calculé UNE fois."""
+        plan, campaign_root, completed, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+        assert len(plan.expected_fold_ids) >= 2
+        untouched_fold = plan.expected_fold_ids[0]
+        persisted_not_attached_fold = plan.expected_fold_ids[-1]
+        persisted_not_attached_id = completed.parameter_stability_validation_run_ids_by_fold[
+            persisted_not_attached_fold
+        ]
+
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        del record["parameter_stability_validation_run_ids_by_fold"][persisted_not_attached_fold]
+        record["status"] = "RUNNING"
+        record["running"] = True
+        manifest_path.write_text(json.dumps(record), encoding="utf-8")
+
+        calls = []
+        real_analyze = gate_v_campaign.analyze_parameter_stability
+
+        def spy(*args, **kwargs):
+            calls.append(1)
+            return real_analyze(*args, **kwargs)
+        monkeypatch.setattr(gate_v_campaign, "analyze_parameter_stability", spy)
+
+        reconciled = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+        assert len(calls) == 0  # le fichier PS existait déjà -- réconciliation, jamais un recalcul
+        assert reconciled.parameter_stability_validation_run_ids_by_fold[untouched_fold] == (
+            completed.parameter_stability_validation_run_ids_by_fold[untouched_fold]
+        )
+        assert reconciled.parameter_stability_validation_run_ids_by_fold[
+            persisted_not_attached_fold
+        ] == persisted_not_attached_id
+
+    def test_truly_missing_fold_is_computed_exactly_once_others_untouched(self, tmp_path, monkeypatch):
+        plan, campaign_root, completed, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+        assert len(plan.expected_fold_ids) >= 2
+        untouched_fold = plan.expected_fold_ids[0]
+        missing_fold = plan.expected_fold_ids[-1]
+
+        missing_id = completed.parameter_stability_validation_run_ids_by_fold[missing_fold]
+        (
+            campaign_root / plan.campaign_id / "validations" / missing_id / "validation_run.json"
+        ).unlink()
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        del record["parameter_stability_validation_run_ids_by_fold"][missing_fold]
+        record["status"] = "RUNNING"
+        record["running"] = True
+        manifest_path.write_text(json.dumps(record), encoding="utf-8")
+
+        calls = []
+        real_analyze = gate_v_campaign.analyze_parameter_stability
+
+        def spy(*args, **kwargs):
+            calls.append(1)
+            return real_analyze(*args, **kwargs)
+        monkeypatch.setattr(gate_v_campaign, "analyze_parameter_stability", spy)
+
+        recomputed = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+        assert len(calls) == 1
+        assert recomputed.parameter_stability_validation_run_ids_by_fold[untouched_fold] == (
+            completed.parameter_stability_validation_run_ids_by_fold[untouched_fold]
+        )
+        assert recomputed.parameter_stability_validation_run_ids_by_fold[missing_fold] == missing_id
+
+    def test_manifest_updated_after_each_fold_not_only_at_the_end(self, tmp_path, monkeypatch):
+        plan, campaign_root, dmp = _ps_setup(tmp_path, monkeypatch)
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        observed_counts = []
+        real_analyze = gate_v_campaign.analyze_parameter_stability
+
+        def spying(*args, **kwargs):
+            evidence = real_analyze(*args, **kwargs)
+            record = json.loads(manifest_path.read_text(encoding="utf-8"))
+            observed_counts.append(len(record["parameter_stability_validation_run_ids_by_fold"]))
+            return evidence
+        monkeypatch.setattr(gate_v_campaign, "analyze_parameter_stability", spying)
+
+        _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=walk_forward.run_walk_forward_with_artifacts_v1,
+            resume_walk_forward_fn=_never_called("resume"),
+        )
+        # Après le calcul du fold i (avant que celui-ci soit rattaché), i-1 folds déjà rattachés.
+        assert observed_counts == list(range(len(plan.expected_fold_ids)))
+
+    def test_never_reads_train_candidates_csv_as_source(self, tmp_path):
+        source = inspect.getsource(gate_v_campaign._run_parameter_stability_phase)
+        assert "train_candidates.csv" not in source
+
+    def test_never_calls_engine_optimizer_or_new_backtest(self):
+        source = inspect.getsource(gate_v_campaign)
+        assert "import engine" not in source
+        assert "import optimizer" not in source
+        assert "Optimizer(" not in source
+
+    def test_rejects_foreign_parameter_stability_proof(self, tmp_path, monkeypatch):
+        plan, campaign_root, _manifest, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+        completed = _execute(
+            plan, campaign_root, tmp_path, data_manifest_path=dmp,
+            run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+        )
+        target_fold = plan.expected_fold_ids[0]
+        ps_id = completed.parameter_stability_validation_run_ids_by_fold[target_fold]
+        path = campaign_root / plan.campaign_id / "validations" / ps_id / "validation_run.json"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["dataset_snapshot_id"] = "foreign_snapshot"
+        path.write_text(json.dumps(record), encoding="utf-8")
+
+        from gate_v_campaign import load_gate_v_campaign_manifest
+        with pytest.raises(ValueError):
+            load_gate_v_campaign_manifest(
+                campaign_root / plan.campaign_id / "manifest.json", plan,
+            )
+
+    def test_reconciliation_rejects_persisted_run_with_wrong_source_fold_id(
+        self, tmp_path, monkeypatch,
+    ):
+        """Une ValidationRun PS persistée mais non rattachée, dont `specification.source_fold_id`
+        a été altéré pour référencer un AUTRE fold que celui associé à son propre fichier, doit
+        être rejetée à la réconciliation -- jamais rattachée telle quelle (ADR 0023 Décision 11,
+        traçabilité par fold). Vérifie que la garde de provenance de `_parameter_stability_quality()`
+        s'applique aussi bien aux folds réconciliés qu'aux folds fraîchement calculés."""
+        plan, campaign_root, completed, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+        assert len(plan.expected_fold_ids) >= 2
+        target_fold = plan.expected_fold_ids[0]
+        foreign_fold = plan.expected_fold_ids[1]
+        ps_id = completed.parameter_stability_validation_run_ids_by_fold[target_fold]
+        path = campaign_root / plan.campaign_id / "validations" / ps_id / "validation_run.json"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["specification"]["source_fold_id"] = foreign_fold
+        path.write_text(json.dumps(record), encoding="utf-8")
+
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        manifest_record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        del manifest_record["parameter_stability_validation_run_ids_by_fold"][target_fold]
+        manifest_record["status"] = "RUNNING"
+        manifest_record["running"] = True
+        manifest_path.write_text(json.dumps(manifest_record), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Provenance Parameter Stability incorrecte"):
+            _execute(
+                plan, campaign_root, tmp_path, data_manifest_path=dmp,
+                run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+            )
+
+    def test_manifest_before_costly_ps_call_is_running(self, tmp_path, monkeypatch):
+        plan, campaign_root, _manifest, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        observed = []
+        real_analyze = gate_v_campaign.analyze_parameter_stability
+
+        def spying(*args, **kwargs):
+            record = json.loads(manifest_path.read_text(encoding="utf-8"))
+            observed.append((record["status"], record["running"]))
+            return real_analyze(*args, **kwargs)
+        import gate_v_campaign as gvc
+        old = gvc.analyze_parameter_stability
+        gvc.analyze_parameter_stability = spying
+        try:
+            _execute(
+                plan, campaign_root, tmp_path, data_manifest_path=dmp,
+                run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+            )
+        finally:
+            gvc.analyze_parameter_stability = old
+        assert all(status == "RUNNING" and running is True for status, running in observed)
+
+    def test_technical_exception_during_ps_propagates_without_fabricated_evidence(
+        self, tmp_path, monkeypatch,
+    ):
+        plan, campaign_root, dmp = _ps_setup(tmp_path, monkeypatch)
+
+        def failing(*args, **kwargs):
+            raise RuntimeError("synthetic parameter-stability crash")
+        monkeypatch.setattr(gate_v_campaign, "analyze_parameter_stability", failing)
+
+        with pytest.raises(RuntimeError, match="synthetic parameter-stability crash"):
+            _execute(
+                plan, campaign_root, tmp_path, data_manifest_path=dmp,
+                run_walk_forward_fn=walk_forward.run_walk_forward_with_artifacts_v1,
+                resume_walk_forward_fn=_never_called("resume"),
+            )
+
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        from gate_v_campaign import load_gate_v_campaign_manifest
+        reloaded = load_gate_v_campaign_manifest(manifest_path, plan)
+        assert reloaded.status == "RUNNING"
+        assert reloaded.walk_forward_validation_run_id is not None
+        assert reloaded.monte_carlo_validation_run_id is not None
+        assert reloaded.status != "TECHNICAL_FAILURE"
+
+    def test_refused_without_complete_monte_carlo(self, tmp_path, monkeypatch):
+        plan, campaign_root, manifest, dmp = _execute_ps_ready_campaign(tmp_path, monkeypatch)
+        mc_id = manifest.monte_carlo_validation_run_id
+        mc_path = campaign_root / plan.campaign_id / "validations" / mc_id / "validation_run.json"
+        mc_path.unlink()
+        manifest_path = campaign_root / plan.campaign_id / "manifest.json"
+        record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        record["parameter_stability_validation_run_ids_by_fold"] = {}
+        record["status"] = "RUNNING"
+        record["running"] = True
+        manifest_path.write_text(json.dumps(record), encoding="utf-8")
+
+        with pytest.raises(ValueError):
+            _execute(
+                plan, campaign_root, tmp_path, data_manifest_path=dmp,
+                run_walk_forward_fn=_never_called("run"), resume_walk_forward_fn=_never_called("resume"),
+            )

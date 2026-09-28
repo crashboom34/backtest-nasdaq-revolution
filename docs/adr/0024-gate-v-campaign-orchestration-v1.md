@@ -531,20 +531,26 @@ identifie déjà sans ambiguïté le run Walk-Forward source complet.
 
 ## Conséquences
 
-- **État réel d'implémentation (mis à jour AF-V-08 Slice 4, corrige une affirmation devenue
+- **État réel d'implémentation (mis à jour AF-V-08 Slice 5, corrige une affirmation devenue
   fausse)** : Slice 1 (`build_gate_v_campaign_plan()`), Slice 2 (`GateVCampaignManifest`/
-  `derive_gate_v_campaign_status()`) et Slice 3 (`execute_gate_v_campaign()`, phase Walk-Forward)
-  sont IMPLEMENTED + TESTED + PUSHED sur `codex/af-v-08` (commits `ee3f7b8`/`6d8cd29`/`a5f16d5`).
-  L'API additive Walk-Forward captured artifacts V1
+  `derive_gate_v_campaign_status()`), Slice 3 (`execute_gate_v_campaign()`, phase Walk-Forward) et
+  Slice 4 (phase Monte-Carlo, convention de dérivation `trade_return_pct` par trajectoire de
+  capital — ADR 0022 amendement) sont IMPLEMENTED + TESTED + PUSHED sur `codex/af-v-08` (commits
+  `ee3f7b8`/`6d8cd29`/`a5f16d5`/`8fda211`). L'API additive Walk-Forward captured artifacts V1
   (`run_walk_forward_with_artifacts_v1()`/`resume_walk_forward_with_artifacts_v1()`, ADR 0021
-  amendement) est également IMPLEMENTED + TESTED + PUSHED (commit `7958e29`). Slice 4 (phase
-  Monte-Carlo) est en cours dans cette mission. Slices 5-6 (Parameter Stability, intégration
-  bout-en-bout) restent NON commencées. **`GATE V` reste NON PASSÉE** — aucune de ces tranches ne
-  produit ni ne peut produire un verdict `PASS`/Champion (Décision 15).
+  amendement) est également IMPLEMENTED + TESTED + PUSHED (commit `7958e29`). **Slice 5 (phase
+  Parameter Stability + relecture publique read-only `load_walk_forward_captured_run_v1()`, ADR
+  0021 amendement du 2026-09-28) est implémentée dans cette mission** : chaque
+  `ParameterStabilitySpecification`/pool TRAIN consommé par Parameter Stability provient
+  EXCLUSIVEMENT de la capture V1 sans perte (relecture read-only des checkpoints
+  `.gate_v_checkpoints_v1/`), JAMAIS de `folds/<fold_id>/train_candidates.csv` (source CSV à
+  perte d'ULP, explicitement exclue — Décision 6 ci-dessus). Slice 6 (intégration bout-en-bout,
+  OOS final, `PASS`/Champion) reste NON commencée. **`GATE V` reste NON PASSÉE** — aucune de ces
+  tranches ne produit ni ne peut produire un verdict `PASS`/Champion (Décision 15).
 - **`gate_v_campaign.py`** existe et contient à ce stade : Niveau A complet (Slice 1), le contrat
   `GateVCampaignManifest` et le calcul pur de statut (Slice 2), le squelette Niveau B pour la phase
-  Walk-Forward (Slice 3), et son extension Monte-Carlo (Slice 4, cette mission) — implémentation
-  des tranches suivantes toujours en attente.
+  Walk-Forward (Slice 3), son extension Monte-Carlo (Slice 4) et son extension Parameter Stability
+  (Slice 5, cette mission) — Slice 6 (intégration bout-en-bout) toujours en attente.
 - **Dépendance explicite sur `AF-V-07`** (`ValidationPolicyVersion`) pour que `GATE V` passe
   RÉELLEMENT un jour — non bloquante pour CETTE ADR (`EVIDENCE_COMPLETE_AWAITING_POLICY` reste un
   état factuel valide et utile sans elle), mais nécessaire pour aller au-delà.

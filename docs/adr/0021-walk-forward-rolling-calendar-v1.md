@@ -553,3 +553,23 @@ sont jamais rejoués. Ces checkpoints sont des artefacts de reprise, pas la preu
 finale. `persist_walk_forward_run()` conserve son contrat de persistance finale et reçoit les
 `FoldArtifacts` capturés directement. Le cas d'un crash pendant cet unique appel final reste la
 limite documentée par l'ADR 0024 Décision 8.
+
+### Amendement AF-V-08 du 2026-09-28 — relecture publique read-only de la capture V1 (Slice 5)
+
+Parameter Stability (ADR 0023, orchestré depuis ADR 0024) a besoin, pour chaque fold, du pool
+TRAIN exact déjà capturé par `run_walk_forward_with_artifacts_v1()` — jamais une reconstruction
+depuis `folds/<fold_id>/train_candidates.csv`, dont l'aller-retour CSV peut perdre une ULP sur
+`score` (arrondi flottant à la sérialisation texte). Les checkpoints `.gate_v_checkpoints_v1/`
+existants contiennent déjà tout ce qu'il faut (pool TRAIN complet, `FoldResult`, hash SHA-256 de
+payload, `contract_version`, `validation_run_id`, définition de fold) et sont déjà vérifiés par
+`_load_captured_fold()`/`_validate_captured_fold()` — aucune nouvelle sémantique, aucun nouveau
+format, aucun bump de `WALK_FORWARD_CAPTURE_CONTRACT_VERSION`.
+
+`load_walk_forward_captured_run_v1()` est la nouvelle API publique de relecture : elle réutilise
+`_prepare_captured_run(..., resume=True)` et `_load_captured_fold()` sans les réimplémenter,
+n'accepte aucun DataFrame de marché (pas de paramètre `df`), n'appelle jamais le moteur ni
+l'Optimizer, et n'écrit jamais sur disque. Contrairement à `resume_walk_forward_with_artifacts_v1()`
+(qui peut calculer un fold manquant), elle refuse `WalkForwardResumeMismatch` dès qu'un seul fold
+attendu n'a pas de checkpoint valide — une relecture read-only n'a structurellement aucun moteur à
+invoquer pour combler l'absence. Les mêmes gardes de fingerprint/provenance/intégrité que la
+reprise s'appliquent donc intégralement, sans duplication de logique.

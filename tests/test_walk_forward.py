@@ -3876,3 +3876,163 @@ class TestWalkForwardCapturedRunV1:
             assert artifacts.fold_id == result.fold_id
             assert len(artifacts.train_candidates) == result.selection.train_candidates_evaluated
             assert artifacts.test_trades["raison_sortie"].tolist() == ["fin-donnees"]
+
+
+class TestLoadWalkForwardCapturedRunV1:
+    """AF-V-08 Slice 5 : relecture PUBLIQUE, READ-ONLY, sans recalcul, d'une capture V1 déjà
+    complète -- source canonique du pool TRAIN exact pour Parameter Stability (jamais
+    train_candidates.csv, dont la sérialisation CSV peut perdre une ULP sur score)."""
+
+    @staticmethod
+    def _inputs(tmp_path):
+        return TestWalkForwardCapturedRunV1._inputs(tmp_path)
+
+    @staticmethod
+    def _fake_capture(calls):
+        return TestWalkForwardCapturedRunV1._fake_capture(calls)
+
+    def _captured_output_dir(self, tmp_path, monkeypatch):
+        zone, _folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts",
+                            self._fake_capture(calls))
+        output_dir = tmp_path / "wf"
+        captured = walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_ps_loader",
+        )
+        return zone, spec, config, data_manifest_path, output_dir, captured
+
+    def test_reloads_all_folds_exactly_matching_the_fresh_capture(self, tmp_path, monkeypatch):
+        zone, spec, config, data_manifest_path, output_dir, captured = self._captured_output_dir(
+            tmp_path, monkeypatch,
+        )
+
+        reloaded = walk_forward_module.load_walk_forward_captured_run_v1(
+            zone, spec, None, config,
+            data_manifest_path=data_manifest_path, output_dir=output_dir,
+            validation_run_id="vr_ps_loader",
+        )
+
+        assert reloaded.outcome.fold_results == captured.outcome.fold_results
+        assert reloaded.aggregate == captured.aggregate
+        assert reloaded.validation_run_id == captured.validation_run_id
+        assert [a.fold_id for a in reloaded.fold_artifacts] == [
+            a.fold_id for a in captured.fold_artifacts
+        ]
+        for reloaded_a, captured_a in zip(reloaded.fold_artifacts, captured.fold_artifacts):
+            assert reloaded_a.train_candidates == captured_a.train_candidates  # exact, pas CSV
+            pd.testing.assert_frame_equal(reloaded_a.test_trades, captured_a.test_trades)
+            pd.testing.assert_frame_equal(reloaded_a.test_equity, captured_a.test_equity)
+
+    def test_no_market_data_or_engine_call_required(self, tmp_path, monkeypatch):
+        zone, spec, config, data_manifest_path, output_dir, _captured = self._captured_output_dir(
+            tmp_path, monkeypatch,
+        )
+        monkeypatch.setattr(
+            walk_forward_module, "execute_walk_forward_fold_with_artifacts",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("aucun calcul TRAIN/TEST ne devait avoir lieu")
+            ),
+        )
+
+        reloaded = walk_forward_module.load_walk_forward_captured_run_v1(
+            zone, spec, None, config,
+            data_manifest_path=data_manifest_path, output_dir=output_dir,
+            validation_run_id="vr_ps_loader",
+        )
+        assert reloaded.outcome.stopped_early is False
+
+    def test_read_only_never_modifies_checkpoint_files(self, tmp_path, monkeypatch):
+        zone, spec, config, data_manifest_path, output_dir, _captured = self._captured_output_dir(
+            tmp_path, monkeypatch,
+        )
+        checkpoint_dir = output_dir / ".gate_v_checkpoints_v1"
+        before = {
+            p: p.read_bytes() for p in sorted(checkpoint_dir.rglob("*")) if p.is_file()
+        }
+
+        walk_forward_module.load_walk_forward_captured_run_v1(
+            zone, spec, None, config,
+            data_manifest_path=data_manifest_path, output_dir=output_dir,
+            validation_run_id="vr_ps_loader",
+        )
+
+        after = {
+            p: p.read_bytes() for p in sorted(checkpoint_dir.rglob("*")) if p.is_file()
+        }
+        assert before == after
+
+    def test_missing_checkpoint_fold_fails_closed(self, tmp_path, monkeypatch):
+        zone, folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts",
+                            self._fake_capture(calls))
+        output_dir = tmp_path / "wf"
+        walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_ps_loader",
+        )
+        (output_dir / ".gate_v_checkpoints_v1" / "folds" / f"{folds[0].fold_id}.json").unlink()
+
+        with pytest.raises(WalkForwardResumeMismatch):
+            walk_forward_module.load_walk_forward_captured_run_v1(
+                zone, spec, None, config,
+                data_manifest_path=data_manifest_path, output_dir=output_dir,
+                validation_run_id="vr_ps_loader",
+            )
+
+    def test_corrupted_checkpoint_hash_fails_closed(self, tmp_path, monkeypatch):
+        zone, folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        calls = []
+        monkeypatch.setattr(walk_forward_module, "execute_walk_forward_fold_with_artifacts",
+                            self._fake_capture(calls))
+        output_dir = tmp_path / "wf"
+        walk_forward_module.run_walk_forward_with_artifacts_v1(
+            zone, spec, None, config, None, data_manifest_path=data_manifest_path,
+            output_dir=output_dir, validation_run_id="vr_ps_loader",
+        )
+        checkpoint = output_dir / ".gate_v_checkpoints_v1" / "folds" / f"{folds[0].fold_id}.json"
+        payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+        payload["test_trades_table"]["float64_hex_columns"]["resultat_net"][0] = float(999).hex()
+        checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(FoldArtifactConflict, match="checkpoint|intégrité"):
+            walk_forward_module.load_walk_forward_captured_run_v1(
+                zone, spec, None, config,
+                data_manifest_path=data_manifest_path, output_dir=output_dir,
+                validation_run_id="vr_ps_loader",
+            )
+
+    def test_foreign_validation_run_id_fails_closed(self, tmp_path, monkeypatch):
+        zone, spec, config, data_manifest_path, output_dir, _captured = self._captured_output_dir(
+            tmp_path, monkeypatch,
+        )
+        with pytest.raises(WalkForwardResumeMismatch):
+            walk_forward_module.load_walk_forward_captured_run_v1(
+                zone, spec, None, config,
+                data_manifest_path=data_manifest_path, output_dir=output_dir,
+                validation_run_id="vr_foreign",
+            )
+
+    def test_divergent_fold_definitions_fail_closed(self, tmp_path, monkeypatch):
+        zone, spec, config, data_manifest_path, output_dir, _captured = self._captured_output_dir(
+            tmp_path, monkeypatch,
+        )
+        changed_zone = _zone(zone.start, "2023-04-15T00:00:00+00:00")
+        with pytest.raises(WalkForwardResumeMismatch):
+            walk_forward_module.load_walk_forward_captured_run_v1(
+                changed_zone, spec, None, config,
+                data_manifest_path=data_manifest_path, output_dir=output_dir,
+                validation_run_id="vr_ps_loader",
+            )
+
+    def test_incomplete_capture_fresh_no_manifest_fails_closed(self, tmp_path):
+        zone, _folds, spec, config, data_manifest_path = self._inputs(tmp_path)
+        output_dir = tmp_path / "wf_never_started"
+        with pytest.raises(WalkForwardResumeMismatch):
+            walk_forward_module.load_walk_forward_captured_run_v1(
+                zone, spec, None, config,
+                data_manifest_path=data_manifest_path, output_dir=output_dir,
+                validation_run_id="vr_ps_loader",
+            )

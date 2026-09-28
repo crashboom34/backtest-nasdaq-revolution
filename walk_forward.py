@@ -2288,3 +2288,51 @@ def resume_walk_forward_with_artifacts_v1(
         validation_zone, spec, readiness_spec, base_config, df, data_manifest_path,
         output_dir, progress_cb, stop_flag_fn, validation_run_id, resume=True,
     )
+
+
+def load_walk_forward_captured_run_v1(
+    validation_zone: SplitBoundary,
+    spec: WalkForwardSpecification,
+    readiness_spec: Optional[DailyStateReadiness],
+    base_config,
+    *,
+    data_manifest_path: Union[str, Path],
+    output_dir: Union[str, Path],
+    validation_run_id: str,
+) -> WalkForwardCapturedRunV1:
+    """AF-V-08 Slice 5 : relecture PUBLIQUE, READ-ONLY, SANS RECALCUL d'une capture V1 déjà
+    complète -- aucun DataFrame de marché (pas de paramètre `df`), aucun accès moteur/Optimizer,
+    aucune écriture. Source canonique du pool TRAIN exact pour un futur appelant Parameter
+    Stability (jamais `folds/<fold_id>/train_candidates.csv`, dont la sérialisation CSV peut
+    perdre une ULP sur `score` -- voir ADR 0024 §3 amendement AF-V-08).
+
+    Réutilise `_prepare_captured_run(..., resume=True)`/`_load_captured_fold()` telles quelles
+    (mêmes gardes de fingerprint/provenance/intégrité que `resume_walk_forward_with_artifacts_v1()`,
+    jamais réimplémentées) : refuse `WalkForwardResumeMismatch` si le manifeste de checkpoint est
+    absent/incompatible, refuse `WalkForwardOrphanedFoldArtifacts` si des checkpoints de folds
+    étrangers existent, refuse `WalkForwardResumeMismatch`/`FoldArtifactConflict` si UN SEUL fold
+    attendu n'a pas de checkpoint valide -- contrairement à `resume_walk_forward_with_artifacts_v1()`,
+    cette fonction ne calcule JAMAIS le fold manquant, elle refuse."""
+    fold_definitions, checkpoint_dir, _manifest = _prepare_captured_run(
+        validation_zone, spec, readiness_spec, base_config, data_manifest_path,
+        output_dir, validation_run_id, resume=True,
+    )
+    fold_results = []
+    fold_artifacts = []
+    for fold in fold_definitions:
+        loaded = _load_captured_fold(checkpoint_dir, validation_run_id, fold)
+        if loaded is None:
+            raise WalkForwardResumeMismatch(
+                f"{fold.fold_id} : checkpoint V1 absent sous {checkpoint_dir} -- relecture "
+                "read-only refusée (load_walk_forward_captured_run_v1 ne calcule jamais un "
+                "fold manquant)."
+            )
+        result, artifacts = loaded
+        fold_results.append(result)
+        fold_artifacts.append(artifacts)
+    return WalkForwardCapturedRunV1(
+        outcome=WalkForwardRunOutcome(fold_results=tuple(fold_results), stopped_early=False),
+        fold_artifacts=tuple(fold_artifacts),
+        aggregate=build_aggregate_result(tuple(fold_results)),
+        validation_run_id=validation_run_id,
+    )
