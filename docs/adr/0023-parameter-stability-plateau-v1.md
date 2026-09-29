@@ -414,6 +414,15 @@ réutilisation). Aucune politique concrète de seuils "plateau acceptable"/"pic 
 ce dépôt à ce jour, cette ADR n'en invente aucune — même discipline de pré-enregistrement que l'ADR
 0022 Décision 12 (toute future politique doit être définie/committée AVANT le run qu'elle juge).
 
+**Supersession partielle (ADR 0025, `AF-V-07`, 2026-09-29)** : `scientific_verdict` embarqué
+ci-dessus reste structurellement `"INCONCLUSIVE"` en permanence dans ce dépôt
+(`build_gate_v_campaign_plan()` rejette tout `parameter_stability_verdict_policy_id` réel, ADR
+0024). `ValidationAssessment` (ADR 0025) est désormais l'artefact canonique de verdict scientifique
+GATE V pour Parameter Stability — jamais ce champ embarqué. La composition multi-fold (une preuve
+par fold, jamais fusionnée) vit désormais dans `GateVPolicyAssessment`/AND strict (ADR 0025),
+`_parameter_stability_quality()` restant le seul garde structurel réutilisé, inchangé. Aucun
+changement de comportement runtime, aucun artefact déjà persisté réécrit.
+
 ## Décision 13 — Matrice TDD
 
 | Cas | Test |

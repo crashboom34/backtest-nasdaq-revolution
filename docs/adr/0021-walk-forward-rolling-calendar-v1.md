@@ -424,6 +424,13 @@ la reprise) **n'est jamais** traduite en `FAIL` scientifique — elle interrompt
 produit jamais une `WalkForwardEvidence` avec `execution_status="completed"` et
 `scientific_verdict="FAIL"` pour une raison purement technique.
 
+**Supersession partielle (ADR 0025, `AF-V-07`, 2026-09-29)** : `scientific_verdict` embarqué
+ci-dessus reste structurellement `"INCONCLUSIVE"` en permanence dans ce dépôt
+(`build_gate_v_campaign_plan()` rejette tout `walk_forward_verdict_policy_id` réel, ADR 0024).
+`ValidationAssessment` (ADR 0025) est désormais l'artefact canonique de verdict scientifique GATE V
+pour Walk-Forward — jamais ce champ embarqué. Aucun changement de comportement runtime, aucun
+artefact déjà persisté réécrit.
+
 ## Décision 14 — Indépendance stricte des folds, `flat_each_fold_v1`, aucune rétroaction TEST inter-fold
 
 **Trouvé manquant lors de la relecture finale de cette mission** (checklist explicite de clôture) —

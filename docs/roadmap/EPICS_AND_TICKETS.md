@@ -809,11 +809,18 @@ propre.
 
 ### AF-V-07 — `ValidationPolicyVersion` (fondation)
 
-**Status** : **READY** (`AF-V-06 = DONE`, 2026-09-12 — débloqué mécaniquement, **non commencé**).
-Ne pas présumer que ce soit la priorité automatique du track : les frontières exactes de
-"Champion" restent `OPEN QUESTION` (`DOMAIN_MODEL.md` §13), non résolues par `AF-V-06` — une
-décision produit explicite reste nécessaire avant de le démarrer, comme pour tout ticket de ce
-track. **Effort** : S. **Uncertainty** : medium. **Skills recommended** : `domain-modeling`.
+**Status** : **DESIGN ACCEPTED / READY FOR IMPLEMENTATION** (2026-09-29, ADR 0025 —
+`docs/adr/0025-gate-v-validation-policy-v1.md` — sept itérations de conception, revues
+scientifique et architecture/reproductibilité adversariales, aucun BLOCKER/MAJOR restant).
+**PAS `IMPLEMENTED`, PAS `TESTED`, PAS `DONE`** — aucune ligne de code Python, aucun test, aucune
+campagne réelle, aucun accès `FINAL_HOLDOUT` n'a été produit. `GateVValidationPolicyVersion`/
+`GateVPreRegistration`/`GateVCampaignPlan` V2/`FinalHoldoutAccessClaim`/`ValidationAssessment`/
+`GateVPolicyAssessment` sont conçus, ADR-documentés, prêts pour un découpage TDD — non commencé.
+Aucune policy concrète de seuils scientifiques n'est encore approuvée (hors périmètre de l'ADR par
+construction, Human Gate séparé). Les frontières exactes de "Champion" restent `OPEN QUESTION`
+(`DOMAIN_MODEL.md` §13) — ADR 0025 les laisse explicitement non tranchées. **`GATE V` reste NON
+PASSÉE.** **Effort** : L (plusieurs tranches TDD, voir ADR 0025 Décision finale/slices). **Skills
+recommended** : `domain-modeling`, `tdd`.
 
 ### AF-V-08 — Orchestration de campagne `GATE V` intégrée
 

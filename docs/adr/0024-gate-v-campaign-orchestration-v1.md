@@ -18,6 +18,19 @@ pas implémentée, et **`GATE V` n'est PAS passée** — rien ici ne produit ni 
 verdict `PASS`/Champion (Décision 15). L'intégration dans `master` ne change rien à cela : c'est
 l'orchestration qui est intégrée, jamais un verdict scientifique.
 
+**Amendement `AF-V-07` (ADR 0025, 2026-09-29, DESIGN ACCEPTED / READY FOR IMPLEMENTATION, aucun
+code encore écrit)** : ADR 0025 définit la politique de verdict scientifique qui manquait ici —
+`GateVValidationPolicyVersion`, `GateVPreRegistration`, `GateVCampaignPlan` V2 (extension
+versionnée de ce plan, `campaign_id` V1 bit-pour-bit inchangé), `FinalHoldoutAccessClaim`
+(primitif d'exclusivité un-coup, `FINAL_HOLDOUT` structurellement DERNIER pour V2, jamais avant
+Walk-Forward/Monte-Carlo/Parameter Stability complets), `ValidationAssessment`/
+`GateVPolicyAssessment` (composition AND stricte). `GateVCampaignManifest` gagne des champs V2
+additifs référençant ces artefacts mais **n'est jamais lui-même un verrou d'exclusivité** — voir
+ADR 0025 Décision 9. `GateVPolicyAssessment.verdict == PASS` reste distinct de `GATE V = PASS`
+(Décision 15 ci-dessous, inchangée). L'architecture V1 de cette ADR (Décision 9, OOS
+potentiellement référencée dès la construction du plan) reste vraie historiquement et inchangée —
+ADR 0025 ne la réinterprète jamais, elle s'applique uniquement aux nouvelles campagnes V2.
+
 **Contexte historique (2026-09-22, au moment de la rédaction initiale de cette ADR, avant toute
 implémentation)** : `AF-V-02`/`AF-V-03`/`AF-V-04` (Walk-Forward, Monte-Carlo, Parameter Stability)
 étaient alors déjà tous construits et testés au niveau bibliothèque (`AI_HANDOFF.md` §33/34) —

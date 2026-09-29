@@ -2660,3 +2660,57 @@ ADR 0024).
 
 **Prochaine étape** : décision utilisateur sur la suite du Track V. Aucun lancement de campagne
 réelle, aucun `AF-V-07` et aucun accès `FINAL_HOLDOUT` sans nouvelle décision explicite.
+
+## 39. `AF-V-07` — design `ValidationPolicyVersion` accepté (ADR 0025), READY FOR IMPLEMENTATION, aucun code écrit (2026-09-29)
+
+**Décision explicite de l'utilisateur** : concevoir `AF-V-07` (`ValidationPolicyVersion`) —
+DESIGN ONLY, aucun code — à travers sept itérations successives (V1-V7), chacune close par une
+revue scientifique et architecture/reproductibilité adversariale avant la suivante, puis formaliser
+le résultat accepté dans `docs/adr/0025-gate-v-validation-policy-v1.md`.
+
+**Contenu accepté** (détail complet : ADR 0025) : six objets normatifs
+(`GateVValidationPolicyVersion`, `GateVPreRegistration`, `GateVCampaignPlan` V2,
+`FinalHoldoutAccessClaim`, `ValidationAssessment`, `GateVPolicyAssessment`) ; ordre scientifique
+obligatoire V2 avec `FINAL_HOLDOUT` structurellement DERNIER (après Walk-Forward/Monte-Carlo/
+Parameter Stability tous folds complets) ; `V1` historique jamais réécrite, `campaign_id` V1
+bit-pour-bit inchangé ; empreinte de protocole complète (`campaign_protocol_fingerprint`, corrige
+un oubli des champs dérivés de folds trouvé en V6) ; provenance Git de policy fermée à l'échec
+(`policy_git_sha` non optionnel, octets committés vérifiés via `git show`, jamais l'arbre de
+travail) ; primitif d'exclusivité un-coup `FinalHoldoutAccessClaim` (`os.O_CREAT|O_EXCL`, ferme un
+BLOCKER de course entre processus trouvé en V7 — un simple booléen de manifeste ne pouvait pas
+garantir l'exclusivité) ; matrice de crash conservatrice (toute incertitude sur la consommation du
+holdout est traitée comme consommée, aucun retry automatique) ; `GateVPolicyAssessment.verdict ==
+PASS` explicitement distinct de `GATE V = PASS`.
+
+**Processus de revue** : chaque itération a rejoué un scénario adversarial complet (policy
+choisie après observation de l'OOS, protocole modifié après coup, préenregistrements multiples
+pour le même scope, crash à chaque étape possible, OOS forgée, provenance Git falsifiée, etc.) —
+classé BLOCKER/MAJOR/MINEUR, tout BLOCKER/MAJOR corrigé avant la revue suivante. Aucun BLOCKER/
+MAJOR ne subsiste dans la V7 finale.
+
+**Design Pilot** : invoqué à chaque itération — a confirmé systématiquement l'absence de toute
+surface UI/UX (aucun écran, aucun utilisateur final) ; n'a jamais décidé une règle scientifique.
+**Figma MCP** : utilisé à chaque itération pour produire/mettre à jour un diagramme d'architecture
+(FigJam/Mermaid) — dernier diagramme (V7, référence non normative) :
+`https://www.figma.com/board/tbncsrWhuFng8HF0QDKKD1`. Un échec transitoire du classificateur
+serveur Figma a affecté une itération (V4) — retenté avec succès, signalé honnêtement dans son
+compte rendu plutôt que masqué. **Le texte de l'ADR 0025 reste seul normatif** en cas de
+divergence avec un diagramme.
+
+**ADR 0025 créée** : `docs/adr/0025-gate-v-validation-policy-v1.md`, Status `Accepté — design
+validé, READY FOR IMPLEMENTATION`. **Amendements** : ADR 0021 Décision 13, ADR 0022 Décision 12,
+ADR 0023 Décision 12 (supersession explicite, jamais une contradiction silencieuse — le
+`scientific_verdict` embarqué reste `INCONCLUSIVE` en permanence, `ValidationAssessment` devient
+le canal canonique) ; ADR 0024 (note d'amendement `AF-V-07`, V1 historique préservée, V2
+référencée) ; `DOMAIN_MODEL.md` §13 (distinction `GateVValidationPolicyVersion` GATE V vs future
+policy Champion, même primitif de versioning, jamais le même contrat sémantique) ;
+`EPICS_AND_TICKETS.md`/`MASTER_ROADMAP.md` (statut `AF-V-07` : `DESIGN ACCEPTED / READY FOR
+IMPLEMENTATION`, jamais `IMPLEMENTED`/`TESTED`/`DONE`).
+
+**Aucun code Python, aucun test, aucune campagne réelle, aucun accès `FINAL_HOLDOUT` produit par ce
+processus de conception. `AF-V-08` reste `DONE`, intégrée dans `master`, inchangée. `GATE V` reste
+NON PASSÉE.**
+
+**Prochaine étape** : découpage TDD (ADR 0025, slices A-I) après autorisation explicite de
+l'utilisateur pour commencer l'implémentation — aucun code AF-V-07 n'a été écrit par cette mission
+de conception.

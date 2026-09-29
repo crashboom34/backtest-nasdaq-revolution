@@ -467,6 +467,13 @@ future ADR qui définirait un vrai registre de politiques : toute politique réf
 (ex. liée à un hash de contenu + un commit antérieur à `completed_at` de la `ValidationRun`),
 jamais rédigée ou modifiée après observation du résultat qu'elle doit juger.
 
+**Supersession partielle (ADR 0025, `AF-V-07`, 2026-09-29)** : cette anticipation est désormais
+formalisée — `scientific_verdict` embarqué ci-dessus reste structurellement `"INCONCLUSIVE"` en
+permanence dans ce dépôt (`build_gate_v_campaign_plan()` rejette tout `monte_carlo_verdict_policy_id`
+réel, ADR 0024). `ValidationAssessment` (ADR 0025) est désormais l'artefact canonique de verdict
+scientifique GATE V pour Monte-Carlo — jamais ce champ embarqué. Aucun changement de comportement
+runtime, aucun artefact déjà persisté réécrit.
+
 ## Décision 13 — Matrice TDD
 
 | Cas | Test |

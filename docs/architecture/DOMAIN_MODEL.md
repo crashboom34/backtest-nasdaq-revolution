@@ -679,7 +679,18 @@ flowchart LR
 Un futur `Champion` référencerait : `StrategyDefinition`/version, `ParameterSet`, `DatasetVersion`,
 preuves de validation (`ValidationRun`(s)), **`ValidationPolicyVersion`** (précision de revue —
 concept léger : identifie *quelle version des règles de promotion* a été appliquée, pour lever
-l'ambiguïté temporelle si ces règles évoluent ; référencé, pas une nouvelle machinerie), `ExecutionModel`, `git_sha`, date. **Aucun Champion existant
+l'ambiguïté temporelle si ces règles évoluent ; référencé, pas une nouvelle machinerie), `ExecutionModel`, `git_sha`, date.
+
+**Précision (ADR 0025, `AF-V-07`, 2026-09-29, DESIGN ACCEPTED, non implémenté)** : `AF-V-07`
+introduit `GateVValidationPolicyVersion` — un objet DISTINCT, portant EXCLUSIVEMENT
+l'interprétation scientifique des preuves `GATE V` (OOS/Walk-Forward/Monte-Carlo/Parameter
+Stability), jamais les règles de promotion Champion évoquées ci-dessus. Les deux réutilisent le
+même primitif de versioning/hash (identité stable, contenu immuable, jamais deux sources de
+vérité en conflit) mais **jamais le même contrat sémantique** — une future policy de promotion
+Champion resterait un objet séparé. Cette `OPEN QUESTION` (frontières de Champion) reste
+non tranchée par ADR 0025.
+
+**Aucun Champion existant
 n'est rétroactivement reclassé** par ce document — un Champion promu avant l'existence d'une
 `ValidationPolicyVersion` reste interprétable selon les règles historiques informelles qui
 s'appliquaient à l'époque, jamais réévalué silencieusement contre une politique plus récente.
