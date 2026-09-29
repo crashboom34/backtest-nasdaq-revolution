@@ -229,13 +229,12 @@ def _criterion_from_dict(family: str, data: object) -> object:
         raise ValueError(f"critère malformé pour {family!r} : {data!r}") from exc
 
 
-def load_gate_v_validation_policy(path: Union[str, Path]) -> GateVValidationPolicyVersion:
-    """Chargement STRICT — usage scientifique, jamais tolérant : fichier absent/illisible/
-    malformé -> exception, jamais un `None` silencieux (contrairement à `load_tolerant()`
-    générique du module partagé, réservé aux usages non critiques)."""
-    data = load_json_tolerant(path)
-    if data is None:
-        raise ValueError(f"GateVValidationPolicyVersion illisible ou introuvable : {path}")
+def gate_v_validation_policy_from_dict(data: dict) -> GateVValidationPolicyVersion:
+    """Reconstruction STRICTE depuis un `dict` JSON déjà parsé — extrait de
+    `load_gate_v_validation_policy()` (AF-V-07 Slice B) pour rester l'UNIQUE chemin de
+    reconstruction/validation, partagé par le chargement fichier normal ET par la vérification
+    fail-closed de provenance Git (`gate_v_preregistration.py`), qui parse des octets récupérés
+    via `git show` plutôt que via un chemin de fichier."""
     if not isinstance(data, dict):
         raise ValueError("GateVValidationPolicyVersion malformée : objet JSON attendu")
     allowed_top_level_keys = {"validation_policy_id", "scientific_criteria"}
@@ -261,3 +260,13 @@ def load_gate_v_validation_policy(path: Union[str, Path]) -> GateVValidationPoli
             raise ValueError(f"scientific_criteria[{family!r}] malformé : liste attendue")
         normalized[family] = tuple(_criterion_from_dict(family, item) for item in raw_list)
     return build_gate_v_validation_policy(validation_policy_id, normalized)
+
+
+def load_gate_v_validation_policy(path: Union[str, Path]) -> GateVValidationPolicyVersion:
+    """Chargement STRICT — usage scientifique, jamais tolérant : fichier absent/illisible/
+    malformé -> exception, jamais un `None` silencieux (contrairement à `load_tolerant()`
+    générique du module partagé, réservé aux usages non critiques)."""
+    data = load_json_tolerant(path)
+    if data is None:
+        raise ValueError(f"GateVValidationPolicyVersion illisible ou introuvable : {path}")
+    return gate_v_validation_policy_from_dict(data)

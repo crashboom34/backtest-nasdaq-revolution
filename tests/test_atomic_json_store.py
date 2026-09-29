@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from atomic_json_store import load_json_tolerant, save_atomic, save_atomic_overwrite
+from atomic_json_store import load_json_tolerant, save_atomic, save_atomic_overwrite, save_exclusive
 
 
 def test_save_atomic_overwrite_writes_a_new_file(tmp_path):
@@ -76,4 +76,27 @@ def test_save_atomic_still_refuses_to_overwrite_an_existing_file(tmp_path):
     save_atomic(path, {"a": 1}, "some_record")
     with pytest.raises(FileExistsError):
         save_atomic(path, {"a": 2}, "some_record")
+    assert load_json_tolerant(path) == {"a": 1}
+
+
+def test_save_exclusive_writes_a_new_file(tmp_path):
+    path = tmp_path / "claim.json"
+    save_exclusive(path, {"a": 1}, "some_exclusive_record")
+    assert load_json_tolerant(path) == {"a": 1}
+
+
+def test_save_exclusive_refuses_second_write_same_path(tmp_path):
+    """Garantie plus forte que save_atomic() : création exclusive (O_CREAT|O_EXCL) au niveau
+    système de fichiers, jamais un simple contrôle target.is_file() suivi d'une écriture séparée
+    (TOCTOU) — voir gate_v_preregistration.py pour l'usage réel (unicité inter-processus)."""
+    path = tmp_path / "claim.json"
+    save_exclusive(path, {"a": 1}, "some_exclusive_record")
+    with pytest.raises(FileExistsError):
+        save_exclusive(path, {"a": 2}, "some_exclusive_record")
+    assert load_json_tolerant(path) == {"a": 1}
+
+
+def test_save_exclusive_creates_parent_directories(tmp_path):
+    path = tmp_path / "nested" / "dir" / "claim.json"
+    save_exclusive(path, {"a": 1}, "some_exclusive_record")
     assert load_json_tolerant(path) == {"a": 1}

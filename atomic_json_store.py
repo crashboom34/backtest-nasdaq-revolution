@@ -92,6 +92,46 @@ def save_atomic_overwrite(path: Union[str, Path], data: dict, kind: str) -> Path
     return target
 
 
+def save_exclusive(path: Union[str, Path], data: dict, kind: str) -> Path:
+    """Création EXCLUSIVE atomique au niveau du système de fichiers — garantit l'exclusivité
+    ENTRE PROCESSUS, contrairement à `save_atomic()` : celle-ci documente elle-même ne "pas
+    résoudre entièrement le TOCTOU inhérent au contrôle `target.is_file()`" (contrôle et écriture
+    restent deux opérations séparées). Réservée à un artefact où plusieurs processus concurrents
+    doivent produire un unique gagnant déterministe (ex. `GateVPreRegistration` keyée par
+    `scope_key`, futur `FinalHoldoutAccessClaim`, ADR 0025 Décision 9).
+
+    Primitif retenu : `os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)` — appel système
+    indivisible unique sur l'entrée de répertoire, portable Windows (`CreateFileW(CREATE_NEW)`,
+    garanti au niveau pilote NTFS) et POSIX (`open(2)` natif `O_EXCL`, garanti par le noyau).
+    Écrit directement dans le descripteur ouvert en exclusivité — PAS de fichier temporaire
+    intermédiaire + `os.replace()` comme `save_atomic()` : ce motif réintroduirait exactement la
+    même fenêtre TOCTOU au moment du `replace()` (qui écrase inconditionnellement, sans jamais
+    lever `FileExistsError`).
+
+    **Matrice de crash** (même philosophie conservatrice que ADR 0025 Décision 9/11) :
+    - crash AVANT l'appel `os.open()` : sûr, rien n'est créé, nouvelle tentative complète possible.
+    - crash APRÈS acquisition (fichier créé) mais AVANT écriture complète : le chemin reste
+      définitivement consommé (fichier présent, potentiellement tronqué/invalide) — AUCUN retry
+      automatique. Le chargeur strict de l'appelant doit détecter tout contenu tronqué/invalide et
+      échouer fermé, jamais l'accepter silencieusement comme valide.
+    - crash APRÈS écriture complète : artefact valide, normal.
+    - second processus concurrent : reçoit `FileExistsError` de façon synchrone, avant tout accès
+      au contenu du premier — jamais d'inspection du détenteur existant, jamais de retry."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    try:
+        fd = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise FileExistsError(
+            f"Un {kind} existe déjà à {target} — création exclusive refusée (une écriture "
+            "concurrente a gagné la course, ou ce chemin a déjà été utilisé)."
+        )
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+    return target
+
+
 def load_json_tolerant(path: Union[str, Path]) -> Optional[dict]:
     """Lecture tolérante d'un fichier JSON vers un `dict` brut (pas de reconstruction de classe) :
     fichier absent, illisible ou invalide -> `None`, jamais d'exception. Bloc partagé par
