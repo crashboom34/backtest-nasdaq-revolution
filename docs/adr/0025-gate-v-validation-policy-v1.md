@@ -218,11 +218,15 @@ Immuable, artefact RUNTIME portable (pas source-contrôlé, voir Décision 17-19
 GATE_V_PREREGISTRATION_SEMANTICS_VERSION = "gate_v_preregistration_v1"
 
 scope_key                        # SHA256(canonical_json({research_run_id, dataset_snapshot_id, split_plan_id, strategy_name}))
-preregistration_id               # SHA256(canonical_json({..tous champs normatifs incl. campaign_protocol_fingerprint..}))
-preregistration_content_hash     # SHA256(canonical_json({scope_key, preregistration_id, campaign_protocol_fingerprint,
-                                  #   research_run_id, dataset_snapshot_id, split_plan_id, strategy_name,
-                                  #   gate_v_validation_policy_id, policy_content_hash,
+preregistration_id               # SHA256(canonical_json({scope_key, campaign_protocol_fingerprint,
+                                  #   research_run_id, research_run_content_hash, dataset_snapshot_id, split_plan_id, strategy_name,
+                                  #   gate_v_validation_policy_id, policy_content_hash, policy_git_sha,
                                   #   assessment_semantics_version, preregistration_semantics_version}))
+preregistration_content_hash     # SHA256(canonical_json({scope_key, preregistration_id, campaign_protocol_fingerprint,
+                                  #   research_run_id, research_run_content_hash, dataset_snapshot_id, split_plan_id, strategy_name,
+                                  #   gate_v_validation_policy_id, policy_content_hash, policy_git_sha,
+                                  #   assessment_semantics_version, preregistration_semantics_version}))
+                                  # preregistration_content_hash s'exclut lui-même de sa préimage ; created_at exclu des DEUX (audit seul).
 campaign_protocol_fingerprint    # Décision 7
 research_run_id
 research_run_content_hash        # Décision 7
@@ -236,6 +240,15 @@ assessment_semantics_version
 preregistration_semantics_version = GATE_V_PREREGISTRATION_SEMANTICS_VERSION
 created_at                       # audit seul, JAMAIS l'identité
 ```
+**Pourquoi `research_run_content_hash` et `policy_git_sha` sont directement hashés** (et pas
+seulement transitifs) : `research_run_content_hash` participe déjà transitivement via
+`campaign_protocol_fingerprint`, mais reste aussi un champ normatif persisté de `GateVPreRegistration`
+— `preregistration_content_hash` doit représenter l'artefact persisté réel, pas seulement un
+sous-ensemble transitif. `policy_git_sha` est une provenance obligatoire qui ne fait PAS partie de
+`campaign_protocol_fingerprint` (Décision 7) — il doit donc être directement lié à
+`preregistration_id`/`preregistration_content_hash`, sinon une `GateVPreRegistration` persistée
+pourrait changer sa provenance Git tout en conservant le même hash de contenu.
+
 **Unicité par scope scientifique** : stockage keyé par `scope_key` (jamais par `preregistration_id`,
 qui inclut la policy et permettrait sinon à deux policies différentes de coexister pour le même
 scope). Écriture protégée par refus d'écrasement — une SECONDE préenregistrement pour le MÊME
