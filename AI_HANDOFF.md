@@ -2714,3 +2714,50 @@ NON PASSÉE.**
 **Prochaine étape** : découpage TDD (ADR 0025, slices A-I) après autorisation explicite de
 l'utilisateur pour commencer l'implémentation — aucun code AF-V-07 n'a été écrit par cette mission
 de conception.
+
+## 40. `AF-V-07` — Slice A/B intégrées, Slice C (`GateVCampaignPlan V2`) spécifiée et verrouillée (2026-09-29)
+
+Depuis §39 : **Slice A** (`GateVValidationPolicyVersion`, critères typés, hash canonique,
+persistance immuable, `gate_v_validation_policy.py`) implémentée en TDD strict, revue
+BLOCKER/MAJOR (champs top-level non validés au chargement — corrigé), commitée (`bcee84e`),
+poussée sur `origin/master`. **Slice B** (`GateVPreRegistration`, `compute_scope_key()`,
+`compute_campaign_protocol_fingerprint()`, `compute_preregistration_id()`/
+`compute_preregistration_content_hash()`, `verify_policy_git_provenance()` fail-closed) implémentée
+en TDD strict, deux findings adversariaux réels corrigés avant intégration : (1) BLOCKER — TOCTOU
+sur l'unicité inter-processus du préenregistrement (`save_atomic()` insuffisant, documenté par sa
+propre docstring) — corrigé par une nouvelle primitive additive `save_exclusive()`
+(`os.O_CREAT|O_EXCL`, `atomic_json_store.py`), validée par un test à 2 processus réels avec
+barrière de synchronisation (5/5 exécutions, exactement 1 gagnant) ; (2) MAJOR — `policy_git_sha`
+n'était pas vérifié égal au `HEAD` courant (seulement que le blob existait à ce SHA) — corrigé par
+comparaison canonique `git rev-parse HEAD^{commit}` vs `git rev-parse <sha>^{commit}`, testée
+(ancien commit avec contenu identique → refusé ; SHA court résolu → accepté ; CWD externe/working
+tree dirty → robuste). Commitée (`0f0df82`), corrections commitées (`3bf1872`), poussées sur
+`origin/master`. Suite complète : 1789/1789 PASS avant push Slice B corrigée.
+
+**Mission de verrouillage Slice C (2026-09-29, DESIGN ONLY, aucun code)** : ADR 0025 ne donnait pas
+de formule explicite pour `campaign_id` V2 — ambiguïté fermée par la Décision 20 (nouvelle) :
+formule exacte hash-de-hashes (`preregistration_id` + `campaign_protocol_fingerprint` +
+`campaign_plan_semantics_version`, préfixe `"gate_v_v2_"` distinct de V1), réutilisation
+obligatoire de `compute_campaign_protocol_fingerprint()` (jamais réimplémentée), dataclass
+`GateVCampaignPlanV2` DISTINCTE de `GateVCampaignPlan` V1 (Option B, argumentée contre l'extension
+du type existant — états illégaux représentables sinon), stratégie save/load fail-closed avec
+revalidation en DEUX temps (protocol_fingerprint ET campaign_id, ce second temps fermant un gap
+réel trouvé en revue architecture : une altération isolée de `preregistration_id` seul n'aurait
+pas été détectée par la seule revalidation du fingerprint). V1 (`gate_v_campaign.py`) confirmé
+bit-pour-bit inchangé, formule documentée en détail (Décision 20.1).
+
+Contrat du plan V2 : exactement 27 champs normatifs, déterministes, SANS `created_at` ni aucun
+timestamp ; `policy_git_sha` est le 27e champ, porté directement par le plan et cohérent avec la
+`GateVPreRegistration`. Frontière `policy_git_sha` (Décision 20.10) : à la CRÉATION de la
+PreRegistration, `policy_git_sha == HEAD` reste exigé (Slice B, inchangé) ; à la relecture
+historique du plan, on vérifie le commit/blob historique référencé (commit résolvable, blob,
+`validation_policy_id`, `policy_content_hash`, cohérence PreRegistration) SANS exiger
+`HEAD courant == policy_git_sha`. `verify_policy_git_provenance()` actuelle est orientée création :
+une vérification historique distincte sera à ajouter en implémentation Slice C (Slice B non modifié).
+
+**Aucun code Python Slice C, aucun test, aucune campagne réelle, aucun accès `FINAL_HOLDOUT`
+produit par cette mission de conception.**
+
+**Statut** : `Slice A` = INTEGRATED. `Slice B` = INTEGRATED. `Slice C` = SPEC LOCKED, READY FOR
+IMPLEMENTATION uniquement après validation explicite de l'utilisateur de la Décision 20. `AF-V-07`
+overall = IN PROGRESS. `AF-V-08` = DONE, inchangée. `GATE V` reste NON PASSÉE.

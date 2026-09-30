@@ -479,13 +479,309 @@ verrou d'exclusivité (Décision 9) ; aucun retry automatique après un `FinalHo
 réussi (Décision 11) ; `GateVPolicyAssessment` ≠ Human Gate (Décision 12, cohérent avec ADR 0024
 Décision 15, inchangée).
 
+## Décision 20 — `GateVCampaignPlan V2` : contrat exact (verrouillé avant TDD, 2026-09-29)
+
+**Contexte** : `AF-V-07` Slice A (`GateVValidationPolicyVersion`) et Slice B (`GateVPreRegistration`)
+sont `INTEGRATED` dans `master`. Avant tout code Slice C, cette Décision ferme l'ambiguïté
+normative restante identifiée en préparation de Slice C : la formule exacte de `campaign_id` V2
+n'était pas explicite (Décision 7 disait seulement "étend encore avec `preregistration_id`").
+
+### 20.1 — Formule V1 réelle, confirmée inchangée, jamais retouchée
+
+Le `campaign_id` V1 (`gate_v_campaign.py::build_gate_v_campaign_plan()`) reste
+**bit-pour-bit identique**, formule et code non modifiés :
+```
+campaign_id_v1 = "gate_v_" + SHA256(json.dumps(fingerprint_v1,
+    sort_keys=True, separators=(",", ":"), ensure_ascii=False)).hexdigest()
+```
+où `fingerprint_v1` contient exactement : `research_run_id`, `dataset_snapshot_id`,
+`split_plan_id`, `strategy_name`, `base_params`, `search_mode`, `search_space_hash` (minuscule),
+`budget_per_fold`, `walk_forward_specification` (sous-dict `geometry`/`train_period`/`test_period`/
+`step_period`/`allow_partial_last_fold`/`position_transition_policy`/`master_seed`),
+`readiness_spec` (ou `None`), `expected_fold_ids`, `expected_fold_definitions_hash`,
+`validation_zone_hash`, `split_plan_fingerprint`, `walk_forward_spec_semantics_version`,
+`monte_carlo_semantics_version`, `parameter_stability_semantics_version`,
+`monte_carlo_verdict_policy_id`/`parameter_stability_verdict_policy_id`/
+`walk_forward_verdict_policy_id` (toujours `None` sur le chemin V2, mais présents comme clés en
+V1), `oos_evidence_validation_run_id`, `oos_evidence_hash`. **Note technique** : cette formule V1
+n'utilise PAS `allow_nan=False` (contrairement à la discipline canonique Slice A/B) — laissé
+tel quel, jamais changé rétroactivement. `split_plan_path`/`oos_evidence_path` ne participent
+JAMAIS à ce fingerprint (déjà correct en V1, confirmé par lecture directe).
+
+### 20.2 — `campaign_protocol_fingerprint` : réutilisation obligatoire, jamais réimplémentée
+
+`GateVCampaignPlanV2` DOIT calculer son `campaign_protocol_fingerprint` en appelant directement
+`gate_v_preregistration.compute_campaign_protocol_fingerprint()` (Décision 7), avec les MÊMES
+inputs primitifs recalculés depuis ses propres sources (jamais des valeurs héritées telles
+quelles d'un appelant) :
+- `research_run_content_hash` : recalculé via `gate_v_preregistration.research_run_content_hash()`
+  depuis le `ResearchRun` fourni — jamais une valeur transmise par l'appelant sans recalcul.
+- `split_plan_fingerprint` : recalculé via `dataset_split.dataset_split_plan_fingerprint()` depuis
+  le `DatasetSplitPlan` fourni.
+- `expected_fold_ids`/`expected_fold_definitions_hash`/`validation_zone_hash` : recalculés depuis
+  `walk_forward.compute_fold_definitions()` appliqué à `split_plan.validation`/
+  `walk_forward_specification`/`readiness_spec` fournis — jamais des listes/hash transmis
+  directement par l'appelant.
+- `policy_content_hash` : recalculé via `gate_v_validation_policy.policy_content_hash()` depuis la
+  `GateVValidationPolicyVersion` fournie.
+
+Aucune SECONDE implémentation de cette empreinte n'existe ni ne doit exister. Le résultat DOIT
+être comparé par égalité stricte à `preregistration.campaign_protocol_fingerprint` — tout écart
+lève une exception, construction refusée (fail-closed).
+
+### 20.3 — `campaign_id` V2 : formule exacte, normative, non ambiguë
+
+```
+GATE_V_CAMPAIGN_PLAN_V2_SEMANTICS_VERSION = "gate_v_campaign_plan_v2"
+
+campaign_id_v2 = "gate_v_v2_" + SHA256(canonical_json({
+    campaign_plan_semantics_version: "gate_v_campaign_plan_v2",
+    preregistration_id: <preregistration.preregistration_id>,
+    campaign_protocol_fingerprint: <valeur validée égale en Décision 20.2>
+})).hexdigest()
+
+canonical_json = json.dumps(record, sort_keys=True, separators=(",", ":"),
+    ensure_ascii=False, allow_nan=False)
+```
+
+**Justification exhaustive de cette forme minimale (hash-de-hashes), et pourquoi elle suffit** :
+- `preregistration_id` inclut déjà, transitivement (Décision 8 corrigée), TOUT le protocole
+  (via `campaign_protocol_fingerprint`), `research_run_id`/`research_run_content_hash`,
+  `dataset_snapshot_id`/`split_plan_id`/`strategy_name`, `gate_v_validation_policy_id`/
+  `policy_content_hash`, **et** `policy_git_sha` (que `campaign_protocol_fingerprint` seul
+  n'inclut PAS — c'est précisément pourquoi `preregistration_id` doit être inclus directement, et
+  pas seulement `campaign_protocol_fingerprint`).
+- `campaign_protocol_fingerprint` est INCLUS EN PLUS, redondamment — même principe de redondance
+  délibérée pour intégrité/auditabilité déjà établi en Décision 8 pour
+  `research_run_content_hash`/`policy_git_sha` dans `preregistration_content_hash` : permet de
+  vérifier/auditer le protocole directement depuis le plan seul, sans dépendre d'un accès croisé
+  systématique à la `GateVPreRegistration` référencée.
+- `campaign_plan_semantics_version` dans la préimage ET le préfixe littéral `"gate_v_v2_"` (distinct
+  de `"gate_v_"` en V1) rendent V1/V2 structurellement non confondables — pas seulement
+  sémantiquement, mais au niveau de la CHAÎNE elle-même (préfixes de longueur différente,
+  jamais de collision possible entre les deux espaces d'identifiants).
+- Aucun horodatage : `GateVCampaignPlanV2` ne porte AUCUN champ `created_at` ni aucun timestamp
+  (Décision 20.4) — le plan reste entièrement déterministe, jamais un audit-timestamp dans son
+  contrat normatif ni dans son identité.
+- Aucune donnée observée (OOS/WF/MC/PS/FINAL_HOLDOUT) : structurellement absente, `GateVCampaignPlanV2`
+  n'a aucun champ de ce type (Décision 20.4).
+- Aucune collision logique avec un autre préenregistrement : `preregistration_id` est
+  cryptographiquement unique par scope+protocole+policy+provenance Git (Décision 8) ; SHA256 hérite
+  cette garantie de collision-résistance.
+
+### 20.4 — Champs normatifs `GateVCampaignPlanV2`, et interdictions strictes
+
+```python
+GATE_V_CAMPAIGN_PLAN_V2_SEMANTICS_VERSION = "gate_v_campaign_plan_v2"
+
+campaign_plan_semantics_version = GATE_V_CAMPAIGN_PLAN_V2_SEMANTICS_VERSION
+campaign_id
+preregistration_id
+preregistration_content_hash
+campaign_protocol_fingerprint
+research_run_id
+research_run_content_hash
+dataset_snapshot_id
+split_plan_id
+split_plan_fingerprint
+strategy_name
+base_params
+search_mode
+search_space_hash
+budget_per_fold
+walk_forward_specification
+readiness_spec
+expected_fold_ids
+expected_fold_definitions_hash
+validation_zone_hash
+walk_forward_spec_semantics_version
+monte_carlo_semantics_version
+parameter_stability_semantics_version
+gate_v_validation_policy_id
+policy_content_hash
+assessment_semantics_version
+policy_git_sha                   # 27e champ — provenance Git immuable de la policy (Décision 20.10)
+```
+**Compte normatif : exactement 27 champs** (numérotés dans l'ordre ci-dessus : 1
+`campaign_plan_semantics_version` … 26 `assessment_semantics_version`, 27 `policy_git_sha`).
+Aucun champ implicite, aucun champ « etc. ». **Aucun `created_at` ni aucun timestamp** : le plan est
+déterministe, sans horodatage d'audit dans son contrat normatif.
+
+`preregistration_content_hash` est inclus comme champ persisté (audit/traçabilité directe vers
+l'artefact PreRegistration référencé) mais N'EST PAS dans la préimage de `campaign_id` V2
+(Décision 20.3) — seul `preregistration_id` y participe. `policy_git_sha` est porté DIRECTEMENT par
+le plan (copié depuis la `GateVPreRegistration` validée, jamais recalculé ni modifié), et participe
+à l'identité uniquement de façon transitive via `preregistration_id` (Décision 20.3) ; règles de
+cohérence et de vérification : Décision 20.10.
+
+**Interdits à la construction, structurellement absents du type (jamais `Optional`, jamais un
+champ existant mis à `None` — le type lui-même ne les porte PAS)** :
+```
+oos_evidence_validation_run_id
+oos_evidence_hash
+oos_evidence_path
+```
+Aucun résultat Walk-Forward/Monte-Carlo/Parameter Stability/OOS/`FINAL_HOLDOUT` ne peut exister
+dans `GateVCampaignPlanV2` — ni comme champ, ni comme entrée de son calcul d'identité.
+
+### 20.5 — Modèle de type : `GateVCampaignPlanV2`, dataclass DISTINCTE (Option B retenue)
+
+**Options évaluées** :
+- **Option A (étendre `GateVCampaignPlan`)** — REJETÉE. Mélanger des champs V1 (`oos_evidence_*`,
+  légitimement peuplés) et des champs V2 (interdits à la construction) sur UNE seule dataclass
+  rendrait des états illégaux représentables (une instance avec `oos_evidence_validation_run_id`
+  ET `campaign_plan_semantics_version="gate_v_campaign_plan_v2"` simultanément) — nécessiterait une
+  validation croisée permanente partout où le type est consommé, fragile, contraire au principe
+  "rendre les états illégaux non représentables".
+- **Option B (dataclass distincte `GateVCampaignPlanV2`)** — RETENUE. Chaque type ne porte QUE ses
+  champs valides — aucune combinaison illégale représentable au niveau du type lui-même. V1
+  (`GateVCampaignPlan`, `build_gate_v_campaign_plan()`, son `campaign_id`) reste strictement
+  inchangé, zéro risque de régression (aucun fichier V1 modifié). Une future Slice D distingue
+  V1/V2 par `isinstance()` ou par présence de `campaign_plan_semantics_version`, sans ambiguïté.
+  Aucun refactor big-bang — pur ajout, nouveau module additif (`gate_v_campaign_plan_v2.py`,
+  candidat, à confirmer en implémentation), n'important JAMAIS `gate_v_campaign.py` — même
+  discipline de frontière que Slice A/B.
+- **Option C** : aucune alternative démontrée supérieure identifiée ; non retenue.
+
+### 20.6 — Save/load V2 : stratégie exacte, fail-closed
+
+**Emplacement** : `results/job_xxx/gate_v/campaigns/<campaign_id>/plan.json` (Décision 16,
+inchangée — le chemin reste toujours fourni par l'appelant, jamais résolu en interne).
+
+**Persistance** : `save_exclusive()` (Slice B, `atomic_json_store.py`), PAS `save_atomic()`. Le
+plan V2 étant déterministe (aucun timestamp, Décision 20.4), deux constructions légitimes du MÊME
+`campaign_id` produisent un contenu identique ; mais `save_atomic()` autorise l'écrasement
+silencieux d'un fichier existant sur le même chemin (le TOCTOU documenté), y compris par un
+contenu DIFFÉRENT (plan altéré ou construit depuis d'autres sources) sans jamais lever
+d'exception. `save_exclusive()` impose "jamais d'écrasement silencieux" : un plan déjà présent au
+chemin fourni lève une exception, par cohérence avec `GateVPreRegistration`.
+
+**Discrimination V1/V2** : jamais par emplacement/nom de fichier — par le CONTENU. Absence de la
+clé `campaign_plan_semantics_version` = fichier V1 (chargé par le loader V1 existant, inchangé,
+jamais ce nouveau loader). Présence avec valeur EXACTE `"gate_v_campaign_plan_v2"` = V2. Toute
+AUTRE valeur (version future inconnue, ou corruption) = **refus fermé immédiat**, jamais interprété
+comme V1 ni comme V2 par repli silencieux.
+
+**Chargeur strict V2** (`load_gate_v_campaign_plan_v2()`, conceptuel — non implémenté ce tour) :
+1. Rejette tout JSON invalide/absent (jamais un `None` silencieux — comme Slice A/B).
+2. Rejette toute clé de premier niveau inconnue, et tout champ obligatoire manquant.
+3. Rejette toute `campaign_plan_semantics_version` absente ou différente de la constante exacte.
+4. Reconstruit les types imbriqués (`walk_forward_specification`, `readiness_spec`).
+5. **Revalidation en DEUX temps, obligatoire, ferme le gap identifié en revue architecture
+   (20.7)** : (a) recalcule `campaign_protocol_fingerprint` depuis les champs primitifs persistés
+   et compare à la valeur persistée — détecte toute altération des champs scientifiques ; (b)
+   recalcule `campaign_id` depuis `{campaign_plan_semantics_version, preregistration_id,
+   campaign_protocol_fingerprint}` (tels que PERSISTÉS, après l'étape (a)) et compare à la valeur
+   persistée — détecte spécifiquement toute altération de `preregistration_id` seul, que (a) seul
+   ne peut pas détecter (`preregistration_id` ne fait PAS partie de la préimage de
+   `campaign_protocol_fingerprint` lui-même, par construction Décision 20.3). Tout écart sur (a)
+   OU (b) : exception, jamais un objet partiellement validé retourné.
+6. Le chargeur NE recharge PAS lui-même la `GateVPreRegistration` référencée (pas d'E/S croisée
+   cachée dans un loader — même discipline que Slice A/B) — cette vérification croisée relève de
+   la CONSTRUCTION (`build_gate_v_campaign_plan_v2()`, qui reçoit l'objet `GateVPreRegistration`
+   déjà chargé par l'appelant, jamais un chemin).
+7. Un fichier corrompu/tronqué (crash après `save_exclusive()` mais avant écriture complète,
+   même matrice de crash que Décision 9 réutilisée) échoue à l'étape 1 (JSON invalide) — jamais
+   interprété comme valide.
+
+**Limite acceptée, inhérente, déjà présente en Slice A/B, non nouvelle** : une falsification
+totalement auto-cohérente (attaquant recalculant honnêtement `campaign_id` à partir de champs
+qu'il a lui-même altérés) n'est PAS détectable par revalidation seule — la protection réelle vient
+de l'exclusivité de création + la provenance Git de la policy au moment de la CRÉATION initiale
+(Décision 6/9), pas du chargement a posteriori.
+
+### 20.7 — Findings de revue adversariale (résolus dans cette spec avant tout code)
+
+**Axe scientifique** — tous fermés par la conception ci-dessus : policy/paramètres/split/
+readiness/seed/folds changés après préenregistrement → `campaign_protocol_fingerprint` recalculé
+diffère → refus fermé (20.2) ; ancien plan V1 présenté comme V2 → rejeté (`campaign_plan_semantics_version`
+absente, 20.6) ; OOS injectée avant le plan → structurellement impossible (20.4, Option B) ;
+`FINAL_HOLDOUT` observé avant WF/MC/PS → hors du périmètre de `GateVCampaignPlanV2` par
+construction (aucun champ, aucune dépendance), reste de la responsabilité de l'ordonnancement
+Décision 2/9/11 (tranche future).
+
+**Axe architecture/reproductibilité** — un gap réel a été trouvé et fermé ICI (avant code) :
+revalidation au chargement fondée UNIQUEMENT sur `campaign_protocol_fingerprint` ne détecte PAS
+une altération isolée de `preregistration_id` (champ hors de sa préimage) → **corrigé** par la
+revalidation en deux temps obligatoire (20.6, étape 5). Formule dupliquée → prévenue (20.2,
+réutilisation obligatoire de `compute_campaign_protocol_fingerprint()`). Chemins runtime dans
+l'identité → exclus explicitement (confirmé absent en V1, même discipline en V2). Timestamps dans
+l'identité → aucun champ timestamp/`created_at` dans le plan V2 (20.3/20.4). Ordre des clés JSON → neutralisé par
+`sort_keys=True` partout. Dérive d'identité V1 accidentelle → impossible (préfixe distinct,
+préimage non partagée, code V1 jamais touché). Aucun autre BLOCKER/MAJOR trouvé.
+
+### 20.8 — Ordonnancement scientifique, reconfirmé (pas une nouvelle décision, Décision 2 inchangée)
+
+`GateVValidationPolicyVersion` committée → `GateVPreRegistration` → `GateVCampaignPlanV2` →
+Walk-Forward → Monte-Carlo → Parameter Stability (tous folds) → `FinalHoldoutAccessClaim` →
+`FINAL_HOLDOUT` — Décision 2 s'applique sans changement ; Slice C construit uniquement l'étape
+"Plan V2", jamais l'exécution WF/MC/PS ni la Claim.
+
+### 20.9 — Relation avec `GateVCampaignManifest` V2 (hors périmètre Slice C)
+
+`GateVCampaignPlanV2` doit fournir à un futur Manifest V2 (tranche ultérieure, non implémentée
+ici) : `campaign_id`, `preregistration_id`, `expected_fold_ids` (même rôle de suivi de complétude
+WF/MC/PS que V1). Restent explicitement hors de Slice C : la structure `GateVCampaignManifest` V2
+elle-même, l'exécution WF/MC/PS (équivalent Niveau B pour V2), `FinalHoldoutAccessClaim`,
+`ValidationAssessment`, `GateVPolicyAssessment`, tout accès `FINAL_HOLDOUT`.
+
+### 20.10 — `policy_git_sha` : frontière création / relecture ; barrières de revalidation explicites
+
+**(a) `policy_git_sha` dans le Plan V2.** Champ n°27 (Décision 20.4), copié depuis la
+`GateVPreRegistration` validée. Il doit être strictement égal à `preregistration.policy_git_sha` à
+la construction du plan ET à toute revalidation ; tout écart = exception (fail-closed). Immuable :
+jamais recalculé, jamais réécrit, jamais remplacé par le HEAD courant.
+
+**(b) Deux phases distinctes — NE PAS les confondre.**
+- **Création de la `GateVPreRegistration`** (Slice B, Décision 6, inchangée) :
+  `policy_git_sha == HEAD courant` est EXIGÉ à cet instant précis (comparaison canonique
+  `git rev-parse HEAD^{commit}` vs `<sha>^{commit}`).
+- **Construction du Plan V2, chargement et relecture historique ultérieure** : le système NE DOIT
+  PAS exiger `HEAD courant == policy_git_sha` — HEAD a naturellement avancé depuis la création du
+  préenregistrement, et exiger cette égalité rendrait tout artefact historique illisible. Il vérifie
+  à la place la provenance HISTORIQUE référencée : (1) le commit `policy_git_sha` est résolvable
+  dans le dépôt ; (2) le blob committé de la policy à ce commit existe et est du JSON valide ;
+  (3) son `validation_policy_id` == `gate_v_validation_policy_id` du plan ; (4) le hash de contenu de ce blob
+  (`gate_v_validation_policy.policy_content_hash()`) == `policy_content_hash` du plan ; (5) cohérence
+  avec la `GateVPreRegistration` (`policy_git_sha`, `gate_v_validation_policy_id`,
+  `policy_content_hash` identiques). Commit non résolvable, blob absent/altéré ou toute
+  incohérence = refus fermé.
+- **Séparation obligatoire en Slice C.** L'API actuelle `verify_policy_git_provenance()`
+  (`gate_v_preregistration.py`) est orientée CRÉATION : elle exige `policy_git_sha == HEAD`. Elle ne
+  doit PAS être affaiblie (la garantie de création reste intacte) ni réutilisée telle quelle pour la
+  relecture. L'implémentation Slice C devra ajouter une vérification de provenance HISTORIQUE
+  distincte (fonction ou mode dédié, sans l'exigence HEAD), appelée comme étape explicite — jamais
+  silencieusement omise, jamais fusionnée dans le chargeur pur (20.6 étape 6 : pas d'E/S Git
+  cachée dans un loader, même discipline que Slice B). Aucun code Slice B n'est modifié par la
+  présente spécification.
+
+**(c) Deux barrières de revalidation, toutes deux OBLIGATOIRES et explicites.**
+- **Barrière 1 (protocole)** : recalculer `computed_campaign_protocol_fingerprint` depuis les vraies
+  sources via l'unique `compute_campaign_protocol_fingerprint()` (20.2), puis exiger
+  `computed_campaign_protocol_fingerprint == preregistration.campaign_protocol_fingerprint ==
+  plan.campaign_protocol_fingerprint`.
+- **Barrière 2 (identité)** : recalculer `expected_campaign_id_v2` depuis
+  `campaign_plan_semantics_version`, le `preregistration_id` validé et le
+  `campaign_protocol_fingerprint` validé (formule 20.3), puis exiger
+  `expected_campaign_id_v2 == plan.campaign_id`. Cette barrière est indépendante de la première :
+  seule elle détecte une falsification isolée de `preregistration_id` (20.6 étape 5b, 20.7). Le
+  MAJOR identifié en revue architecture est ainsi explicitement fermé à la construction ET au
+  chargement.
+
 ## Conséquences
 
-- **État réel** : `AF-V-07` = **DESIGN ACCEPTED / READY FOR IMPLEMENTATION** (2026-09-29). Aucune
-  ligne de code Python, aucun test, aucune campagne réelle, aucun accès `FINAL_HOLDOUT` n'a été
-  produit par ce processus de conception. `AF-V-08` (ADR 0024) reste `DONE`, intégrée dans
-  `master`. **`GATE V` reste NON PASSÉE** — aucune décision de cette ADR ne produit ni ne peut
-  produire un verdict `PASS`/Champion.
+- **État réel initial** : `AF-V-07` = **DESIGN ACCEPTED / READY FOR IMPLEMENTATION** (2026-09-29,
+  au moment de l'acceptation V1-V7 de cette ADR). Aucune ligne de code Python, aucun test, aucune
+  campagne réelle, aucun accès `FINAL_HOLDOUT` n'avait été produit par ce processus de conception.
+  `AF-V-08` (ADR 0024) reste `DONE`, intégrée dans `master`. **`GATE V` reste NON PASSÉE** —
+  aucune décision de cette ADR ne produit ni ne peut produire un verdict `PASS`/Champion.
+- **Mise à jour (2026-09-29, additive, ne remplace pas ce qui précède)** : Slice A
+  (`GateVValidationPolicyVersion`) et Slice B (`GateVPreRegistration`, provenance Git fail-closed,
+  exclusivité atomique du scope) sont désormais **`INTEGRATED`** dans `master` (commits `bcee84e`
+  puis `0f0df82`/`3bf1872`). Le contrat exact de Slice C (`GateVCampaignPlanV2`) est verrouillé par
+  la Décision 20 ci-dessus — **`Slice C` = SPEC LOCKED, READY FOR IMPLEMENTATION uniquement après
+  validation explicite de l'utilisateur** ; aucun code Slice C n'a été écrit par ce processus de
+  conception. `GATE V` reste NON PASSÉE.
 - **Documents de conception non normatifs, référencés pour traçabilité uniquement** : diagrammes
   Figma/FigJam produits au fil des itérations V1-V7 (dernier, V7 : `https://www.figma.com/board/tbncsrWhuFng8HF0QDKKD1`)
   — visualisent la frontière source-contrôlée/portable, la chaîne d'immutabilité pré-holdout, le

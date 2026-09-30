@@ -809,7 +809,22 @@ propre.
 
 ### AF-V-07 — `ValidationPolicyVersion` (fondation)
 
-**Status** : **DESIGN ACCEPTED / READY FOR IMPLEMENTATION** (2026-09-29, ADR 0025 —
+**Status** : **IN PROGRESS** (mise à jour 2026-09-29, additive — le paragraphe suivant décrit
+l'état initial au moment de l'acceptation ADR 0025, conservé tel quel). Depuis :
+**Slice A** (`GateVValidationPolicyVersion`, `gate_v_validation_policy.py`) = **INTEGRATED** dans
+`master` (commit `bcee84e`). **Slice B** (`GateVPreRegistration`, provenance Git fail-closed,
+exclusivité atomique via `save_exclusive()`, `gate_v_preregistration.py`) = **INTEGRATED** dans
+`master` (commits `0f0df82`/`3bf1872`). **Slice C** (`GateVCampaignPlan V2`) = **SPEC LOCKED**
+(ADR 0025 Décision 20 : formule exacte `campaign_id` V2, réutilisation obligatoire de
+`compute_campaign_protocol_fingerprint()`, dataclass V1/V2 distincte à 27 champs déterministes sans
+timestamp dont `policy_git_sha`, frontière `policy_git_sha` création=HEAD / relecture=provenance
+historique, save/load fail-closed) —
+**READY FOR IMPLEMENTATION uniquement après validation explicite de l'utilisateur de cette spec**,
+aucun code Slice C écrit. `FinalHoldoutAccessClaim`/`ValidationAssessment`/`GateVPolicyAssessment`
+restent non commencés, hors périmètre des slices actuelles.
+
+**État initial (2026-09-29, ADR 0025 accepté, avant Slice A/B — conservé pour l'historique)** :
+**DESIGN ACCEPTED / READY FOR IMPLEMENTATION** (ADR 0025 —
 `docs/adr/0025-gate-v-validation-policy-v1.md` — sept itérations de conception, revues
 scientifique et architecture/reproductibilité adversariales, aucun BLOCKER/MAJOR restant).
 **PAS `IMPLEMENTED`, PAS `TESTED`, PAS `DONE`** — aucune ligne de code Python, aucun test, aucune
