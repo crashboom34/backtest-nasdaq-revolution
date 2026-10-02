@@ -603,3 +603,566 @@ def test_two_process_race_exactly_one_winner(tmp_path):
     winner_pre = pre_a if winner_label == "a" else pre_b
     loaded = load_gate_v_preregistration(target_path)
     assert loaded == winner_pre  # artifact on disk is exactly the winner's full content, never a mix
+
+
+# -- Slice C : provenance Git HISTORIQUE (ADR 0025 Décision 20.10) ---------------------------
+# `verify_policy_git_provenance()` reste la règle de CRÉATION (policy_git_sha == HEAD courant).
+# `verify_policy_git_provenance_historical()` sert la construction du Plan V2 et toute relecture :
+# jamais de comparaison au HEAD courant, jamais de lecture du working tree comme vérité.
+
+
+def _historical(**kwargs):
+    from gate_v_preregistration import verify_policy_git_provenance_historical
+
+    return verify_policy_git_provenance_historical(**kwargs)
+
+
+def _hist_kwargs(policy_path, policy, sha, repo_dir):
+    return dict(
+        policy_path=policy_path, validation_policy_id=policy.validation_policy_id,
+        expected_policy_content_hash=compute_policy_content_hash(policy),
+        policy_git_sha=sha, repo_dir=repo_dir,
+    )
+
+
+def _commit_unrelated(repo_dir, name="README.md", content="unrelated change"):
+    (repo_dir / name).write_text(content, encoding="utf-8")
+    _run_git(["add", name], repo_dir)
+    _run_git(["commit", "-m", f"unrelated {uuid.uuid4().hex}"], repo_dir)
+    return _run_git(["rev-parse", "HEAD"], repo_dir).strip()
+
+
+def test_historical_provenance_boundary_creation_refuses_old_sha_historical_accepts(tmp_path):
+    """TEST CRITIQUE de frontière (Décision 20.10) : commit A = policy, commit B = changement sans
+    rapport, HEAD = B. La création (HEAD exigé) refuse SHA A ; l'API historique l'accepte."""
+    repo_dir, policy_path, sha_a, policy = _commit_policy(tmp_path)
+    sha_b = _commit_unrelated(repo_dir)
+    assert sha_a != sha_b
+    assert _run_git(["rev-parse", "HEAD"], repo_dir).strip() == sha_b
+
+    with pytest.raises(GitProvenanceError):
+        verify_policy_git_provenance(**_hist_kwargs(policy_path, policy, sha_a, repo_dir))
+    _historical(**_hist_kwargs(policy_path, policy, sha_a, repo_dir))  # accepté, HEAD == B ignoré
+
+    # La création, elle, reste inchangée : SHA == HEAD courant accepté.
+    verify_policy_git_provenance(**_hist_kwargs(policy_path, policy, sha_b, repo_dir))
+
+
+def test_historical_provenance_accepts_head_itself(tmp_path):
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    _historical(**_hist_kwargs(policy_path, policy, sha, repo_dir))
+
+
+def test_historical_provenance_blob_at_sha_is_truth_not_working_tree_modified(tmp_path):
+    repo_dir, policy_path, sha_a, policy = _commit_policy(tmp_path)
+    _commit_unrelated(repo_dir)
+    policy_path.write_text('{"validation_policy_id": "pol_test", "scientific_criteria": {}}', encoding="utf-8")
+    _historical(**_hist_kwargs(policy_path, policy, sha_a, repo_dir))
+
+
+def test_historical_provenance_blob_at_sha_is_truth_not_working_tree_deleted(tmp_path):
+    repo_dir, policy_path, sha_a, policy = _commit_policy(tmp_path)
+    _commit_unrelated(repo_dir)
+    policy_path.unlink()
+    assert not policy_path.exists()
+    _historical(**_hist_kwargs(policy_path, policy, sha_a, repo_dir))
+
+
+def test_historical_provenance_survives_policy_removed_in_later_commit(tmp_path):
+    repo_dir, policy_path, sha_a, policy = _commit_policy(tmp_path)
+    _run_git(["rm", "-q", "validation_policies/pol_test.json"], repo_dir)
+    _run_git(["commit", "-m", f"remove policy {uuid.uuid4().hex}"], repo_dir)
+    assert not policy_path.exists()
+    _historical(**_hist_kwargs(policy_path, policy, sha_a, repo_dir))
+
+
+def test_historical_provenance_refuses_nonexistent_sha(tmp_path):
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    with pytest.raises(GitProvenanceError):
+        _historical(**_hist_kwargs(policy_path, policy, "0" * 40, repo_dir))
+
+
+def test_historical_provenance_refuses_sha_that_is_not_a_commit(tmp_path):
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    blob_sha = _run_git(["rev-parse", f"{sha}:validation_policies/pol_test.json"], repo_dir).strip()
+    tree_sha = _run_git(["rev-parse", f"{sha}^{{tree}}"], repo_dir).strip()
+    for not_a_commit in (blob_sha, tree_sha):
+        assert len(not_a_commit) == 40
+        with pytest.raises(GitProvenanceError):
+            _historical(**_hist_kwargs(policy_path, policy, not_a_commit, repo_dir))
+
+
+def test_historical_provenance_refuses_symbolic_refs_and_short_or_non_canonical_shas(tmp_path):
+    """Un ancrage historique doit être un identifiant d'objet immuable COMPLET : `HEAD`/nom de
+    branche/tag bougent, un SHA court peut devenir ambigu, la casse non canonique n'est pas un
+    identifiant canonique — tous refusés (jamais résolus silencieusement)."""
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo_dir).strip()
+    _run_git(["tag", "policy-tag"], repo_dir)
+    for bad in ("HEAD", branch, "policy-tag", sha[:12], sha.upper(), f"{sha}~0", f"{sha}^{{commit}}", "", "  "):
+        with pytest.raises(GitProvenanceError):
+            _historical(**_hist_kwargs(policy_path, policy, bad, repo_dir))
+    with pytest.raises(GitProvenanceError):
+        _historical(**_hist_kwargs(policy_path, policy, None, repo_dir))
+
+
+def test_historical_provenance_refuses_blob_absent_at_that_commit(tmp_path):
+    repo_dir = _init_git_repo(tmp_path)
+    sha_before = _commit_unrelated(repo_dir)  # commit sans policy
+    policies_dir = repo_dir / "validation_policies"
+    policies_dir.mkdir()
+    policy_path = policies_dir / "pol_test.json"
+    policy = _policy("pol_test")
+    save_gate_v_validation_policy(policy_path, policy)
+    _run_git(["add", "validation_policies"], repo_dir)
+    _run_git(["commit", "-m", f"add policy {uuid.uuid4().hex}"], repo_dir)
+    with pytest.raises(GitProvenanceError):
+        _historical(**_hist_kwargs(policy_path, policy, sha_before, repo_dir))
+
+
+def test_historical_provenance_refuses_invalid_json_blob(tmp_path):
+    repo_dir = _init_git_repo(tmp_path)
+    policies_dir = repo_dir / "validation_policies"
+    policies_dir.mkdir()
+    policy_path = policies_dir / "pol_test.json"
+    policy_path.write_text("{ not json", encoding="utf-8")
+    _run_git(["add", "validation_policies"], repo_dir)
+    _run_git(["commit", "-m", f"broken policy {uuid.uuid4().hex}"], repo_dir)
+    sha = _run_git(["rev-parse", "HEAD"], repo_dir).strip()
+    with pytest.raises(GitProvenanceError):
+        _historical(**_hist_kwargs(policy_path, _policy("pol_test"), sha, repo_dir))
+
+
+def test_historical_provenance_refuses_malformed_committed_policy(tmp_path):
+    repo_dir = _init_git_repo(tmp_path)
+    policies_dir = repo_dir / "validation_policies"
+    policies_dir.mkdir()
+    policy_path = policies_dir / "pol_test.json"
+    policy_path.write_text('{"validation_policy_id": "pol_test"}', encoding="utf-8")  # critères manquants
+    _run_git(["add", "validation_policies"], repo_dir)
+    _run_git(["commit", "-m", f"malformed policy {uuid.uuid4().hex}"], repo_dir)
+    sha = _run_git(["rev-parse", "HEAD"], repo_dir).strip()
+    with pytest.raises(GitProvenanceError):
+        _historical(**_hist_kwargs(policy_path, _policy("pol_test"), sha, repo_dir))
+
+
+def test_historical_provenance_refuses_policy_id_mismatch(tmp_path):
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    kwargs = _hist_kwargs(policy_path, policy, sha, repo_dir)
+    kwargs["validation_policy_id"] = "another_policy"
+    with pytest.raises(GitProvenanceError):
+        _historical(**kwargs)
+
+
+def test_historical_provenance_refuses_policy_content_hash_mismatch(tmp_path):
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    kwargs = _hist_kwargs(policy_path, policy, sha, repo_dir)
+    kwargs["expected_policy_content_hash"] = "0" * 64
+    with pytest.raises(GitProvenanceError):
+        _historical(**kwargs)
+
+
+def test_historical_provenance_refuses_policy_path_outside_repo(tmp_path):
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    outside = tmp_path / "outside_policy.json"
+    outside.write_text("{}", encoding="utf-8")
+    with pytest.raises(GitProvenanceError):
+        _historical(**_hist_kwargs(outside, policy, sha, repo_dir))
+
+
+def test_historical_provenance_independent_of_process_cwd(tmp_path):
+    repo_dir, policy_path, sha_a, policy = _commit_policy(tmp_path)
+    _commit_unrelated(repo_dir)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    original_cwd = os.getcwd()
+    os.chdir(elsewhere)
+    try:
+        _historical(**_hist_kwargs(policy_path, policy, sha_a, repo_dir))
+    finally:
+        os.chdir(original_cwd)
+
+
+def test_creation_provenance_signature_and_head_rule_unchanged():
+    """Non-régression Slice B : la règle de création n'est ni affaiblie ni renommée."""
+    import inspect
+
+    params = inspect.signature(verify_policy_git_provenance).parameters
+    assert list(params) == [
+        "policy_path", "validation_policy_id", "expected_policy_content_hash", "policy_git_sha", "repo_dir",
+    ]
+    assert params["repo_dir"].default is None
+
+
+# -- Slice C : helpers canoniques de géométrie de folds (aucune troisième formule) --------------
+# La formule existe déjà dans `gate_v_campaign._fold_definitions_hash` (V1, référence de
+# compatibilité) et dans `build_gate_v_preregistration()` (Slice B). Slice C ne doit PAS en créer
+# une troisième : elle réutilise ces helpers publics de Slice B, dont la sortie est verrouillée
+# ici contre la formule V1 indépendante (jamais recopiée dans le test : appel du code V1 réel).
+
+
+def _fold_geometry_inputs(readiness_spec=None):
+    from walk_forward import compute_fold_definitions
+
+    split_plan = _split_plan()
+    spec = _wf_spec()
+    return split_plan, spec, readiness_spec, compute_fold_definitions(split_plan.validation, spec, readiness_spec)
+
+
+def test_fold_definitions_hash_equals_v1_reference_formula():
+    import gate_v_campaign
+    from gate_v_preregistration import compute_fold_definitions_hash
+
+    _, _, _, fold_definitions = _fold_geometry_inputs()
+    assert len(fold_definitions) > 0
+    assert compute_fold_definitions_hash(fold_definitions) == gate_v_campaign._fold_definitions_hash(fold_definitions)
+
+
+def test_validation_zone_hash_equals_independent_canonical_formula():
+    import hashlib
+
+    from gate_v_preregistration import compute_validation_zone_hash
+
+    split_plan = _split_plan()
+    manual = json.dumps(
+        dataclasses.asdict(split_plan.validation), sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    assert compute_validation_zone_hash(split_plan.validation) == hashlib.sha256(manual.encode("utf-8")).hexdigest()
+
+
+def test_fold_geometry_helper_matches_v1_plan_values_with_and_without_readiness():
+    import gate_v_campaign
+    from gate_v_preregistration import compute_fold_geometry
+    from strategy_contracts import DailyStateReadiness
+
+    for readiness in (None, DailyStateReadiness(latest_safe_start_hour=9, latest_safe_start_minute=30)):
+        split_plan, spec, readiness_spec, fold_definitions = _fold_geometry_inputs(readiness)
+        fold_ids, definitions_hash, zone_hash = compute_fold_geometry(split_plan, spec, readiness_spec)
+        assert fold_ids == tuple(fold.fold_id for fold in fold_definitions)
+        assert isinstance(fold_ids, tuple)
+        assert definitions_hash == gate_v_campaign._fold_definitions_hash(fold_definitions)
+        assert len(zone_hash) == 64
+
+
+def test_fold_geometry_helper_requires_a_validation_zone():
+    from gate_v_preregistration import compute_fold_geometry
+
+    plan_without_validation = build_dataset_split_plan(
+        split_plan_id="plan_nv", dataset_snapshot_id=_SNAPSHOT_ID,
+        train=build_split_boundary("2020-01-01T00:00:00+00:00", "2023-01-01T00:00:00+00:00"),
+        final_holdout=build_split_boundary("2024-06-01T00:00:00+00:00", "2024-09-01T00:00:00+00:00"),
+    )
+    assert plan_without_validation.validation is None
+    with pytest.raises(ValueError):
+        compute_fold_geometry(plan_without_validation, _wf_spec(), None)
+
+
+def test_preregistration_fingerprint_unchanged_by_helper_extraction(tmp_path):
+    """Non-régression Slice B : l'empreinte de protocole construite par le builder doit rester
+    égale à celle recalculée en appelant directement la fonction canonique avec les helpers."""
+    from gate_v_preregistration import compute_fold_geometry
+    from validation_run import MONTE_CARLO_SEMANTICS_VERSION, PARAMETER_STABILITY_SEMANTICS_VERSION
+    from dataset_split import dataset_split_plan_fingerprint
+
+    # Les hashes de ResearchRun/DatasetSplitPlan dépendent de leur horodatage interne : mêmes objets.
+    split_plan, spec = _split_plan(), _wf_spec()
+    pre = _preregistration(tmp_path, split_plan=split_plan, walk_forward_specification=spec)
+    fold_ids, definitions_hash, zone_hash = compute_fold_geometry(split_plan, spec, None)
+    recomputed = compute_campaign_protocol_fingerprint(
+        research_run_id=pre.research_run_id, research_run_content_hash=pre.research_run_content_hash,
+        dataset_snapshot_id=pre.dataset_snapshot_id, split_plan_id=pre.split_plan_id,
+        split_plan_fingerprint=dataset_split_plan_fingerprint(split_plan),
+        strategy_name=pre.strategy_name, base_params={"n_neighbors": 5}, search_mode="single_var",
+        search_space_hash="a" * 12, budget_per_fold=10, walk_forward_specification=spec,
+        readiness_spec=None, expected_fold_ids=fold_ids, expected_fold_definitions_hash=definitions_hash,
+        validation_zone_hash=zone_hash, walk_forward_spec_semantics_version=spec.walk_forward_semantics_version,
+        monte_carlo_semantics_version=MONTE_CARLO_SEMANTICS_VERSION,
+        parameter_stability_semantics_version=PARAMETER_STABILITY_SEMANTICS_VERSION,
+        gate_v_validation_policy_id=pre.gate_v_validation_policy_id, policy_content_hash=pre.policy_content_hash,
+        assessment_semantics_version=pre.assessment_semantics_version,
+    )
+    assert recomputed == pre.campaign_protocol_fingerprint
+
+
+# -- Slice C (MAJOR 1) : `policy_git_sha` TOUJOURS canonique (SHA complet) avant persistance ------
+# Une entrée symbolique (`HEAD`, branche, tag) ou abrégée peut résoudre vers HEAD à la création
+# mais DOIT être remplacée par l'identité immuable complète du commit : jamais un ref mutable dans
+# l'artefact, l'id ou le hash. La règle de création (commit résolu == HEAD) reste intacte.
+
+
+def _shared_sources():
+    return _research_run(), _split_plan(), _wf_spec()
+
+
+def _build_prereg_with_sha(repo_dir, policy_path, policy, sources, policy_git_sha):
+    research_run, split_plan, spec = sources
+    return build_gate_v_preregistration(
+        research_run=research_run, split_plan=split_plan, strategy_name="perfect_revolution_v1",
+        base_params={"n_neighbors": 5}, search_mode="single_var", search_space_hash="a" * 12,
+        budget_per_fold=10, walk_forward_specification=spec, readiness_spec=None, policy=policy,
+        policy_path=policy_path, assessment_semantics_version=_ASSESSMENT_SEMANTICS_VERSION,
+        repo_dir=repo_dir, policy_git_sha=policy_git_sha,
+    )
+
+
+def _symbolic_and_short_forms(repo_dir, sha):
+    branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo_dir).strip()
+    tag = f"pol-tag-{uuid.uuid4().hex[:6]}"
+    _run_git(["tag", tag], repo_dir)
+    return {
+        "auto": "auto", "HEAD": "HEAD", "branch": branch, "tag": tag,
+        "short7": sha[:7], "short12": sha[:12], "full": sha, "HEAD_commitish": "HEAD^{commit}",
+    }
+
+
+def test_preregistration_persists_canonical_full_sha_for_every_accepted_form(tmp_path):
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    assert len(sha) == 40
+    sources = _shared_sources()
+    forms = _symbolic_and_short_forms(repo_dir, sha)
+    built = {label: _build_prereg_with_sha(repo_dir, policy_path, policy, sources, value)
+             for label, value in forms.items()}
+    head_full = _run_git(["rev-parse", "HEAD^{commit}"], repo_dir).strip()
+    for label, pre in built.items():
+        assert pre.policy_git_sha == head_full, f"{label}: {pre.policy_git_sha!r} != {head_full!r}"
+    # Même identité quelle que soit la forme d'entrée (id/hash dérivés du SHA canonique).
+    assert len({pre.preregistration_id for pre in built.values()}) == 1
+    assert len({pre.preregistration_content_hash for pre in built.values()}) == 1
+
+
+def test_saved_preregistration_artifact_contains_the_full_canonical_sha(tmp_path):
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    pre = _build_prereg_with_sha(repo_dir, policy_path, policy, _shared_sources(), "HEAD")
+    saved = save_gate_v_preregistration(tmp_path / "pre" / "p.json", pre)
+    record = json.loads(saved.read_text(encoding="utf-8"))
+    assert record["policy_git_sha"] == sha
+    assert load_gate_v_preregistration(saved).policy_git_sha == sha
+
+
+def test_preregistration_id_is_computed_from_the_canonical_sha_not_the_raw_input(tmp_path):
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    pre = _build_prereg_with_sha(repo_dir, policy_path, policy, _shared_sources(), sha[:10])
+    recomputed = compute_preregistration_id(
+        scope_key=pre.scope_key, campaign_protocol_fingerprint=pre.campaign_protocol_fingerprint,
+        research_run_id=pre.research_run_id, research_run_content_hash=pre.research_run_content_hash,
+        dataset_snapshot_id=pre.dataset_snapshot_id, split_plan_id=pre.split_plan_id,
+        strategy_name=pre.strategy_name, gate_v_validation_policy_id=pre.gate_v_validation_policy_id,
+        policy_content_hash=pre.policy_content_hash, policy_git_sha=sha,
+        assessment_semantics_version=pre.assessment_semantics_version,
+        preregistration_semantics_version=pre.preregistration_semantics_version,
+    )
+    assert pre.preregistration_id == recomputed
+
+
+def test_creation_still_refuses_any_form_of_an_old_commit_when_head_advanced(tmp_path):
+    """La garantie de création `commit résolu == HEAD` reste intacte, pour TOUTE forme d'entrée
+    désignant un ancien commit (SHA complet, court, tag)."""
+    repo_dir, policy_path, sha_a, policy = _commit_policy(tmp_path)
+    _run_git(["tag", "at-a"], repo_dir)
+    sha_b = _commit_unrelated(repo_dir)
+    assert sha_a != sha_b
+    sources = _shared_sources()
+    for old_form in (sha_a, sha_a[:12], "at-a", "HEAD~1", f"{sha_a}^{{commit}}"):
+        with pytest.raises(GitProvenanceError):
+            _build_prereg_with_sha(repo_dir, policy_path, policy, sources, old_form)
+    # Et HEAD (nouveau) reste accepté, canonicalisé.
+    pre = _build_prereg_with_sha(repo_dir, policy_path, policy, sources, "HEAD")
+    assert pre.policy_git_sha == sha_b
+
+
+def test_creation_refuses_unresolvable_refs_non_commits_and_option_like_values(tmp_path):
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    blob_sha = _run_git(["rev-parse", f"{sha}:validation_policies/pol_test.json"], repo_dir).strip()
+    tree_sha = _run_git(["rev-parse", f"{sha}^{{tree}}"], repo_dir).strip()
+    sources = _shared_sources()
+    for bad in ("no_such_branch", "0" * 40, blob_sha, tree_sha, "--all", "-h", "", "   ", None, 7, "HEAD\x00x", "\x00"):
+        with pytest.raises(GitProvenanceError):
+            _build_prereg_with_sha(repo_dir, policy_path, policy, sources, bad)
+
+
+def test_resolve_policy_git_sha_returns_the_full_canonical_commit_id(tmp_path):
+    from gate_v_preregistration import _resolve_policy_git_sha
+
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    for value in ("auto", "HEAD", sha[:9], sha):
+        assert _resolve_policy_git_sha(value, repo_dir) == sha
+
+
+def test_preregistration_created_with_symbolic_head_is_consumable_historically_after_head_advances(tmp_path):
+    """Scénario de bout en bout qui ferme le MAJOR : entrée symbolique `HEAD` -> artefact = SHA
+    complet -> HEAD avance -> la vérification historique (Slice C) de l'ancien SHA réussit."""
+    from gate_v_preregistration import verify_policy_git_provenance_historical
+
+    repo_dir, policy_path, sha_a, policy = _commit_policy(tmp_path)
+    pre = _build_prereg_with_sha(repo_dir, policy_path, policy, _shared_sources(), "HEAD")
+    assert pre.policy_git_sha == sha_a
+    sha_b = _commit_unrelated(repo_dir)
+    assert sha_b != sha_a
+    verify_policy_git_provenance_historical(
+        policy_path=policy_path, validation_policy_id=pre.gate_v_validation_policy_id,
+        expected_policy_content_hash=pre.policy_content_hash, policy_git_sha=pre.policy_git_sha,
+        repo_dir=repo_dir,
+    )
+    # La vérification de création, elle, refuse désormais cet ancien SHA (HEAD a avancé).
+    with pytest.raises(GitProvenanceError):
+        verify_policy_git_provenance(
+            policy_path=policy_path, validation_policy_id=pre.gate_v_validation_policy_id,
+            expected_policy_content_hash=pre.policy_content_hash, policy_git_sha=pre.policy_git_sha,
+            repo_dir=repo_dir,
+        )
+
+
+# -- Slice C (MAJOR 2) : protocole validé AVANT qu'un scope exclusif puisse être consommé ---------
+# Le plan V1 impose déjà : search_mode dans 4 valeurs, search_space_hash = 12 hex (normalisé en
+# minuscule avant fingerprint), budget_per_fold = int > 0 (bool interdit). Slice B ne doit JAMAIS
+# accepter un protocole que le Plan V2 (Slice C) rejetterait ensuite : une seule validation
+# canonique, partagée par `build_gate_v_preregistration()` et `build_gate_v_campaign_plan_v2()`.
+
+
+def _prereg_with_protocol(tmp_path, **protocol_overrides):
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    protocol = dict(
+        strategy_name="perfect_revolution_v1", base_params={"n_neighbors": 5}, search_mode="single_var",
+        search_space_hash="a" * 12, budget_per_fold=10, walk_forward_specification=_wf_spec(), readiness_spec=None,
+    )
+    protocol.update(protocol_overrides)
+    return build_gate_v_preregistration(
+        research_run=_research_run(), split_plan=_split_plan(), policy=policy, policy_path=policy_path,
+        assessment_semantics_version=_ASSESSMENT_SEMANTICS_VERSION, repo_dir=repo_dir, **protocol,
+    )
+
+
+def test_search_mode_constant_is_the_four_v1_modes():
+    import gate_v_campaign
+    from gate_v_preregistration import GATE_V_SEARCH_MODES
+
+    assert GATE_V_SEARCH_MODES == frozenset({"single_var", "cross_zone", "grid", "general"})
+    assert GATE_V_SEARCH_MODES == gate_v_campaign._SEARCH_MODES  # garde anti-dérive vs V1
+
+
+def test_preregistration_accepts_the_four_historical_search_modes(tmp_path):
+    from gate_v_preregistration import GATE_V_SEARCH_MODES
+
+    for mode in sorted(GATE_V_SEARCH_MODES):
+        assert _prereg_with_protocol(tmp_path, search_mode=mode).campaign_protocol_fingerprint
+
+
+def test_preregistration_refuses_invalid_search_mode_before_any_scope_is_consumed(tmp_path):
+    for bad in ("random", "", " grid", "GRID", "grid ", None, 5, ["grid"], b"grid"):
+        with pytest.raises(ValueError):
+            _prereg_with_protocol(tmp_path, search_mode=bad)
+
+
+def test_preregistration_refuses_invalid_search_space_hash(tmp_path):
+    for bad in ("", " ", "abc", "g" * 12, "a" * 11, "a" * 13, " " + "a" * 11, "a" * 11 + "\n", None, 123456789012, b"a" * 12):
+        with pytest.raises(ValueError):
+            _prereg_with_protocol(tmp_path, search_space_hash=bad)
+
+
+def test_preregistration_normalizes_search_space_hash_to_lowercase_like_v1(tmp_path):
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    sources = _shared_sources()
+    research_run, split_plan, spec = sources
+
+    def _build(search_space_hash):
+        return build_gate_v_preregistration(
+            research_run=research_run, split_plan=split_plan, strategy_name="perfect_revolution_v1",
+            base_params={"n_neighbors": 5}, search_mode="single_var", search_space_hash=search_space_hash,
+            budget_per_fold=10, walk_forward_specification=spec, readiness_spec=None, policy=policy,
+            policy_path=policy_path, assessment_semantics_version=_ASSESSMENT_SEMANTICS_VERSION,
+            repo_dir=repo_dir,
+        )
+
+    lower, upper, mixed = _build("abcdef012345"), _build("ABCDEF012345"), _build("AbCdEf012345")
+    assert lower.campaign_protocol_fingerprint == upper.campaign_protocol_fingerprint == mixed.campaign_protocol_fingerprint
+    assert lower.preregistration_id == upper.preregistration_id == mixed.preregistration_id
+
+
+def test_preregistration_refuses_invalid_budget_per_fold(tmp_path):
+    for bad in (0, -1, -10, True, False, 1.5, 10.0, "10", None, [10]):
+        with pytest.raises(ValueError):
+            _prereg_with_protocol(tmp_path, budget_per_fold=bad)
+    assert _prereg_with_protocol(tmp_path, budget_per_fold=1).campaign_protocol_fingerprint
+
+
+def test_invalid_protocol_never_consumes_the_exclusive_scope_path(tmp_path):
+    """Un protocole invalide échoue à la CONSTRUCTION : aucun objet à sauvegarder, donc aucun
+    fichier de scope créé ; le même scope reste ensuite disponible pour un protocole valide."""
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    research_run, split_plan, spec = _shared_sources()
+    scope_path = tmp_path / "preregistrations" / f"{compute_scope_key(research_run.research_run_id, research_run.dataset_snapshot_id, split_plan.split_plan_id, 'perfect_revolution_v1')}.json"
+
+    def _build(**overrides):
+        kwargs = dict(
+            research_run=research_run, split_plan=split_plan, strategy_name="perfect_revolution_v1",
+            base_params={"n_neighbors": 5}, search_mode="single_var", search_space_hash="a" * 12,
+            budget_per_fold=10, walk_forward_specification=spec, readiness_spec=None, policy=policy,
+            policy_path=policy_path, assessment_semantics_version=_ASSESSMENT_SEMANTICS_VERSION,
+            repo_dir=repo_dir,
+        )
+        kwargs.update(overrides)
+        return build_gate_v_preregistration(**kwargs)
+
+    for overrides in ({"search_mode": "random"}, {"search_space_hash": "xyz"}, {"budget_per_fold": 0}):
+        with pytest.raises(ValueError):
+            _build(**overrides)
+        assert not scope_path.exists()
+    pre = _build()
+    assert save_gate_v_preregistration(scope_path, pre) == scope_path
+
+
+def test_preregistration_refuses_other_protocol_inputs_that_plan_v2_would_reject(tmp_path):
+    """Tout ce que le Plan V2 refuserait sur les ENTRÉES de protocole est refusé dès la PreRegistration."""
+    from strategy_contracts import DailyStateReadiness
+
+    spec = _wf_spec()
+    bad_inputs = (
+        {"base_params": {}},
+        {"base_params": []},
+        {"base_params": None},
+        {"base_params": {"x": float("nan")}},
+        {"base_params": {"x": float("inf")}},
+        {"base_params": {1: "non-str key"}},
+        {"base_params": {"x": object()}},
+        {"base_params": {"n_neighbors": 6}},  # != walk_forward_specification.base_params
+        {"walk_forward_specification": dataclasses.replace(spec, verdict_policy_id="some_policy")},
+        {"walk_forward_specification": dataclasses.replace(spec, master_seed="7")},
+        {"walk_forward_specification": dataclasses.replace(spec, master_seed=True)},
+        {"walk_forward_specification": dataclasses.replace(spec, allow_partial_last_fold=True)},
+        {"walk_forward_specification": dataclasses.replace(spec, geometry="anchored")},
+        {"walk_forward_specification": "not a spec"},
+        {"readiness_spec": "9:30"},
+        {"readiness_spec": DailyStateReadiness(latest_safe_start_hour=25, latest_safe_start_minute=0)},
+        {"readiness_spec": DailyStateReadiness(latest_safe_start_hour=9, latest_safe_start_minute=60)},
+        {"readiness_spec": DailyStateReadiness(latest_safe_start_hour=True, latest_safe_start_minute=0)},
+    )
+    for overrides in bad_inputs:
+        with pytest.raises(ValueError):
+            _prereg_with_protocol(tmp_path, **overrides)
+
+
+def test_canonical_protocol_validation_is_a_single_shared_implementation():
+    """Aucune duplication de validation Slice B / Slice C : le module V2 réutilise les symboles de
+    Slice B (mêmes objets), sans redéfinir ni ensemble de modes ni motif de hash."""
+    import gate_v_campaign_plan_v2 as plan_module
+    import gate_v_preregistration as prereg_module
+
+    assert plan_module.validate_campaign_protocol_inputs is prereg_module.validate_campaign_protocol_inputs
+    assert plan_module.GATE_V_SEARCH_MODES is prereg_module.GATE_V_SEARCH_MODES
+    for duplicated in ("_SEARCH_MODES", "_SEARCH_SPACE_HASH_RE", "_validate_readiness"):
+        assert not hasattr(plan_module, duplicated), duplicated
+
+
+def test_preregistration_refuses_invalid_assessment_semantics_version_before_consuming_the_scope(tmp_path):
+    """Revue finale (MAJOR) : le Plan V2 exige `assessment_semantics_version` = chaîne non vide ;
+    la PreRegistration doit donc la refuser AVANT toute sauvegarde exclusive (sinon scope mort)."""
+    repo_dir, policy_path, sha, policy = _commit_policy(tmp_path)
+    research_run, split_plan, spec = _shared_sources()
+    for bad in ("", "   ", "\n", None, 5, ["gate_v_assessment_v1"], b"gate_v_assessment_v1"):
+        with pytest.raises(ValueError):
+            build_gate_v_preregistration(
+                research_run=research_run, split_plan=split_plan, strategy_name="perfect_revolution_v1",
+                base_params={"n_neighbors": 5}, search_mode="single_var", search_space_hash="a" * 12,
+                budget_per_fold=10, walk_forward_specification=spec, readiness_spec=None, policy=policy,
+                policy_path=policy_path, assessment_semantics_version=bad, repo_dir=repo_dir,
+            )
