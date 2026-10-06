@@ -823,6 +823,18 @@ historique, save/load fail-closed) —
 aucun code Slice C écrit. `FinalHoldoutAccessClaim`/`ValidationAssessment`/`GateVPolicyAssessment`
 restent non commencés, hors périmètre des slices actuelles.
 
+**Mise à jour additive (2026-10-06)** : **Slice C** (`GateVCampaignPlanV2`,
+`gate_v_campaign_plan_v2.py`) = **IMPLEMENTED + TESTED + INTEGRATED** dans `master` (commit
+`59dd901f74370bac96ba9564a4729347ba994d81`, suite complète 1915/1915) — la mention « SPEC LOCKED » du
+paragraphe précédent décrit l'état antérieur. **Slice D** (`GateVCampaignManifestV2` / discrimination
+V1-V2, ADR 0025 Décision 21 : type distinct à 17 champs dont 5 champs `FINAL_HOLDOUT` réservés forcés
+`None`, statuts factuels V2 dont `EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT`, précondition de Claim
+vérifiable mais jamais verrou, persistance par commandes idempotentes sous verrou transitoire
+`manifest.update.lock` (`O_EXCL`, jamais un Claim) + sentinelle d'échec
+technique, discrimination par contenu sans repli) = **SPEC LOCKED, NOT IMPLEMENTED**, implémentation
+uniquement après validation explicite de l'utilisateur. `AF-V-07` reste **IN PROGRESS** (jamais `DONE`),
+`AF-V-08` = DONE, `GATE V` NON PASSÉE, `FINAL_HOLDOUT` NON ACCÉDÉ.
+
 **État initial (2026-09-29, ADR 0025 accepté, avant Slice A/B — conservé pour l'historique)** :
 **DESIGN ACCEPTED / READY FOR IMPLEMENTATION** (ADR 0025 —
 `docs/adr/0025-gate-v-validation-policy-v1.md` — sept itérations de conception, revues

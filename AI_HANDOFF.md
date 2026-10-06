@@ -2761,3 +2761,79 @@ produit par cette mission de conception.**
 **Statut** : `Slice A` = INTEGRATED. `Slice B` = INTEGRATED. `Slice C` = SPEC LOCKED, READY FOR
 IMPLEMENTATION uniquement après validation explicite de l'utilisateur de la Décision 20. `AF-V-07`
 overall = IN PROGRESS. `AF-V-08` = DONE, inchangée. `GATE V` reste NON PASSÉE.
+
+## 41. `AF-V-07` — Slice C intégrée ; Slice D (`GateVCampaignManifestV2` / discrimination V1-V2) spécifiée et verrouillée (2026-10-06)
+
+**Checkpoint (source de vérité, remplace la mention « SPEC LOCKED » de §40 pour Slice C — §40 reste
+l'historique)** : `Slice A` = INTEGRATED. `Slice B` = INTEGRATED (+ correctifs de compatibilité B↔C :
+`policy_git_sha` toujours SHA complet canonique, validation canonique partagée du protocole,
+`assessment_semantics_version` validé avant le scope exclusif). `Slice C` = **IMPLEMENTED + TESTED +
+INTEGRATED** (`gate_v_campaign_plan_v2.py`, commit `59dd901f74370bac96ba9564a4729347ba994d81`, parent
+`f1e39713d43479a0ed038c5652197a323d087cd2`, suite complète **1915/1915**, `origin/master` = ce commit).
+`AF-V-07` = IN PROGRESS. `AF-V-08` = DONE. `GATE V` = NON PASSÉE. `FINAL_HOLDOUT` = NON ACCÉDÉ.
+
+**Mission Slice D (DESIGN ONLY, aucun code, aucun test, aucun commit)** — ADR 0025 **Décision 21**
+(additive, ADR 0025 §Conséquences mis à jour). Décisions clés :
+- **Type** : `GateVCampaignManifestV2`, dataclass **distincte** (Option B ; ni type commun à champs
+  optionnels, ni wrapper de persistance), version sémantique `gate_v_campaign_manifest_v2`,
+  **17 champs** (4 d'identité/liaison immuables, 8 de progression monotones, 5 champs `FINAL_HOLDOUT`
+  **réservés forcés `None`** en Slice D — Décision 13 respectée sans état hybride, extension monotone
+  future vérifiée contre le Claim). Pas de `manifest_content_hash` (identité = `campaign_id`).
+- **Statuts V2** : `READY_FOR_EXECUTION`, `RUNNING`, `EVIDENCE_INCOMPLETE`,
+  `EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT`, `TECHNICAL_FAILURE`. `EVIDENCE_COMPLETE_AWAITING_POLICY`
+  (V1, suppose l'OOS) est **interdit** en V2. Jamais `PASS`/`FAIL`/Champion.
+- **Autorité** = `ValidationRun` persistées rechargées du disque + Plan V2 ; le Manifest n'est que
+  pointeurs + marqueurs non dérivables. Précondition du futur Claim = un seul prédicat (WF + MC + PS
+  de TOUS les `expected_fold_ids`, aucun `TECHNICAL_FAILURE` marqueur **ni** sentinelle, champs
+  réservés nuls) — **nécessaire, jamais suffisante** : le Manifest n'est JAMAIS le verrou
+  (`FinalHoldoutAccessClaim` + `O_CREAT|O_EXCL` seuls font autorité).
+- **Persistance** : création `save_exclusive()` ; mises à jour par **commandes nommées idempotentes**
+  via `save_atomic_overwrite()` **SOUS le verrou transitoire `manifest.update.lock`
+  (`O_CREAT|O_EXCL`)** (les `Attach…` effacent `running` dans la même écriture, parité V1). **Correction
+  (2026-10-06) d'un MAJOR de conception** : `manifest_revision` + `save_atomic_overwrite()` n'est PAS un
+  compare-and-swap inter-processus atomique (TOCTOU : deux `os.replace()` peuvent réussir après avoir lu
+  la même révision) ; séquence normative en 11 étapes (acquisition, échec fermé si `FileExistsError`,
+  rechargement et contrôle de révision SOUS le verrou, revalidation de la commande, écriture, relecture,
+  libération) ; verrou résiduel après crash = état d'écriture incertain, **échec fermé, aucun stale-lock
+  automatique** (ni délai, ni âge, ni PID, ni retry), récupération manuelle gouvernée ; `manifest_revision`
+  = détection d'écriture périmée + audit, jamais l'exclusion ; propriété stricte du verrou (le perdant
+  ne le supprime jamais, vérification d'identité de fichier avant `unlink`), collision Windows à
+  l'étape d'écriture traitée par relecture sous verrou, exceptions typées distinctes (refus / validé
+  avec verrou résiduel / incertain) ; **le verrou n'est PAS un
+  `FinalHoldoutAccessClaim`** (sérialise temporairement une mise à jour mutable, supprimé après
+  transaction ; le Claim consomme définitivement le droit et n'est jamais supprimé). Sentinelle exclusive
+  `technical_failure.json` conservée, indépendante du verrou (existence = le fait) ; statut **persisté**
+  (`marker_status`) distinct du statut **effectif** (sentinelle incluse) ; Manifest « en retard » sur les
+  preuves = légal (adoption à la reprise, structure + « scoped » seulement), « en avance » = erreur.
+  Tests futurs exigés : deux processus réels, un seul acquiert le verrou, second = `FileExistsError`,
+  aucune référence perdue, révision périmée refusée, crash après acquisition, aucun auto-nettoyage,
+  aucun Claim créé.
+- **Précondition du Claim** : `assert_gate_v_pre_holdout_evidence_complete(plan, campaign_dir)` ;
+  la revalidation du Plan V2 aux sources reste l'obligation de l'appelant (séquence Décision 11).
+- **Discrimination V1/V2** : par le CONTENU (`campaign_plan_semantics_version` du plan,
+  `manifest_semantics_version` du manifeste, forme du `campaign_id`), nom du dossier = simple test de
+  cohérence, aucun repli V2→V1, hybride refusé fermé. Modules additifs `gate_v_evidence_completeness_v2.py`,
+  `gate_v_campaign_manifest_v2.py`, `gate_v_campaign_dispatch.py` ; **`gate_v_campaign.py` non modifié**.
+- **Décisions utilisateur VALIDÉES (2026-10-06)** : (1) les prédicats WF/MC/PS V2 sont **réimplémentés
+  additivement** dans le module V2, `gate_v_campaign.py` **non modifié**, équivalence verrouillée par
+  des **tests différentiels V1/V2** là où les contrats sont communs (l'extraction des helpers privés V1
+  n'est plus proposée) ; (2) `TECHNICAL_FAILURE` reste **TERMINAL** dans Slice D, aucun mécanisme de
+  reprise/retry conçu, un scope devenu inutilisable est un comportement conservateur accepté jusqu'à un
+  futur protocole de reprise auditée.
+- Revue adversariale : 17 scénarios + 17 findings supplémentaires (dont 4 MAJOR trouvés par une revue
+  indépendante contre le code réel : sentinelle vs statut persisté, atomicité `Attach`+`running`,
+  adoption d'une preuve de qualité insuffisante, signature de la précondition ; le MAJOR du faux
+  compare-and-swap ; puis 3 MAJOR d'une seconde revue indépendante du contrat de verrou : propriété du
+  verrou, collision Windows à l'écriture, échecs Windows d'acquisition/libération) ; **aucun BLOCKER** ; tous les MAJOR **fermés dans la spec** (replay S1-S8 du contrat
+  de concurrence : deux writers, transitions différentes, writer périmé, crash après verrou, crash après
+  écriture, échec technique concurrent, preuve entre deux mises à jour, claim manuel) ; MINOR acceptés
+  listés en Décision 21.12 (dont la production concurrente d'une même preuve, hors Manifest, et la
+  longueur de chemin Windows, risque préexistant en V1).
+
+**Aucun code Python, aucun test, aucun `FinalHoldoutAccessClaim`, aucun accès `FINAL_HOLDOUT`, aucune
+campagne réelle produits par cette mission.**
+
+**Statut** : `Slice A` = INTEGRATED. `Slice B` = INTEGRATED. `Slice C` = IMPLEMENTED + TESTED +
+INTEGRATED. `Slice D` = SPEC LOCKED, NOT IMPLEMENTED (implémentation uniquement après validation
+explicite de l'utilisateur de la Décision 21). `AF-V-07` overall = IN PROGRESS. `AF-V-08` = DONE.
+`GATE V` NON PASSÉE. `FINAL_HOLDOUT` NON ACCÉDÉ.

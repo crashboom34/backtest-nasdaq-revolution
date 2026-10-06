@@ -444,6 +444,11 @@ results/job_xxx/
             gate_v_policy_assessment.json
 ```
 `validation_policies/<validation_policy_id>.json` reste séparée, source-contrôlée (Décision 4-6).
+**Amendement additif (Décision 21.8, 2026-10-06)** : le répertoire de campagne V2 gagne
+`technical_failure.json`, sentinelle exclusive d'échec technique (absente tant qu'aucun échec n'a
+eu lieu), et `manifest.update.lock`, verrou **transitoire** de mise à jour du Manifest (présent
+uniquement pendant une transaction, ou résiduel après un état d'écriture incertain ; **jamais** un
+`FinalHoldoutAccessClaim`) ; aucune autre entrée de cette arborescence n'est modifiée.
 Aucun répertoire de job historique déplacé ni réécrit. `save_research_run()`/`save_dataset_split_plan()`/
 `save_validation_run()` ne résolvent jamais leur propre répertoire (principe déjà établi) — le
 nouveau code suit la même discipline, chemin toujours fourni par l'appelant réel.
@@ -768,6 +773,675 @@ jamais recalculé, jamais réécrit, jamais remplacé par le HEAD courant.
   MAJOR identifié en revue architecture est ainsi explicitement fermé à la construction ET au
   chargement.
 
+## Décision 21 — `GateVCampaignManifestV2` / discrimination V1-V2 (Slice D, verrouillé avant TDD, 2026-10-06)
+
+**Contexte** : Slices A/B/C sont `INTEGRATED` dans `master` (Slice C = commit
+`59dd901f74370bac96ba9564a4729347ba994d81`, suite complète 1915/1915). Cette Décision ferme, AVANT
+tout code, les questions normatives de la Slice D : (A) le Manifest V2 et (B) la discrimination
+V1/V2. Elle précise (sans le contredire) la Décision 13 (champs V2 du Manifest) et la Décision 20.9
+(relation Plan V2 → Manifest V2). **Aucun code, aucun test, aucun accès `FINAL_HOLDOUT`** n'est
+produit par cette conception.
+
+### 21.1 — Périmètre
+
+**Dans Slice D** : type `GateVCampaignManifestV2` ; identité/liaison au Plan V2 ; statuts factuels V2 ;
+règles de complétude WF/MC/PS ; précondition vérifiable du futur Claim ; persistance, transitions,
+concurrence, crash/reprise ; algorithme de discrimination V1/V2.
+**Hors Slice D** (tranches suivantes, rien de cela n'est implémenté ni préparé par du code mort) :
+exécution WF/MC/PS V2 (un futur `execute_gate_v_campaign_v2`), `FinalHoldoutAccessClaim` et son
+acquisition, `run_gate_v_final_holdout_validation`, `HoldoutAccessEvent` V2, `ValidationAssessment`,
+`GateVPolicyAssessment`, toute policy concrète de seuils, tout accès `FINAL_HOLDOUT`.
+
+### 21.2 — Constats sur le code réel (`gate_v_campaign.py`, V1, gelé)
+
+- `GateVCampaignManifest` V1 : 10 champs (`campaign_id`, `expected_fold_ids`, `status`,
+  `oos_evidence_validation_run_id`, `walk_forward_validation_run_id`, `monte_carlo_validation_run_id`,
+  `parameter_stability_validation_run_ids_by_fold`, `execution_started`, `running`,
+  `technical_failure_reason`) ; **aucun champ de version sémantique** ; persisté par
+  `save_atomic_overwrite()` ; chargé par `GateVCampaignManifest(**record)` — toute clé inconnue lève
+  `TypeError` puis `ValueError` : **un fichier V2 est donc déjà refusé fermé par le chargeur V1**, et
+  un fichier V1 (sans clés V2) sera refusé par le chargeur V2.
+- Six statuts V1 (`NOT_READY` jamais persisté). **`EVIDENCE_COMPLETE_AWAITING_POLICY` exige la
+  référence OOS** (`_validate_gate_v_manifest_structure`, `derive_gate_v_campaign_status`) : c'est un
+  état **OOS-first**, faux par construction en V2 (Décision 2 : l'OOS est la dernière preuve).
+- Les prédicats de complétude (`_walk_forward_complete`, `_monte_carlo_complete`,
+  `_parameter_stability_quality`, `_validate_scoped_run`) sont **privés** à `gate_v_campaign.py`. Un seul
+  verrou technique les lie au type V1 : `gate_v_validation_run_id()` applique
+  `isinstance(plan, GateVCampaignPlan)` et est appelée par `_monte_carlo_complete` (les trois autres
+  ne lisent que des champs que `GateVCampaignPlanV2` porte aussi). La vraie raison de ne pas les réutiliser
+  est la **discipline de frontière** (Décision 20.5) : un module V2 n'importe ni `gate_v_campaign.py`
+  ni ses noms privés ; les réutiliser exigerait de toucher V1 (extraction) ou de s'y coupler.
+- Le Manifest V1 est un artefact mutable à écriture monotone (règles de non-régression à la sauvegarde)
+  et son statut est vérifié égal au statut dérivé des preuves persistées au chargement ET à la
+  sauvegarde. Ce principe (preuves = autorité, manifeste = pointeurs + marqueurs d'exécution) est
+  conservé en V2.
+- Aucun consommateur externe (UI, jobs, autopilot) ne lit `manifest.json` : la surface d'intégration
+  est limitée à `gate_v_campaign.py` et ses tests.
+
+### 21.3 — Type : options comparées, Option B retenue
+
+| Option | Description | Verdict |
+|---|---|---|
+| A — type commun, champs optionnels | `GateVCampaignManifest` gagne `manifest_semantics_version` + champs V2 optionnels | **Rejetée** : modifie la dataclass V1 gelée ; rend représentable un état V1 portant un claim, ou un état V2 portant une référence OOS avant les preuves ; `GateVCampaignManifest(**record)` V1 accepterait ou refuserait selon des clés optionnelles — dérive silencieuse du chargeur historique |
+| **B — dataclass V2 distincte** | `GateVCampaignManifestV2`, module additif, n'importe jamais `gate_v_campaign.py` | **Retenue** — même argument que Décision 20.5 : chaque type ne porte que ses champs valides ; V1 inchangé à l'octet ; la discrimination devient un test de type + un champ de version |
+| C — wrapper/union versionnée | `VersionedManifest(version, payload)` | **Rejetée comme type de persistance** (ajoute une couche sans supprimer d'état illégal ; Python n'a pas de somme exhaustive vérifiée). **Conservée uniquement comme sortie de classification** (21.9) : une valeur `"v1"`/`"v2"`, jamais un conteneur de données |
+
+### 21.4 — Contrat exact de `GateVCampaignManifestV2`
+
+```
+GATE_V_CAMPAIGN_MANIFEST_V2_SEMANTICS_VERSION = "gate_v_campaign_manifest_v2"
+```
+Dataclass `frozen`, **exactement 17 champs**, dans cet ordre, aucun timestamp, aucun chemin, aucun
+verdict :
+```
+# Identité / liaison — IMMUABLES (jamais modifiés après la création)
+1  manifest_semantics_version                 # == constante ci-dessus, exact
+2  campaign_id                                # "gate_v_v2_" + 64 hex (Décision 20.3)
+3  preregistration_id                         # copié du Plan V2
+4  campaign_protocol_fingerprint              # copié du Plan V2
+
+# État de progression — MUTABLES, monotones (21.8)
+5  manifest_revision                          # int >= 0, +1 par mise à jour effective ; détection d'écriture périmée + audit, JAMAIS une identité ni un primitif d'exclusion (21.8)
+6  status                                     # instantané DÉRIVÉ (21.5), jamais fourni par l'appelant
+7  execution_started                          # bool, False -> True une fois
+8  running                                    # bool
+9  technical_failure_reason                   # None -> str non vide, une fois, jamais effacé
+10 walk_forward_validation_run_id             # None -> id, une fois
+11 monte_carlo_validation_run_id              # None -> id, une fois
+12 parameter_stability_validation_run_ids_by_fold   # dict fold_id -> id, ajouts seuls
+
+# RÉSERVÉS (Décision 13) — présents dans le schéma, valeur IMPOSÉE None en Slice D
+13 final_holdout_claim_id
+14 final_holdout_claim_content_hash
+15 holdout_access_event_id
+16 holdout_access_event_content_hash
+17 oos_evidence_validation_run_id
+```
+**Invariants structurels imposés par le chargeur pur V2** (reprise des règles V1
+`_validate_gate_v_manifest_structure`, plus les règles V2) : ensemble de clés EXACT (inconnue ou
+manquante → refus) ; `manifest_semantics_version` exacte ; `campaign_id` de forme `gate_v_v2_<64 hex>`
+**et égal au `campaign_id` recalculé** depuis `{GATE_V_CAMPAIGN_PLAN_V2_SEMANTICS_VERSION,
+preregistration_id, campaign_protocol_fingerprint}` (le Manifest ne porte pas
+`campaign_plan_semantics_version` : la constante du module Plan V2, impliquée par
+`manifest_semantics_version`, entre dans le recalcul) ; `preregistration_id` et fingerprint = 64 hex ;
+`manifest_revision` entier non booléen `>= 0` ; `status` ∈ `GATE_V_CAMPAIGN_V2_STATUSES` ; `execution_started`
+et `running` booléens ; `running` ⇒ `execution_started` ; `technical_failure_reason` non nul ⇒ chaîne non
+vide, `execution_started` et non `running` ; toute référence de preuve ⇒ `execution_started` ;
+`monte_carlo_validation_run_id` ou toute entrée Parameter Stability ⇒ `walk_forward_validation_run_id` non nul ;
+chaque identifiant de preuve == identifiant déterministe de 21.6 ; champs 13-17 tous `None` ; statut
+cohérent avec les marqueurs (`marker_status` calculable sans I/O pour `TECHNICAL_FAILURE`, `RUNNING`,
+`READY_FOR_EXECUTION` ; `EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT` exige WF, MC et une entrée PS au
+minimum — l'égalité exacte à `expected_fold_ids` relève de la couche de liaison au plan).
+
+**Non persisté car dérivable du Plan V2 ou des preuves** (jamais dupliqué) : `expected_fold_ids`,
+`split_plan_*`, `research_run_*`, `policy_*`, `preregistration_content_hash`, `assessment_semantics_version`,
+`walk_forward_specification`, tous les hashes de protocole (le Plan V2 est la seule source), et tout
+résumé de preuve. **Pas de `manifest_content_hash`** : aucun artefact existant ni prévu (Claim D10,
+HoldoutAccessEvent D13, `GateVPolicyAssessment` D14) ne référence le contenu du Manifest ; un hash de
+contenu d'un artefact mutable n'est pas une identité. L'identité d'une campagne est `campaign_id`
+(immuable). `manifest_revision` sert à la détection d'écriture périmée et à l'audit (21.8) — pas
+d'exclusion — et n'entre dans
+aucun hash. Si un besoin futur d'instantané apparaît, il sera un hash d'une forme canonique excluant
+le hash lui-même, jamais une identité.
+
+**Champs réservés — règle normative (mission §7, options comparées)** :
+(i) *champs présents, valeur forcée `None`* ; (ii) *champs absents, ajoutés par une tranche future* ;
+(iii) *sous-enregistrements typés dès maintenant*. **Retenu : (i).** (ii) obligerait à changer
+l'ensemble de clés — donc une nouvelle version sémantique et une migration in-place d'artefacts
+existants — au pire moment (juste avant le claim) ; (iii) crée des types inutilisés
+(Speculative Generality). Avec (i) l'ensemble de clés est stable pour toute la vie du schéma.
+Garde-fous exacts :
+- En Slice D, le **constructeur, toutes les commandes et le chargeur refusent toute valeur non `None`**
+  pour les champs 13-17 (« réservé : acquisition du claim non implémentée, aucune vérification possible
+  de l'autorité »). Un claim ajouté à la main (finding 15) est donc refusé fermé.
+- **Principe d'extension monotone** : une tranche future peut seulement AJOUTER des états valides
+  (miroir non nul accepté **uniquement** après vérification explicite contre le fichier de claim
+  autoritaire, 21.10) ; tout Manifest valide en Slice D reste valide, avec le même sens, après ces
+  tranches. Un binaire Slice D qui rencontre un Manifest futur le refuse fermé — comportement voulu.
+- Invariants de groupe à imposer dès qu'un champ réservé devient non nul : (13,14) tous deux nuls ou
+  tous deux non nuls ; (15,16,17) tous nuls ou tous non nuls ; le groupe (15,16,17) exige le groupe
+  (13,14). Aucun état partiel n'est donc admissible.
+- **Un Manifest initial ne peut jamais prétendre que `FINAL_HOLDOUT` a été accédé** : aucun champ
+  non nul n'est constructible, aucun statut V2 de Slice D ne nomme `FINAL_HOLDOUT` autrement que
+  comme « en attente » (`EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT`), et ce statut n'accorde aucun droit
+  (21.7, 21.10).
+
+### 21.5 — Statuts factuels V2
+
+Ensemble exact, jamais un état supplémentaire, **jamais** `PASS`/`FAIL`/`Champion`/verdict :
+```
+GATE_V_CAMPAIGN_V2_STATUSES = {
+  "READY_FOR_EXECUTION", "RUNNING", "EVIDENCE_INCOMPLETE",
+  "EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT", "TECHNICAL_FAILURE",
+}
+```
+| Statut V2 | Condition (dérivée, priorité décroissante de haut en bas) |
+|---|---|
+| `TECHNICAL_FAILURE` | `technical_failure_reason` non nul (`marker_status`) **OU**, pour `effective_status` seulement, sentinelle `technical_failure.json` présente (21.8). Terminal pour toutes les API de Slice D |
+| `RUNNING` | `running` vrai |
+| `READY_FOR_EXECUTION` | `execution_started` faux |
+| `EVIDENCE_INCOMPLETE` | démarrée, non `running`, sans échec ; au moins l'une de WF / MC / PS (un fold attendu) manque ou ne satisfait pas sa condition de complétude (21.6) |
+| `EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT` | démarrée, non `running`, sans échec ; WF + MC + PS (**TOUS** les `expected_fold_ids`) complets au sens de 21.6 ; champs 13-17 tous `None` |
+
+Réutilisation de V1 : `READY_FOR_EXECUTION`, `RUNNING`, `TECHNICAL_FAILURE` gardent le sens V1 exact.
+`EVIDENCE_INCOMPLETE` garde son nom mais **sa condition est restreinte à WF/MC/PS** (la condition V1
+« OOS absente » supposait OOS-first et devient fausse). `NOT_READY` n'existe pas en V2 (jamais
+persisté, V1 compris). **`EVIDENCE_COMPLETE_AWAITING_POLICY` est interdit en V2** (sens faux : il
+inclut l'OOS) : il appartient à l'ensemble V1 mais pas à `GATE_V_CAMPAIGN_V2_STATUSES`, le chargeur V2
+le refuse. Inversement, un Manifest V2 ne peut pas être lu par le chargeur V1 (clés inconnues, 21.2).
+
+**Deux valeurs dérivées distinctes (ferme un MAJOR de revue)** — le statut **persisté** et le statut
+**effectif** ne sont pas la même chose :
+- `marker_status` = dérivation depuis les marqueurs du Manifest, ses références et les preuves, **sans
+  tenir compte de la sentinelle** ; le statut persisté doit lui être égal (autocohérence du fichier).
+- `effective_status` = `TECHNICAL_FAILURE` si la sentinelle `technical_failure.json` existe (même
+  illisible : son existence est le fait), sinon `marker_status`. C'est elle que lit la précondition 21.7.
+Un Manifest dont la sentinelle est « en avance » sur son marqueur est donc **légal et chargeable**
+(`status == marker_status`), et peut être réconcilié par la seule commande `MarkTechnicalFailure` (21.8).
+Statuts de la phase `FINAL_HOLDOUT` (réservés, **hors Slice D**, ajoutés plus tard par extension
+monotone) : par exemple `FINAL_HOLDOUT_CLAIMED`, `FINAL_HOLDOUT_EVIDENCE_PERSISTED` — noms indicatifs,
+non normatifs, non valides en Slice D. Un test impose que **les segments** (découpage sur `_`) d'aucune
+valeur de statut n'appartiennent à `{PASS, FAIL, CHAMPION, OOS, VERDICT}` — par segments et non par
+sous-chaîne, car `TECHNICAL_FAILURE` (nom hérité de V1, factuel) contient la sous-chaîne `FAIL`.
+
+`status` est **persisté pour la lisibilité** (parité V1, lecture sans charger les preuves) mais
+**toujours recalculé par l'API de mise à jour** : l'appelant ne le fournit jamais, un désaccord est donc
+impossible par construction ; au chargement/à la vérification, tout écart entre le statut persisté et
+`marker_status` (ci-dessous) est un refus.
+
+### 21.6 — Source d'autorité et règles de complétude
+
+**Autorité** : les `ValidationRun` immuables persistées à leur chemin canonique
+`<campaign_dir>/validations/<validation_run_id>/validation_run.json` (Décision 16) + le Plan V2 validé.
+Le Manifest ne contient que des **pointeurs** et des **marqueurs d'exécution non dérivables** (démarré,
+en cours, échec technique). Il ne peut JAMAIS déclarer une phase complète : « complet » n'est qu'un
+**résultat de dérivation** sur preuves rechargées depuis le disque (jamais des objets en mémoire fournis
+par l'appelant).
+
+`validation_run_id` déterministe (même forme que V1, espace d'identifiants disjoint grâce au préfixe
+`gate_v_v2_`) : `"{campaign_id}_{validation_type}"` (WF, MC) et `"{campaign_id}_parameter_stability_{fold_id}"`.
+Une référence dont l'identifiant ne vaut pas cette valeur exacte est étrangère → refus.
+
+**Preuve « scoped »** (reprise des règles V1, sans le cas OOS) : `validation_type` attendu ;
+`dataset_snapshot_id`, `split_plan_id`, `strategy_name`, `research_run_id` égaux au Plan V2 ;
+`status == "completed"` ; `scientific_verdict == "INCONCLUSIVE"` (aucune policy de verdict, Décision 18) ;
+WF et MC : `strategy_params == plan.base_params`.
+**Walk-Forward complet** : spécification égale à `plan.walk_forward_specification` ; `execution_status ==
+"completed"` et agrégat présent ; `fold_id` des résultats **égaux, dans l'ordre exact**, à
+`plan.expected_fold_ids` (fold attendu manquant → incomplet ; fold inattendu ou doublon → incomplet) ;
+cohérence trades/zéro-trade par fold ; Top-1 TRAIN, `search_space_hash`, `search_mode`, budget ;
+hash des définitions de folds recalculé == `plan.expected_fold_definitions_hash` (écart = erreur) ;
+agrégat cohérent avec les folds.
+**Monte-Carlo complet** : spécification == celle construite pour la run WF de la campagne avec
+`verdict_policy_id = None` et circularité déclarée vraie ; nombre de trades == total WF ; aucune
+métrique inventée sur zéro trade ; distributions finies présentes sinon incomplet.
+**Parameter Stability complète pour un fold** : spécification == celle construite pour (run WF, fold,
+`search_mode`, circularité déclarée vraie) ; correspondance avec le Top-1/pool TRAIN du fold ;
+compteurs de voisins cohérents ; voisinage exploitable réel ; distributions finies. **PS complète = TOUS**
+les `expected_fold_ids` présents et chacun de qualité suffisante — jamais un simple décompte de fichiers.
+**Règles de saut héritées de V1, explicitées** : sans agrégat WF, la comparaison du nombre de trades MC
+est sautée (la WF est alors elle-même incomplète, donc le statut reste `EVIDENCE_INCOMPLETE`) ; sans fold
+WF source, la correspondance Top-1 d'un fold PS est sautée de même ; une métrique inventée sur un fold
+zéro trade est une **erreur** (pas un simple « incomplet »).
+
+**Cas limites (mission §9)** :
+| Cas | Règle |
+|---|---|
+| Fichier de preuve référencé absent ou illisible | **Erreur** (le Manifest est « en avance sur les preuves ») — jamais traité comme incomplet silencieux |
+| Fichier de preuve présent non référencé | Jamais une preuve ; ignoré (aucune autorité) ; seule une adoption explicite (21.8) peut le rattacher |
+| Preuve étrangère (autre campagne, snapshot, split, stratégie, ResearchRun, type) | Erreur |
+| Fold PS référencé hors `expected_fold_ids` | Erreur |
+| Fold attendu sans preuve PS | Incomplet |
+| Doublon (deux références pour un même fold) | Impossible (dict) ; deux ids différents pour un fold → erreur d'identifiant déterministe |
+| Preuve corrompue / type de spécification ou d'evidence incohérent | Erreur |
+| Preuve complète structurellement mais de qualité insuffisante (voisinage inexploitable, MC sans distribution) | Incomplet (jamais un `FAIL` scientifique) |
+| `TECHNICAL_FAILURE` (marqueur OU sentinelle) | Interdit la complétude, même si toutes les preuves existent |
+
+**Limite acceptée** : `ValidationRun` ne porte ni `preregistration_id` ni `research_run_content_hash` ;
+le lien à la PreRegistration passe par le `campaign_id` déterministe de la run (qui inclut
+`preregistration_id`). L'étendre exigerait de modifier `validation_run.py` (gelé) — hors périmètre.
+
+### 21.7 — Précondition du futur Claim (vérifiable sans ambiguïté, mission §9)
+
+Une **unique** fonction de vérification (aucune seconde définition) :
+`assert_gate_v_pre_holdout_evidence_complete(plan, campaign_dir)`, qui lève ou retourne le Manifest
+vérifié ; elle ne crée **rien**. **Signature et dépendances (exactes)** : `plan` est un
+`GateVCampaignPlanV2` ; `campaign_dir` est fourni par l'appelant. Le module Manifest **ne reçoit pas**
+PreRegistration, ResearchRun, split, policy ni dépôt Git et n'importe donc que `gate_v_campaign_plan_v2`
+(structure, chargeur pur, fonction d'identifiant), `gate_v_evidence_completeness_v2`, `validation_run`,
+`atomic_json_store`. **La revalidation du Plan V2 aux sources** (`validate_gate_v_campaign_plan_v2_sources`,
+Décision 20.10) est une **obligation de l'appelant**, première étape de la séquence du Claim (Décision 11,
+étapes 1-2), testée dans la tranche du Claim ; la fonction ci-dessous revérifie seulement ce qu'elle peut
+vérifier sans ces sources. Prédicat exact, tous les termes obligatoires :
+1. `validate_gate_v_campaign_plan_v2_structure(plan)` passe (barrières internes 1 et 2) ;
+   `load_gate_v_campaign_plan_v2(campaign_dir/"plan.json") == plan` ; `campaign_dir.name == plan.campaign_id`.
+2. Manifest V2 chargé (chargeur pur), lié au plan (couche de liaison 21.8), `status == marker_status`.
+3. `execution_started` et non `running`.
+4. `technical_failure_reason` nul **et** sentinelle `technical_failure.json` **absente** (`effective_status`
+   ≠ `TECHNICAL_FAILURE`, même si le fichier de sentinelle est illisible).
+5. WF complet, MC complet, PS complet pour **chaque** `expected_fold_ids` (21.6), preuves rechargées du
+   disque à leur chemin canonique (jamais des objets en mémoire de l'appelant).
+6. Champs 13-17 tous `None` (aucun claim, aucun événement, aucune OOS déjà référencés).
+7. `manifest.update.lock` **absent** : un verrou résiduel signifie « état d'écriture incertain » (21.8) ;
+   le Manifest peut être en cours de transition (marqueur d'échec ou référence en attente), la
+   précondition échoue fermée.
+8. `effective_status == "EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT"`.
+**Condition nécessaire, jamais suffisante** : elle n'autorise pas l'accès à `FINAL_HOLDOUT` (21.10).
+
+### 21.8 — Persistance, transitions, concurrence, crash/reprise
+
+**Chemin** : `<campaign_root>/<campaign_id>/manifest.json`, `campaign_root` toujours fourni par
+l'appelant (jamais résolu en interne, aucun job historique touché). Artefact additif de Slice D :
+`<campaign_dir>/technical_failure.json` (sentinelle, ci-dessous).
+
+**Création initiale** : `save_exclusive()` (jamais `save_atomic()`) du Manifest initial déterministe
+(`READY_FOR_EXECUTION`, `manifest_revision = 0`, tous marqueurs/références vides, 13-17 `None`), après
+chargement du Plan V2 persisté. Deux workers créateurs : exactement un gagnant, l'autre reçoit
+`FileExistsError`, recharge, ne réécrit jamais (empêche qu'un second créateur écrase un Manifest déjà
+avancé — finding 13).
+
+**Mise à jour : `save_atomic_overwrite()` utilisé à dessein** (l'artefact est fait pour évoluer ; une
+écriture exclusive est inapplicable), mais **jamais une écriture libre** et **jamais hors du verrou
+transitoire `manifest.update.lock`** (voir « Concurrence » ci-dessous : `save_atomic_overwrite()` seule
+n'offre aucune exclusion entre processus). L'API de mise à jour accepte uniquement des **commandes
+nommées** (ensemble fermé, pas de « nouveau Manifest » arbitraire) :
+| Commande | Précondition | Effet |
+|---|---|---|
+| `Start` | non démarrée, sans échec | `execution_started = True` |
+| `SetRunning(bool)` | démarrée, sans échec ; `False` exige `running` | `running` |
+| `AttachWalkForward(run_id)` | démarrée, sans échec, WF vide, `run_id` déterministe | `walk_forward_validation_run_id` **et `running = False` dans la MÊME écriture** |
+| `AttachMonteCarlo(run_id)` | WF rattachée, MC vide, id déterministe | `monte_carlo_validation_run_id` **et `running = False`, même écriture** |
+| `AttachParameterStability(fold_id, run_id)` | WF rattachée, `fold_id` attendu, id déterministe | entrée du mapping **et `running = False`, même écriture** |
+| `MarkTechnicalFailure(reason)` | démarrée ; `reason` non vide ; si la sentinelle existe, `reason` doit lui être égale | sentinelle (création, ou constat si elle existe déjà), puis `technical_failure_reason`, `running = False` |
+**Atomicité « rattachement + fin d'exécution » (ferme un MAJOR de revue)** : en V1, le rattachement
+d'une preuve et `running = False` sont une seule écriture (`gate_v_campaign.py` phases WF/MC/PS) ; les
+commandes `Attach…` de V2 **effacent `running` dans la même écriture**. Aucun état « preuves complètes
+rattachées et `running` vrai » n'est donc atteignable par l'API. (`SetRunning(True)` précède chaque phase
+coûteuse ; `SetRunning(False)` ne sert qu'à un arrêt coopératif sans nouvelle preuve.)
+**Ce que valide un rattachement (ferme un MAJOR de revue — pas d'impasse d'adoption)** : une preuve est
+rattachable si elle est **structurellement valide et « scoped »** (type, identifiant déterministe,
+provenance campagne, `status == "completed"`, `INCONCLUSIVE`, spécification cohérente — 21.6 « preuve
+scoped »). **La qualité/complétude n'est PAS une condition de rattachement** : elle relève de la
+dérivation du statut. Un Parameter Stability de qualité insuffisante (V1 le persiste) est donc
+rattachable et rend `EVIDENCE_INCOMPLETE`, il ne bloque ni l'adoption ni la reprise. Une preuve
+structurellement invalide ou étrangère reste une erreur fermée. Les producteurs de preuves (tranche
+d'exécution V2) reprennent la règle V1 : ne persister une run WF/MC que complète.
+Chaque commande est **idempotente** : même valeur → aucune écriture, `manifest_revision` inchangé ;
+valeur différente sur un champ déjà renseigné → `ManifestTransitionError`, rien d'écrit. Aucune
+commande n'efface ni ne modifie une référence ; aucune commande ne sort de `TECHNICAL_FAILURE`
+(terminal : un éventuel mécanisme de reprise auditée serait une décision future, hors Slice D).
+Après application, le Manifest candidat est validé (structure, liaison au plan), **les preuves
+référencées sont rechargées** (21.6), le statut est dérivé, et seulement alors persisté.
+
+**Concurrence — le faux compare-and-swap, identifié et corrigé (MAJOR fermé)**. Une version antérieure
+de cette Décision présentait `manifest_revision` + `save_atomic_overwrite()` comme un compare-and-swap
+atomique. **C'était faux.** Le code réel de `save_atomic_overwrite()` (`atomic_json_store.py`) garantit
+seulement « écriture complète du fichier temporaire + `os.replace()` atomique » : il ne lie PAS
+atomiquement `lecture de la révision N` + `condition révision == N` + `écriture de la révision N+1`.
+**TOCTOU documenté** : deux processus peuvent lire la même révision N, passer chacun leur contrôle, puis
+réussir chacun leur `os.replace()` — le dernier gagne silencieusement et peut effacer une référence de
+preuve ou un marqueur d'exécution rattaché par l'autre. Un contrôle de révision effectué avant
+l'écriture n'est donc **jamais suffisant** ; `manifest_revision` n'est pas un primitif d'exclusion.
+
+**Mécanisme retenu : verrou transitoire V2** `<campaign_dir>/manifest.update.lock`, acquis par
+```
+os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+```
+(même primitive indivisible que la Décision 9 : `CreateFileW(CREATE_NEW)` sous Windows, `open(2)` avec
+`O_EXCL` sous POSIX). Il protège **exclusivement** la transaction de mise à jour du Manifest.
+**Séquence normative, dans cet ordre exact** :
+1. tenter l'acquisition exclusive de `manifest.update.lock` ;
+2. si `FileExistsError` → **échec fermé**, aucune mise à jour, **aucun retry automatique** (l'appelant
+   décide) ; **tout autre `OSError` à l'étape 1** (sous Windows, un fichier de verrou en suppression en
+   attente tenu par un antivirus/indexeur lève `PermissionError`, pas `FileExistsError`) = **même échec
+   fermé** (`ManifestLockAcquisitionError`), aucune écriture ; **dans tous les cas où l'étape 1 n'a pas
+   abouti, le verrou existant n'est JAMAIS supprimé** (il appartient à un autre processus) ;
+2 bis. (propriétaire seulement) écrire le contenu informatif du verrou ; un échec ici est une sortie
+   avant l'étape 9 (le propriétaire libère, voir règles de libération) ;
+3. **recharger `manifest.json` SOUS le verrou** (chargeur pur + liaison au plan) ;
+4. comparer `expected_revision` à la `manifest_revision` **rechargée sous le verrou** — la valeur qui
+   fait foi est celle relue APRÈS l'acquisition, jamais une lecture antérieure ; écart →
+   `ManifestTransitionError`, **sans correction ni rebase automatique** ;
+5. **revalider la commande demandée contre le Manifest réellement rechargé** (préconditions du tableau
+   ci-dessus, « sans échec » incluant l'existence de la sentinelle) ;
+6. recharger et revalider les preuves nécessaires (21.6) ;
+7. calculer le nouveau Manifest et son statut dérivé (`marker_status`) ;
+8. `manifest_revision = revision_rechargée + 1` (une commande idempotente sans changement n'écrit rien :
+   étape 9-10 sautées, `manifest_revision` inchangée) ;
+9. `save_atomic_overwrite(manifest.json)` ;
+10. relire le résultat persisté et vérifier qu'il est valide et égal au Manifest voulu ;
+11. fermer le descripteur puis supprimer `manifest.update.lock` (sous Windows un fichier ouvert ne se
+    supprime pas : fermeture d'abord).
+**Propriété et libération du verrou (ferme un MAJOR de revue)** :
+- **Seul le processus qui a acquis le verrou à l'étape 1 le libère.** Un processus qui a reçu
+  `FileExistsError` (ou tout autre `OSError`) à l'étape 1 ne touche jamais au verrou existant.
+- **Avant tout `unlink`**, le propriétaire vérifie que le fichier au chemin est bien celui qu'il a
+  créé — comparaison d'identité du fichier (`os.stat(path)` contre `os.fstat(fd)` : périphérique et
+  numéro d'inode/index), **jamais du contenu**. Si l'identité a changé (verrou renommé par une récupération
+  manuelle puis ré-acquis par un autre), il ne supprime rien.
+- Toute sortie du propriétaire **avant l'étape 9** (refus, erreur gérée, idempotence sans écriture,
+  échec de l'étape 2 bis) **libère** son verrou : il sait que le Manifest est inchangé. Un Manifest
+  absent ou tronqué au chargement de l'étape 3 est un refus fermé *avant l'étape 9* : le verrou est libéré.
+- **Exception à l'étape 9 (ferme un MAJOR de revue — collision Windows)** : `save_atomic_overwrite()` ne
+  modifie la cible que par `os.replace()` ; sous Windows, un lecteur (antivirus, indexeur, simple lecture
+  d'état) qui tient le Manifest ouvert peut faire échouer ce remplacement par `PermissionError` sans que
+  rien ne soit écrit. Règle : **relire le Manifest sous le verrou**. S'il est identique à l'ancien →
+  rien n'a été écrit : **libérer** et lever `ManifestWriteError` (« refus, rien d'écrit » ; jamais un
+  retry automatique) ; s'il est égal au nouveau → **c'est un succès**, poursuivre aux étapes 10-11 ; **sinon, ou
+  si la relecture échoue, conserver le verrou** et lever `ManifestWriteUncertainError` (état incertain,
+  échec fermé). Un échec à l'étape 10 après un remplacement abouti suit la même règle (relecture ; sinon
+  conservation).
+- **Échec du `unlink` à l'étape 11** (ex. `PermissionError` sous Windows) **après** un remplacement
+  vérifié : la transaction est **validée** (Manifest à la nouvelle révision) mais le verrou reste
+  résiduel ; l'API lève `ManifestLockReleaseError(committed=True)`, **distincte d'un refus**, pour que
+  l'appelant ne croie jamais « rien n'a été écrit ». Une **nouvelle tentative bornée de son propre
+  `unlink`, par le seul propriétaire, avec la vérification d'identité ci-dessus**, est permise ; ce n'est
+  **pas** un nettoyage de verrou périmé (aucun autre processus, aucune attente d'un délai, aucune
+  décision fondée sur le contenu) ; si elle échoue, le verrou reste résiduel (récupération manuelle).
+- **Exceptions typées, jamais confondues** : « refus, rien d'écrit » (`FileExistsError` verrou occupé,
+  `ManifestLockAcquisitionError`, `ManifestTransitionError`, `ManifestWriteError`) ; « validé, verrou résiduel »
+  (`ManifestLockReleaseError`, `committed=True`) ; « incertain » (`ManifestWriteUncertainError`). Un
+  crash dur ne libère rien. Contenu du verrou : informatif et non autoritatif (nom de la commande,
+  `campaign_id`, `expected_revision`, **sans horodatage**), jamais lu pour décider.
+**Verrou consultatif** : il n'exclut que les écrivains qui passent par l'API ; un écrivain hors API
+(édition manuelle) est hors modèle de menace et n'est détecté qu'au chargement suivant (validation
+stricte, statut recalculé). La **création initiale** (`save_exclusive`) se fait hors verrou : une mise à
+jour qui trouve le Manifest absent ou tronqué échoue fermée (avant l'étape 9).
+**Aucun stale-lock automatique — interdit** : ni expiration par délai, ni suppression par âge du
+fichier, ni suppression parce qu'un PID n'existe plus, ni retry automatique. Un verrou résiduel signifie
+« **état d'écriture incertain** » et reste fermé tant qu'une personne n'a pas tranché.
+**Récupération manuelle gouvernée d'un verrou résiduel** (jamais automatisée ; un protocole de
+récupération audité complet est un futur ticket, non conçu ici) : décision humaine explicite ; vérifier
+qu'aucun écrivain n'est vivant ; inspecter `manifest.json` (valide ? `manifest_revision` ? cohérent avec
+les preuves ?) ; **renommer** le verrou (`manifest.update.lock.recovered.<n>`), jamais le supprimer, et
+consigner la décision. Le renommage utilise `os.rename` (jamais `os.replace`, qui écraserait) vers un
+nom `<n>` unique, et **refuse** si la cible existe déjà.
+**Lecteurs** : les chargeurs et les vérifications de preuves ne prennent jamais le verrou (le
+remplacement est atomique : ils voient l'ancien ou le nouveau Manifest complet) ; un verrou résiduel ne
+bloque donc pas les lectures — mais la précondition du Claim exige son **absence** (21.7). Les lecteurs
+n'excluent pas pour autant l'écrivain à l'échelle du système de fichiers : sous Windows, un lecteur qui
+tient le fichier ouvert peut faire échouer l'étape 9, cas traité par la règle ci-dessus (relecture, puis
+libération si rien n'a été écrit).
+
+**Rôle exact de `manifest_revision`** : détection optimiste d'écriture périmée, audit des transitions
+(chaque mise à jour effective la fait avancer de 1) et monotonie logique. **Ce n'est PAS le primitif
+d'exclusion** ; l'exclusion est le verrou `O_EXCL`. Sous verrou, `expected_revision` ≠ révision
+persistée → `ManifestTransitionError` ; l'appelant recharge et rejoue (commandes idempotentes).
+**`expected_revision` est obligatoire dans la signature de TOUTE commande** (y compris `Start` et
+`SetRunning`) ; une commande idempotente portant une révision périmée est refusée à l'étape 4 (cohérent
+avec S1) : l'appelant recharge puis rejoue. **Point de linéarisation** d'une commande : l'étape 5
+(revalidation sous verrou) ; une sentinelle créée après cette étape mais avant l'étape 9 laisse la
+commande aboutir, sans perte du fait (`effective_status` prime) ; la future tranche du Claim **revérifie
+la sentinelle après l'acquisition du Claim et avant toute lecture de marché** (Décision 11, étape 8).
+**Garanties monotones conservées sous le verrou** : aucune référence déjà renseignée n'est supprimée ni
+remplacée par un autre identifiant ; `Attach…` et `running = False` sont une seule nouvelle version du
+Manifest ; `TECHNICAL_FAILURE` est terminal ; les champs `FINAL_HOLDOUT` réservés restent `None`.
+
+**`manifest.update.lock` n'est PAS un `FinalHoldoutAccessClaim`** (distinction absolue, voir aussi 21.10) :
+le verrou **sérialise temporairement une mise à jour factuelle mutable** ; le Claim **consomme
+définitivement le droit scientifique d'accéder au `FINAL_HOLDOUT`**. Le verrou est normalement
+**supprimé** après une transaction réussie ; le Claim ne l'est **jamais**. Aucun verrou de Manifest ne
+permet, n'autorise ni ne déclenche un accès marché, et sa présence ou son absence n'est jamais une preuve
+d'un accès `FINAL_HOLDOUT`.
+
+**Résiduel distinct, hors Manifest (MINOR)** : la **production** concurrente d'une même preuve par deux
+orchestrateurs n'est pas protégée par ce verrou (`save_validation_run()` s'appuie sur `save_atomic()`,
+TOCTOU documenté) — identique à V1 ; la correction scientifique du Manifest **ne dépend plus** du contrat
+« un seul orchestrateur par campagne », qui reste une recommandation opérationnelle ; la future tranche
+d'exécution V2 pourra fermer ce résiduel (bail d'exécution exclusif) — non conçu ici.
+
+**Sentinelle d'échec technique (conservée après l'introduction du verrou ; rôle précisé)** : le verrou
+ferme la perte de mise à jour du Manifest, mais un verrou **résiduel** bloque toute mutation du Manifest
+alors qu'un échec technique doit rester **enregistrable** et qu'il conditionne le Claim (21.7). La
+sentinelle est donc un fait exclusif **indépendant du verrou**. Sa persistance passe par `save_exclusive()`
+de `<campaign_dir>/technical_failure.json` (contenu : version sémantique, `campaign_id`, `reason` ; pas
+de timestamp), **avant** de tenter d'acquérir le verrou et de mettre à jour le Manifest, **et seulement si
+une lecture non verrouillée montre `execution_started = True`** (marqueur monotone, donc sûr : sans cette
+condition une sentinelle posée sur une campagne non démarrée serait irréconciliable) ; si l'acquisition
+du verrou échoue (`FileExistsError`), la sentinelle reste et le Manifest est simplement « en retard ».
+Règles exactes :
+- **Existence = le fait.** Le contenu n'est pas nécessaire au fait : une sentinelle **illisible ou
+  tronquée** (crash entre `O_EXCL` et l'écriture complète) compte quand même comme échec technique
+  (`effective_status = TECHNICAL_FAILURE`) ; jamais supprimée ni réparée automatiquement. Sa `reason`
+  est alors la chaîne fixe `"technical_failure_sentinel_unreadable"` pour toute réconciliation.
+- **Sentinelle présente + marqueur absent du Manifest** = état « en retard » **légal et chargeable**
+  (21.5 : `status == marker_status`) ; la seule transition admissible est `MarkTechnicalFailure` avec la
+  `reason` de la sentinelle (lisible, ou la chaîne fixe ci-dessus), qui constate la sentinelle sans la
+  réécrire puis met à jour le Manifest.
+- **Seconde `MarkTechnicalFailure` avec une `reason` différente** : `FileExistsError` à la création
+  de la sentinelle → la sentinelle existante gagne (« premier échec conservé ») ; la commande échoue avec
+  `ManifestTransitionError` si la `reason` diffère, et est idempotente si elle est identique.
+- Manifest et sentinelle ne peuvent pas diverger durablement sur la `reason` : si le Manifest porte un
+  `technical_failure_reason` différent de la sentinelle lisible, la vérification des preuves refuse
+  (fermé) — **sauf** si le Manifest porte la chaîne fixe `"technical_failure_sentinel_unreadable"` (la
+  sentinelle était illisible au moment de la réconciliation, par exemple une lecture transitoire
+  bloquée par un antivirus) : cette valeur est tolérée et n'est jamais réécrite.
+La sentinelle prime sur le Manifest pour `effective_status` et donc pour la précondition 21.7.
+
+**Matrice de crash / reprise** (mission §11 et §14) :
+| Cas | Conséquence |
+|---|---|
+| Crash avant la persistance d'une preuve | Rien d'écrit ; la reprise recalcule (checkpoints WF, ADR 0024 D8) |
+| Preuve persistée (`save_atomic`, atomique), crash avant rattachement | Preuve orpheline, Manifest **en retard** : légal. **Adoption** à la reprise : recharger, valider structure + « scoped » (**pas** la qualité, voir « Ce que valide un rattachement »), puis `Attach…` (qui efface `running`) ; jamais de recalcul ; une preuve orpheline structurellement invalide/étrangère → erreur fermée |
+| **Crash avant acquisition du verrou** | Aucun effet ; nouvelle tentative possible |
+| **Crash après acquisition du verrou, avant toute modification** | `manifest.update.lock` **reste présent** : échec fermé pour toute nouvelle mutation, **aucune suppression automatique**, récupération manuelle gouvernée |
+| **Crash pendant `save_atomic_overwrite`** (fichier temporaire + `os.replace`) | Manifest = ancien complet OU nouveau complet, **jamais partiellement remplacé** ; fichiers `*.tmp` orphelins jamais lus ; le verrou résiduel bloque toute nouvelle mutation automatique |
+| **Crash après écriture du Manifest, avant suppression du verrou** | Manifest possiblement correctement avancé, verrou présent : échec fermé ; inspection/récupération manuelle uniquement (21.8 « récupération manuelle gouvernée ») |
+| **Deux écrivains simultanés** | Un seul acquiert le verrou ; le second reçoit `FileExistsError` ; **aucun last-write-wins silencieux** |
+| Crash après sentinelle, avant marqueur | Voir sentinelle : état en retard légal et chargeable, réconcilié par `MarkTechnicalFailure` (une fois le verrou libre) |
+| `running = True` figé après crash dur | Légal : `running` n'est jamais une preuve de vivacité. **Action de reprise définie** : pour chaque phase WF, puis MC, puis PS par fold : si la preuve canonique existe → adoption (`Attach…`, efface `running`) ; sinon recalcul. Quand plus aucune phase n'est manquante, `running` est déjà faux (les `Attach…` l'ont effacé) |
+| Création initiale tronquée (crash entre `O_EXCL` et l'écriture) | Illisible → **refus fermé**, jamais traité comme absent. Un Manifest initial tronqué rend le scope inutilisable (plan et PreRegistration sont exclusifs) : **récupération manuelle gouvernée** — décision humaine explicite, uniquement si `validations/` ne contient aucune preuve et qu'aucune sentinelle n'existe ; le fichier est **renommé** (`manifest.json.corrupt.<n>`, jamais supprimé), puis le Manifest initial est recréé par `save_exclusive()` ; jamais automatisé. Durcissement possible non retenu : écriture complète puis `os.link` (nouvelle primitive, support filesystem non vérifié, discipline Décision 9) |
+| Manifest **plus avancé** que les preuves réelles | **Erreur fermée** (référence vers preuve absente/étrangère, ou statut ≠ dérivé) — jamais corrigé silencieusement |
+| Réexécution de l'orchestrateur sur campagne `EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT` | Dérivation = complète, `running` faux → aucune phase relancée, commandes idempotentes |
+| Technical failure | **Terminal, accepté par l'utilisateur (2026-10-06)** ; preuves déjà rattachées conservées ; relance automatique interdite (« reprise manuelle requise », comme V1) ; **aucun mécanisme de retry n'est conçu ni autorisé dans Slice D** ; un scope devenu inutilisable après échec technique est un comportement conservateur accepté tant qu'un protocole de reprise auditée n'est pas formellement spécifié |
+**Principe** : les preuves persistées restent la source factuelle ; le Manifest n'est qu'un index
+monotone derrière elles. Un Manifest en retard est sûr (la dérivation le répare par adoption) ; un
+Manifest en avance est une erreur.
+
+### 21.9 — Discrimination V1 / V2 : algorithme exact
+
+Fonction pure de classification (lecture seule, ne valide pas le contenu scientifique) :
+`classify_gate_v_campaign_dir(campaign_dir) -> "v1" | "v2"`, sinon `GateVCampaignDiscriminationError`
+(sous-classe de `ValueError`). **Jamais par le nom du dossier comme discriminant** (il n'est qu'un test
+de cohérence) ; **jamais de repli** : un V2 malformé n'est jamais lu comme V1.
+```
+1. plan.json : absent, illisible, JSON invalide ou non-objet            -> erreur
+2. "campaign_plan_semantics_version" absente                           -> plan_kind = "v1"
+   valeur == "gate_v_campaign_plan_v2"                                  -> plan_kind = "v2"
+   toute autre valeur (y compris None, v3, v1 explicite)                -> erreur (fail closed)
+3. campaign_id du plan : str ; forme V1 `gate_v_[0-9a-f]{64}` ssi v1,
+   forme V2 `gate_v_v2_[0-9a-f]{64}` ssi v2 ; nom du dossier == campaign_id -> sinon erreur
+4. manifest.json absent                                                 -> retourner plan_kind
+   illisible / non-objet                                                -> erreur
+5. "manifest_semantics_version" absente -> manifest_kind = "v1"
+   == "gate_v_campaign_manifest_v2"     -> manifest_kind = "v2"
+   autre valeur                          -> erreur
+6. manifest_kind != plan_kind                                           -> erreur (état hybride)
+   manifest.campaign_id != campaign_id du plan                          -> erreur
+7. retourner plan_kind
+```
+Le résultat sélectionne le chargeur strict correspondant (V1 : chargeurs existants, inchangés ; V2 :
+chargeurs de Slice C et D). Les formes d'identifiant `gate_v_<64 hex>` et `gate_v_v2_<64 hex>` sont
+mutuellement exclusives (le segment `v2_` n'est pas hexadécimal), donc un identifiant ne peut être lu
+dans l'autre espace.
+
+### 21.10 — Le Manifest n'est JAMAIS le verrou `FINAL_HOLDOUT`
+
+Règle absolue (Décision 9, répétée ici pour être impossible à mal comprendre) :
+- **L'autorité unique d'exclusivité est `FinalHoldoutAccessClaim` créé par `os.open(O_CREAT|O_EXCL)`**
+  (Décisions 9-11). Le Manifest, quel que soit son contenu, **n'accorde, ne refuse et ne consomme
+  aucun droit d'accès**.
+- `EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT` est une **précondition nécessaire** du Claim, jamais un
+  droit : deux processus voyant ce statut ne sont départagés que par le `O_EXCL` du Claim.
+- Les champs 13-17 sont, quand ils seront autorisés, un **miroir d'audit écrit APRÈS** la réussite du
+  Claim (jamais avant, jamais comme condition) ; leur absence ou leur divergence n'ouvre ni ne ferme
+  aucun accès ; seule une divergence avec le fichier de claim déclenche une erreur d'audit (tranche
+  future).
+- **`manifest.update.lock` n'est pas un Claim** (21.8) : il sérialise temporairement une mise à jour
+  factuelle mutable et est normalement supprimé ; le Claim consomme définitivement le droit d'accès et
+  n'est jamais supprimé ; aucun verrou de Manifest ne permet ni ne déclenche un accès marché ; après
+  toute opération de Slice D, aucun fichier de Claim n'existe.
+- Le module Manifest V2 n'importe pas le module du Claim, ne définit aucune primitive exclusive de
+  claim, ne lit aucune donnée de marché, n'utilise jamais `save_atomic_overwrite()` pour un fait
+  irréversible de `FINAL_HOLDOUT`. Tests structurels (imports AST, absence de champ booléen
+  « holdout accessible », absence de statut contenant `CLAIM` ou `HOLDOUT` autre que
+  `EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT`) en Slice D.
+
+### 21.11 — Intégration avec AF-V-08 (`gate_v_campaign.py` V1) : options comparées
+
+| Option | Verdict |
+|---|---|
+| a — extension minimale de l'orchestrateur V1 (branches V2 dans `gate_v_campaign.py`) | **Rejetée** : touche un module intégré, gelé ; `isinstance` V1 partout ; risque de dérive de V1 |
+| **b — nouveaux modules V2 additifs** | **Retenue** |
+| c — façade d'**exécution** unifiée (`execute_gate_v_campaign(plan_any)`) | **Rejetée pour l'instant** : masquerait la différence scientifique (OOS-first vs `FINAL_HOLDOUT` dernier) derrière un seul appel — risque de mélange silencieux. L'exécution V2 sera un module séparé dans une tranche ultérieure |
+| **d — façade de classification en lecture seule** | **Retenue** (21.9) : réduit six combinaisons de versions à une fonction ; test de suppression : sans elle chaque appelant dupliquerait l'algorithme |
+Modules (sans cycle ; **aucun n'importe `gate_v_campaign.py`**) :
+```
+gate_v_evidence_completeness_v2.py   # pur : prédicats de 21.6 sur Plan V2 + ValidationRun, retourne des faits
+gate_v_campaign_manifest_v2.py       # type, identifiant déterministe des preuves, structure, liaison au plan,
+                                     # dérivation du statut, commandes, création, mise à jour sous verrou
+                                     # transitoire `manifest.update.lock`, sentinelle d'échec technique,
+                                     # vérification des preuves, précondition 21.7
+gate_v_campaign_dispatch.py          # classification 21.9, lit uniquement des clés JSON
+```
+Dépendances : `dispatch` ne dépend d'aucun module scientifique ; `manifest_v2` dépend de
+`completeness_v2`, `gate_v_campaign_plan_v2`, `validation_run`, `atomic_json_store` — **et de rien
+d'autre** (ni PreRegistration, ni ResearchRun, ni split, ni policy, ni Git : la revalidation du Plan V2
+aux sources est une obligation de l'appelant, 21.7) ; V1 ne dépend de rien de V2.
+**Décision de duplication — VALIDÉE par l'utilisateur (2026-10-06)** : **les prédicats WF/MC/PS V2
+sont réimplémentés additivement dans le module V2** (`gate_v_evidence_completeness_v2.py`), **sans
+modifier `gate_v_campaign.py`**, avec des **tests différentiels V1/V2** qui verrouillent l'équivalence
+là où les contrats sont communs (mêmes `ValidationRun` synthétiques jugées par les prédicats V1 et V2 :
+résultats ET exceptions égaux). Raisons : V1 est stable, intégré et son comportement historique doit
+rester identique à l'octet ; une extraction toucherait inutilement `gate_v_campaign.py` ; V2 peut
+légitimement diverger plus tard ; la duplication contrôlée et testée est acceptée (MINOR assumé).
+**L'extraction des helpers privés V1 n'est plus proposée comme choix par défaut** ni comme alternative
+active de cette spec.
+
+### 21.12 — Revue adversariale (résolue dans cette spec avant tout code)
+
+| # | Scénario | Classe | Fermeture |
+|---|---|---|---|
+| 1 | Plan V1 présenté comme V2 | — | `campaign_plan_semantics_version` absente → refusé par le chargeur V2 (Décision 20.6) ; classification : `v1` |
+| 2 | Plan V2 présenté comme V1 | — | le chargeur V1 reconstruit via `build_gate_v_campaign_plan` : clé inconnue/comparaison `record != _plan_record` → refus ; classification : `v2` jamais `v1` |
+| 3 | Sémantique inconnue (plan ou manifeste) | — | erreur fermée à 21.9 pas 2 et 5 |
+| 4 | Manifest d'une autre campagne | — | `campaign_id` recalculé depuis `{constante de version du Plan V2, preregistration_id, fingerprint}` (le Manifest ne porte pas `campaign_plan_semantics_version` ; la constante est impliquée par `manifest_semantics_version`) + égalité avec le plan + nom de dossier |
+| 5 | `campaign_id` falsifié | — | barrière 2 interne sur le Manifest (même fonction `compute_gate_v_campaign_id_v2` que le Plan V2) |
+| 6 | `preregistration_id` falsifié | MAJOR de Slice C, déjà fermé | idem 5 : le `campaign_id` recalculé diverge |
+| 7 | Preuve WF étrangère | — | identifiant déterministe + provenance scoped (21.6) |
+| 8 | Preuve MC étrangère | — | idem + provenance = run WF de la campagne |
+| 9 | Preuve PS d'un fold étranger | — | fold ∉ `expected_fold_ids` → erreur ; id ≠ déterministe → erreur |
+| 10 | Fold attendu absent | — | PS/WF incomplet → `EVIDENCE_INCOMPLETE`, jamais complet |
+| 11 | `TECHNICAL_FAILURE` ignoré | **MAJOR** | marqueur **et** sentinelle exclusive ; terminal ; précondition 21.7 pas 4 (`effective_status`) |
+| 12 | Manifest complet sans preuve | — | preuves rechargées du disque ; référence absente = erreur ; statut ≠ dérivé = erreur |
+| 13 | Deux workers mettent à jour | **MAJOR — FERMÉ** | création exclusive (`save_exclusive`) ; **mises à jour sous `manifest.update.lock` (`O_CREAT|O_EXCL`)** avec rechargement et contrôle de révision SOUS le verrou ; commandes idempotentes ; sentinelle d'échec indépendante du verrou ; replay détaillé ci-dessous (S1-S8). Le faux « compare-and-swap » `manifest_revision` + `save_atomic_overwrite()` est supprimé (finding 31) |
+| 14 | Crash entre preuve et mise à jour | — | Manifest « en retard » légal, adoption à la reprise (matrice 21.8) |
+| 15 | Claim ajouté à la main | **MAJOR** | champs 13-17 forcés `None` en Slice D ; extension monotone future avec vérification contre le claim |
+| 16 | OOS référencée avant WF/MC/PS | — | `oos_evidence_validation_run_id` réservé `None` ; le Plan V2 n'en porte pas ; aucun statut V2 n'a besoin d'OOS |
+| 17 | V1 cassé par les nouveaux chargeurs | — | aucun fichier V1 modifié ; les chargeurs V2 sont additifs ; tests V1 inchangés verts ; la classification ne remplace aucun chargeur |
+Autres findings : (18) **MAJOR** — les prédicats V1 sont privés et un verrou `isinstance` les lie au
+type V1 : pas de réutilisation sans coupler V2 à V1 ou toucher V1 → 21.11 ;
+(19) **MAJOR** — `EVIDENCE_COMPLETE_AWAITING_POLICY` serait faux en V2 (OOS-first) → statut dédié 21.5 ;
+**Findings de la revue adversariale indépendante de cette Décision (2026-10-06), tous fermés dans le
+texte ci-dessus** : (20) **MAJOR** — sentinelle « en avance » à la fois légale et refusée par l'égalité
+statut persisté = statut dérivé → séparation `marker_status` / `effective_status` (21.5) + règles de
+sentinelle illisible/`reason` divergente/seconde marque (21.8) ; (21) **MAJOR** — V1 rattache la preuve
+et efface `running` en une seule écriture, V2 le scindait → `Attach…` efface `running` dans la même
+écriture + action de reprise définie (21.8) ; (22) **MAJOR** — adoption impossible d'un Parameter
+Stability de qualité insuffisante (V1 le persiste, refus d'écrasement) → un rattachement ne vérifie
+que structure + « scoped », la qualité relève de la dérivation (21.8) ; (23) **MAJOR** — la précondition
+21.7 n'avait ni signature ni dépendances → `assert_gate_v_pre_holdout_evidence_complete(plan, campaign_dir)`,
+revalidation aux sources = obligation de l'appelant (21.7, 21.11).
+(31) **MAJOR — FERMÉ (2026-10-06, revue de l'utilisateur)** : `manifest_revision` +
+`save_atomic_overwrite()` **n'est pas** un compare-and-swap inter-processus atomique (TOCTOU : lecture N,
+contrôle, écriture N+1 non liés atomiquement ; deux `os.replace()` peuvent réussir) → verrou transitoire
+`manifest.update.lock` (`O_CREAT|O_EXCL`), séquence en 11 étapes avec rechargement et contrôle de
+révision sous verrou, aucun stale-lock automatique, matrice de crash dédiée (21.8) ; **(32) MAJOR —
+FERMÉ (revue indépendante du contrat de verrou)** : propriété du verrou (le perdant de l'étape 1 ne le
+supprime jamais ; vérification d'identité de fichier avant `unlink`) ; **(33) MAJOR — FERMÉ** : collision
+Windows à l'étape 9 (un lecteur peut faire échouer `os.replace`) → relecture sous verrou : rien d'écrit
+= libération, remplacement abouti = succès, sinon verrou conservé ; **(34) MAJOR — FERMÉ** : échecs
+Windows de l'étape 1 (`PermissionError`) et de l'étape 11 (`unlink`), exceptions typées distinctes
+(refus / validé-verrou-résiduel / incertain). MINOR traités : verrou consultatif, création initiale hors
+verrou, condition `execution_started` pour la sentinelle, tolérance de la raison « sentinelle illisible »,
+point de linéarisation à l'étape 5, `expected_revision` obligatoire partout, récupération par `os.rename`.
+Le finding
+« fenêtre résiduelle / contrat un seul orchestrateur » n'est plus MINOR : il est **MAJOR fermé** et la
+correction ne dépend plus de ce contrat.
+MINOR : (24) `TECHNICAL_FAILURE` terminal peut rendre un scope inutilisable tant qu'aucune reprise
+auditée n'est définie (**comportement conservateur ACCEPTÉ par l'utilisateur, 2026-10-06** ; aucun retry
+conçu dans Slice D ; fail-closed, `FINAL_HOLDOUT` non consommé) ; (25) création initiale tronquée →
+récupération manuelle gouvernée (21.8) ; (26) **production** concurrente d'une même preuve par deux
+orchestrateurs via `save_atomic()` (TOCTOU documenté, résiduel V1 identique, **hors Manifest**, non
+couvert par le verrou ; à fermer par la future tranche d'exécution V2) ; (26 bis) un verrou résiduel exige
+une récupération manuelle gouvernée (coût opérationnel assumé, jamais d'auto-nettoyage) ;
+(27) preuves orphelines non référencées ignorées (jamais
+une autorité) ; (28) `ValidationRun` sans `preregistration_id` (21.6) ; (29) duplication des prédicats
+V1/V2, verrouillée par un test différentiel ; (30) **longueur de chemin Windows** : un identifiant V2 fait
+74 caractères (V1 : 71) ; le chemin relatif le plus long sous `<campaign_root>` est
+`<id>/validations/<id>_parameter_stability_<fold>/validation_run.json`, soit ≈ 210 caractères (V1 ≈ 204) —
+avec une racine `results/job_xxx/gate_v/campaigns/` usuelle, le total approche ou dépasse `MAX_PATH`
+(260) sans support des chemins longs ; **risque préexistant en V1**, non aggravé de façon significative ;
+l'implémentation ajoute un test sur le chemin le plus long avec une racine réaliste et documente la
+dépendance aux chemins longs Windows. **BLOCKER : aucun. MAJOR : tous fermés par cette spécification.**
+
+**Replay adversarial final du contrat de concurrence (après introduction du verrou)** :
+| # | Scénario | Résultat sous le contrat 21.8 |
+|---|---|---|
+| S1 | Deux writers, même révision N, même transition | Un seul acquiert le verrou ; l'autre reçoit `FileExistsError` (aucun retry automatique). Si l'autre rejoue plus tard avec `expected_revision = N` : rechargé sous verrou = N+1 → `ManifestTransitionError` ; après rechargement par l'appelant, la commande idempotente est un no-op. Aucune référence perdue |
+| S2 | Deux writers, transitions différentes (ex. `AttachMonteCarlo` et `AttachParameterStability`) | Un seul acquiert ; le second échoue fermé ; une fois le verrou libre il recharge et rejoue sa commande, valide sur l'état à jour : **les deux références coexistent**, aucun last-write-wins |
+| S3 | Writer périmé (`expected_revision` ancienne) | Sous verrou : révision rechargée ≠ attendue → `ManifestTransitionError`, **pas de rebase**, verrou libéré (sortie avant l'étape 9) |
+| S4 | Crash après acquisition du verrou | Verrou résiduel, Manifest inchangé : toute mutation échoue fermée ; lecteurs non bloqués ; la précondition 21.7 échoue (verrou présent) ; récupération manuelle gouvernée |
+| S5 | Crash après écriture du Manifest, avant suppression du verrou | Manifest avancé et valide, verrou résiduel : même échec fermé ; l'inspection manuelle constate la révision N+1 cohérente avec les preuves |
+| S6 | `MarkTechnicalFailure` concurrent à un `Attach…` | La sentinelle (indépendante du verrou) est créée ; si le verrou est pris par l'autre, la commande échoue (`FileExistsError`) mais **le fait est enregistré** : `effective_status = TECHNICAL_FAILURE`, précondition fermée même si toutes les preuves existent ; la réconciliation `MarkTechnicalFailure(reason sentinelle)` aligne le Manifest dès que le verrou est libre. Aucun chemin ne perd l'échec |
+| S7 | Preuve persistée entre deux mises à jour | Elle n'est autorité qu'une fois rattachée : la mise à jour U1 n'en tient pas compte (Manifest « en retard », légal) ; U2 la rattache après validation structure + « scoped » sous verrou ; le statut ne dérive que des références |
+| S8 | Claim ajouté manuellement | Champs 13-17 non nuls → refus du chargeur (y compris à l'étape 3 sous verrou) ; aucun fichier de Claim n'est créé par Slice D ; `manifest.update.lock` n'est pas un Claim |
+**Aucun BLOCKER ni MAJOR ouvert.**
+
+### 21.13 — Découpage TDD indicatif (tranches d'implémentation, chacune RED→GREEN→revue)
+
+D1 `gate_v_evidence_completeness_v2` + test différentiel V1/V2 ; D2 type, constantes, liaison et
+validation structurelle du Manifest V2 ; D3 dérivation de statut et commandes (pures) ; D4 création
+exclusive, mise à jour sous verrou `manifest.update.lock`, sentinelle ; D5 vérification des preuves +
+précondition 21.7 ; D6 `gate_v_campaign_dispatch`.
+**Tests de concurrence et de crash exigés (contrat 21.8, non négociables)** — le test de concurrence
+utilise **deux processus réels** (pas des threads, pas des mocks) synchronisés par une barrière, sur le
+modèle du test à deux processus de Slice B :
+1. deux processus réels tentent la même transition ;
+2. exactement un acquiert `manifest.update.lock` ;
+3. le second reçoit `FileExistsError` ;
+4. aucune référence déjà persistée n'est perdue ;
+5. `expected_revision` périmé sous verrou → `ManifestTransitionError` (pas de rebase) ;
+6. crash simulé après acquisition → le verrou résiduel bloque toute mutation suivante ;
+7. aucun auto-nettoyage du verrou (ni délai, ni âge, ni PID, ni retry) ;
+8. verrou supprimé après une transaction normale ; verrou **libéré** sur toute sortie avant l'étape 9 et
+   **conservé** sur une erreur pendant/après l'étape 9 ;
+9. `manifest.update.lock` ne crée jamais de `FinalHoldoutAccessClaim` ;
+10. aucun fichier de Claim n'existe après toutes les opérations de Slice D ;
+11. la précondition 21.7 échoue tant que le verrou existe ; les lecteurs ne prennent jamais le verrou ;
+12. deux transitions différentes simultanées : les deux références coexistent après rejeu (S2) ;
+13. sentinelle créée même quand le verrou est occupé (S6), et seulement si `execution_started` est vrai ;
+14. **le perdant ne supprime jamais le verrou du gagnant** (`FileExistsError` et autre `OSError` à
+    l'étape 1) ; le propriétaire ne supprime pas un verrou dont l'identité de fichier a changé ;
+15. `PermissionError` simulé à l'étape 9 : relecture, rien d'écrit → verrou libéré + `ManifestWriteError` ;
+    remplacement abouti malgré l'exception → succès ; relecture impossible → verrou conservé +
+    `ManifestWriteUncertainError` ;
+16. `unlink` en échec à l'étape 11 après remplacement vérifié → `ManifestLockReleaseError(committed=True)`,
+    jamais confondu avec un refus ; nouvelle tentative bornée du seul propriétaire ;
+17. `OSError` non `FileExistsError` à l'étape 1 → échec fermé sans écriture ni suppression ;
+18. `expected_revision` obligatoire pour toute commande, y compris idempotente (révision périmée refusée) ;
+19. une commande `Attach…` qui franchit l'étape 5 avant une sentinelle concurrente aboutit sans perte du
+    fait (`effective_status = TECHNICAL_FAILURE`).
+
+Tests minimaux transverses (hors concurrence) : 17 champs exacts dans l'ordre ; champs
+réservés refusés non nuls ; V1/V2 mutuellement refusés par les chargeurs ; aucun import de
+`gate_v_campaign.py` ni du Claim ; aucun segment de statut dans `{PASS, FAIL, CHAMPION, OOS, VERDICT}`
+(21.5) ; test du chemin relatif le plus long avec une racine réaliste (21.12 #30) ;
+`gate_v_campaign.py` identique à `HEAD` ; suite V1 inchangée verte.
+**Interdits dans Slice D** : `FinalHoldoutAccessClaim`, accès `FINAL_HOLDOUT`, `HoldoutAccessEvent` V2,
+`ValidationAssessment`, `GateVPolicyAssessment`, exécution WF/MC/PS V2, policy concrète de seuils,
+campagne réelle, Champion, modification de `gate_v_campaign.py`.
+
 ## Conséquences
 
 - **État réel initial** : `AF-V-07` = **DESIGN ACCEPTED / READY FOR IMPLEMENTATION** (2026-09-29,
@@ -782,6 +1456,14 @@ jamais recalculé, jamais réécrit, jamais remplacé par le HEAD courant.
   la Décision 20 ci-dessus — **`Slice C` = SPEC LOCKED, READY FOR IMPLEMENTATION uniquement après
   validation explicite de l'utilisateur** ; aucun code Slice C n'a été écrit par ce processus de
   conception. `GATE V` reste NON PASSÉE.
+- **Mise à jour (2026-10-06, additive, ne remplace rien de ce qui précède)** : **`Slice C` =
+  IMPLEMENTED + TESTED + INTEGRATED** dans `master` (commit
+  `59dd901f74370bac96ba9564a4729347ba994d81`, parent `f1e39713d43479a0ed038c5652197a323d087cd2`,
+  suite complète 1915/1915) ; la mention « SPEC LOCKED » ci-dessus décrit l'état à la date de la
+  mise à jour précédente. Le contrat de la **Slice D** (`GateVCampaignManifestV2` / discrimination V1-V2)
+  est verrouillé par la Décision 21 : **`Slice D` = SPEC LOCKED, NOT IMPLEMENTED**, implémentation
+  uniquement après validation explicite de l'utilisateur. `AF-V-07` = IN PROGRESS, `AF-V-08` = DONE,
+  `GATE V` NON PASSÉE, `FINAL_HOLDOUT` NON ACCÉDÉ.
 - **Documents de conception non normatifs, référencés pour traçabilité uniquement** : diagrammes
   Figma/FigJam produits au fil des itérations V1-V7 (dernier, V7 : `https://www.figma.com/board/tbncsrWhuFng8HF0QDKKD1`)
   — visualisent la frontière source-contrôlée/portable, la chaîne d'immutabilité pré-holdout, le
