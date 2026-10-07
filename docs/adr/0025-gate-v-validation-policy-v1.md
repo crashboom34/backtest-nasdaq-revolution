@@ -971,13 +971,39 @@ WF et MC : `strategy_params == plan.base_params`.
 `plan.expected_fold_ids` (fold attendu manquant → incomplet ; fold inattendu ou doublon → incomplet) ;
 cohérence trades/zéro-trade par fold ; Top-1 TRAIN, `search_space_hash`, `search_mode`, budget ;
 hash des définitions de folds recalculé == `plan.expected_fold_definitions_hash` (écart = erreur) ;
-agrégat cohérent avec les folds.
+agrégat cohérent avec les folds. **Précision (D1, 2026-10-07)** : « cohérent » signifie, en V2, **égal,
+champ à champ, au résultat du producteur canonique `walk_forward.build_aggregate_result(fold_results)`**
+recalculé sur les folds validés (aucune réimplémentation de la formule ; NaN, booléen ou flottant à la
+place d'un compteur refusés) ; une métrique consommée plus tard par la policy (`oos_net_return_pct`,
+drawdown, profit factor, win rate, Sharpe) ne peut donc pas provenir d'un agrégat persisté incohérent
+avec ses folds. **Précision (D1, 2026-10-07)** : pour V2, les faits élémentaires d'un `FoldResult` doivent
+être compatibles avec les invariants du producteur canonique : `net_ret_pct` et `score_test` sont finis,
+`score_test` est compris entre `0` et `100` (`scoring.compute_score` le borne) ; `gross_win` et
+`gross_loss` sont finis et `>= 0` ; `n_win` est un entier non booléen compris entre `0` et `n_trades` ;
+sur un fold zéro trade, `gross_win == gross_loss == n_win == 0` et `score_test == 0` (le producteur les
+force) ; aucun de ces nombres n'est un booléen. **Relations imposées par `engine._compute_stats` sur un
+fold avec trades** : `n_win > 0` implique `gross_win > 0` ; `n_win == 0` implique `gross_win == 0` ; tous
+les trades gagnants (`n_win == n_trades`) impliquent `gross_loss == 0` ; en revanche des trades non
+gagnants peuvent être exactement à zéro (classés « pertes » sans changer `gross_loss`), donc
+`gross_loss == 0` n'implique **pas** `n_win == n_trades` ; `win_rate == n_win / n_trades * 100` ;
+`profit_factor == gross_win / gross_loss` si `gross_loss > 0`, sinon `+inf` ; `win_rate` et `profit_factor`
+sont refusés s'ils sont booléens, NaN, absents ou incohérents (sur un fold zéro trade ils restent `None`).
+Ces contrôles sont effectués **AVANT** de considérer l'agrégat recalculé comme une preuve de cohérence :
+un agrégat auto-cohérent avec un fold falsifié ne blanchit jamais ce fold. `profit_factor = +inf` reste
+**valide et canonique** lorsque des trades existent et qu'aucune perte brute n'est observée
+(`gross_loss == 0`, convention du producteur, y compris pour des trades tous à zéro) ; `isfinite` ne lui
+est jamais appliqué.
 **Monte-Carlo complet** : spécification == celle construite pour la run WF de la campagne avec
 `verdict_policy_id = None` et circularité déclarée vraie ; nombre de trades == total WF ; aucune
 métrique inventée sur zéro trade ; distributions finies présentes sinon incomplet.
 **Parameter Stability complète pour un fold** : spécification == celle construite pour (run WF, fold,
 `search_mode`, circularité déclarée vraie) ; correspondance avec le Top-1/pool TRAIN du fold ;
-compteurs de voisins cohérents ; voisinage exploitable réel ; distributions finies. **PS complète = TOUS**
+compteurs de voisins cohérents ; voisinage exploitable réel ; distributions finies. **Précision (D1,
+2026-10-07)** : les ensembles de clés de `n_neighbors_total_by_param` et `n_neighbors_rejected_by_param`
+sont **égaux à celui de `best_params`** (le producteur `parameter_stability.py` remplit ces structures
+pour chaque paramètre actif, `best_params.keys()`) ; une preuve persistée ne peut ni perdre ni inventer un
+paramètre (écart = erreur ; `best_params` absent = aucune clé attendue). Ce contrôle est indépendant de la
+règle de saut ci-dessous. **PS complète = TOUS**
 les `expected_fold_ids` présents et chacun de qualité suffisante — jamais un simple décompte de fichiers.
 **Règles de saut héritées de V1, explicitées** : sans agrégat WF, la comparaison du nombre de trades MC
 est sautée (la WF est alors elle-même incomplète, donc le statut reste `EVIDENCE_INCOMPLETE`) ; sans fold
@@ -1308,6 +1334,13 @@ Dépendances : `dispatch` ne dépend d'aucun module scientifique ; `manifest_v2`
 `completeness_v2`, `gate_v_campaign_plan_v2`, `validation_run`, `atomic_json_store` — **et de rien
 d'autre** (ni PreRegistration, ni ResearchRun, ni split, ni policy, ni Git : la revalidation du Plan V2
 aux sources est une obligation de l'appelant, 21.7) ; V1 ne dépend de rien de V2.
+**Précision (D1, 2026-10-07)** : « et de rien d'autre » désigne les **imports DIRECTS** de
+`gate_v_campaign_manifest_v2.py` ; il ne réinterprète pas la fermeture transitive du graphe d'import
+(`gate_v_campaign_plan_v2` importe déjà PreRegistration, ResearchRun, split, policy…), et il ne prescrit
+pas la liste des imports directs de `gate_v_evidence_completeness_v2.py`. Ce dernier peut appeler des
+helpers **purs** existants nécessaires à la vérification d'une preuve — notamment
+`walk_forward.build_aggregate_result()` — sans exécuter de Walk-Forward ni faire d'I/O ; aucun module V2
+n'importe `gate_v_campaign.py`.
 **Décision de duplication — VALIDÉE par l'utilisateur (2026-10-06)** : **les prédicats WF/MC/PS V2
 sont réimplémentés additivement dans le module V2** (`gate_v_evidence_completeness_v2.py`), **sans
 modifier `gate_v_campaign.py`**, avec des **tests différentiels V1/V2** qui verrouillent l'équivalence
