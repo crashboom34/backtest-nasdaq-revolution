@@ -1228,6 +1228,16 @@ de timestamp), **avant** de tenter d'acquérir le verrou et de mettre à jour le
 une lecture non verrouillée montre `execution_started = True`** (marqueur monotone, donc sûr : sans cette
 condition une sentinelle posée sur une campagne non démarrée serait irréconciliable) ; si l'acquisition
 du verrou échoue (`FileExistsError`), la sentinelle reste et le Manifest est simplement « en retard ».
+**Précision (D4, 2026-10-10) — format exact de la sentinelle** : constante
+`GATE_V_TECHNICAL_FAILURE_SENTINEL_SEMANTICS_VERSION = "gate_v_technical_failure_sentinel_v1"` ; objet JSON à
+**exactement trois** clés de premier niveau : `technical_failure_sentinel_semantics_version` (égale à cette
+constante), `campaign_id` (égal au `campaign_id` du Plan V2) et `reason` (chaîne non vide, encodable en UTF-8 :
+vérifié AVANT la création exclusive). Aucun horodatage, PID, nom d'hôte, chemin ni révision. Une sentinelle n'est
+**lisible et valide** que si ces trois conditions et cet ensemble exact de clés sont satisfaits ; toute autre forme
+(vide, tronquée, illisible, version ou campagne différente, clé manquante ou en trop, motif vide ou non
+encodable) reste un fait d'échec, réconcilié avec la chaîne fixe ci-dessous. Cette chaîne fixe est **réservée à la réconciliation** d'une
+sentinelle existante illisible : aucune sentinelle n'est créée avec elle, ni pour un Manifest déjà marqué (son
+premier motif ne change jamais). La sentinelle n'est **pas** un Claim.
 Règles exactes :
 - **Existence = le fait.** Le contenu n'est pas nécessaire au fait : une sentinelle **illisible ou
   tronquée** (crash entre `O_EXCL` et l'écriture complète) compte quand même comme échec technique
