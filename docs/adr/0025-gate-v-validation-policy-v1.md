@@ -893,7 +893,10 @@ existants — au pire moment (juste avant le claim) ; (iii) crée des types inut
 Garde-fous exacts :
 - En Slice D, le **constructeur, toutes les commandes et le chargeur refusent toute valeur non `None`**
   pour les champs 13-17 (« réservé : acquisition du claim non implémentée, aucune vérification possible
-  de l'autorité »). Un claim ajouté à la main (finding 15) est donc refusé fermé.
+  de l'autorité »). Un claim ajouté à la main (finding 15) est donc refusé fermé. **Précision (D2,
+  2026-10-07)** : « constructeur » désigne le **builder public validé** et les **chemins de reconstruction
+  supportés** (`from_record`, validateurs) ; l'instanciation Python directe de la dataclass n'est pas une
+  API de création validée (même discipline que `GateVCampaignPlanV2`), elle ne revalide rien.
 - **Principe d'extension monotone** : une tranche future peut seulement AJOUTER des états valides
   (miroir non nul accepté **uniquement** après vérification explicite contre le fichier de claim
   autoritaire, 21.10) ; tout Manifest valide en Slice D reste valide, avec le même sens, après ces
