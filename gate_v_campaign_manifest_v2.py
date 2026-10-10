@@ -6,10 +6,18 @@ importé ni modifié ici). Module PUR : aucune lecture ni écriture de fichier, 
 sentinelle, aucune horloge. Il porte seulement des pointeurs et des marqueurs d'exécution ; il ne déclare
 JAMAIS une phase « complète » et ne produit aucun verdict scientifique.
 
-Scope Slice D2 (STRICT) : constantes, type à 17 champs, builder initial EN MÉMOIRE, validation
-structurelle, liaison au `GateVCampaignPlanV2`, conversion record pure. HORS scope (tranches suivantes) :
-dérivation de statut et commandes (D3), création/mise à jour sur disque et verrou (D4), vérification des
-preuves persistées (D5), discrimination de dossier (D6), Claim et FINAL_HOLDOUT.
+Scope Slice D2 : constantes, type à 17 champs, builder initial EN MÉMOIRE, validation structurelle,
+liaison au `GateVCampaignPlanV2`, conversion record pure.
+
+Scope Slice D3 : statut posé par les marqueurs (`derive_…_marker_status`, sur la vue des SEULES preuves
+RÉFÉRENCÉES par le Manifest, jugées par D1) et six commandes pures (`Start`, `SetRunning`, `AttachWalkForward`,
+`AttachMonteCarlo`, `AttachParameterStability`, `MarkTechnicalFailure`) appliquées par une seule fonction qui exige
+`expected_revision`, ajoute exactement 1 à la révision d'une vraie transition et rend le même Manifest pour une
+commande idempotente. Les preuves sont des `ValidationRun` DÉJÀ chargées par l'appelant.
+
+HORS scope (tranches suivantes) : création/mise à jour sur disque, verrou, sentinelle et valeur effective (D4),
+rechargement des preuves persistées et précondition du Claim (D5), discrimination de dossier (D6), Claim et
+FINAL_HOLDOUT.
 """
 
 from __future__ import annotations
@@ -26,11 +34,16 @@ from gate_v_campaign_plan_v2 import (
     compute_gate_v_campaign_id_v2,
     validate_gate_v_campaign_plan_v2_structure,
 )
-from gate_v_evidence_completeness_v2 import gate_v_v2_validation_run_id
+from gate_v_evidence_completeness_v2 import (
+    evaluate_pre_holdout_evidence_v2,
+    gate_v_v2_validation_run_id,
+    validate_scoped_evidence_run_v2,
+)
 from validation_run import (
     VALIDATION_TYPE_MONTE_CARLO,
     VALIDATION_TYPE_PARAMETER_STABILITY,
     VALIDATION_TYPE_WALK_FORWARD,
+    ValidationRun,
 )
 
 __all__ = [
@@ -42,6 +55,16 @@ __all__ = [
     "validate_gate_v_campaign_manifest_v2_against_plan",
     "gate_v_campaign_manifest_v2_to_record",
     "gate_v_campaign_manifest_v2_from_record",
+    "derive_gate_v_campaign_v2_marker_status",
+    "validate_gate_v_campaign_manifest_v2_marker_status",
+    "apply_gate_v_campaign_manifest_v2_command",
+    "ManifestTransitionError",
+    "Start",
+    "SetRunning",
+    "AttachWalkForward",
+    "AttachMonteCarlo",
+    "AttachParameterStability",
+    "MarkTechnicalFailure",
 ]
 
 GATE_V_CAMPAIGN_MANIFEST_V2_SEMANTICS_VERSION = "gate_v_campaign_manifest_v2"
@@ -328,3 +351,238 @@ def gate_v_campaign_manifest_v2_from_record(record: dict) -> GateVCampaignManife
     manifest = GateVCampaignManifestV2(**record)
     validate_gate_v_campaign_manifest_v2_structure(manifest)
     return manifest
+
+
+# ---------------------------------------------------------------------------------------------
+# Slice D3 — statut posé par les marqueurs (PUR : les preuves sont des ValidationRun DÉJÀ chargées)
+# ---------------------------------------------------------------------------------------------
+
+
+def _referenced_evidence(manifest: GateVCampaignManifestV2, evidence_by_validation_run_id) -> dict:
+    """Vue FILTRÉE : uniquement les preuves que le Manifest référence. Une preuve présente dans le mapping
+    mais non référencée n'a aucune autorité (écrite, jamais adoptée) ; une référence sans preuve fournie est un
+    Manifest « en avance sur les preuves » (ADR 0025 §21.6) : erreur fermée, jamais un simple statut incomplet."""
+    if not isinstance(evidence_by_validation_run_id, Mapping):
+        raise ValueError("evidence_by_validation_run_id doit être un mapping de ValidationRun.")
+    references = [
+        manifest.walk_forward_validation_run_id, manifest.monte_carlo_validation_run_id,
+        *manifest.parameter_stability_validation_run_ids_by_fold.values(),
+    ]
+    view = {}
+    for run_id in (reference for reference in references if reference is not None):
+        # Lecture UNIQUE : une valeur `None` (ou qui n'est pas une ValidationRun) est une preuve ABSENTE, comme
+        # pour D1 ; un simple test d'appartenance laisserait un Manifest « en avance » obtenir un statut.
+        proof = evidence_by_validation_run_id.get(run_id)
+        if not isinstance(proof, ValidationRun):
+            raise ValueError(f"La preuve référencée {run_id!r} est absente des preuves fournies.")
+        view[run_id] = proof
+    return view
+
+
+def derive_gate_v_campaign_v2_marker_status(
+    plan: GateVCampaignPlanV2, manifest: GateVCampaignManifestV2,
+    evidence_by_validation_run_id: Mapping[str, ValidationRun],
+) -> str:
+    """Statut dérivé des MARQUEURS du Manifest et des seules preuves qu'il RÉFÉRENCE (jamais d'E/S, jamais de
+    verdict). Valide d'abord le Manifest et sa liaison au Plan V2, puis, par priorité : motif d'échec
+    technique -> `TECHNICAL_FAILURE` ; `running` -> `RUNNING` ; non démarrée -> `READY_FOR_EXECUTION` ; sinon la
+    complétude des preuves référencées, jugée par D1 (`evaluate_pre_holdout_evidence_v2`, autorité unique)
+    -> `EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT` ou `EVIDENCE_INCOMPLETE`. Ne connaît ni la sentinelle
+    d'échec technique ni la valeur effective (tranches suivantes).
+
+    Exception explicite : un Manifest portant un motif d'échec technique est TERMINAL et reste dérivable SANS
+    inspecter aucune preuve — l'échec peut précisément venir d'une preuve absente, illisible ou corrompue, et
+    exiger ces preuves rendrait l'échec inenregistrable."""
+    validate_gate_v_campaign_manifest_v2_against_plan(manifest, plan)
+    if manifest.technical_failure_reason is not None:
+        return "TECHNICAL_FAILURE"
+    referenced = _referenced_evidence(manifest, evidence_by_validation_run_id)
+    by_markers = _statuses_compatible_with_markers(manifest)
+    if len(by_markers) == 1:
+        return next(iter(by_markers))
+    facts = evaluate_pre_holdout_evidence_v2(plan, referenced)
+    return _EVIDENCE_COMPLETE_STATUS if facts.pre_holdout_evidence_complete else "EVIDENCE_INCOMPLETE"
+
+
+def validate_gate_v_campaign_manifest_v2_marker_status(
+    manifest: GateVCampaignManifestV2, plan: GateVCampaignPlanV2,
+    evidence_by_validation_run_id: Mapping[str, ValidationRun],
+) -> None:
+    """Le statut PERSISTÉ doit être exactement le statut dérivé des marqueurs et des preuves référencées
+    (autocohérence du fichier ; réutilisable après rechargement des preuves)."""
+    derived = derive_gate_v_campaign_v2_marker_status(plan, manifest, evidence_by_validation_run_id)
+    if manifest.status != derived:
+        raise ValueError(f"Statut persisté {manifest.status!r} différent du statut dérivé {derived!r}.")
+
+
+# ---------------------------------------------------------------------------------------------
+# Slice D3 — six commandes PURES (ensemble fermé, ADR 0025 §21.8) et leur application
+# ---------------------------------------------------------------------------------------------
+
+
+class ManifestTransitionError(ValueError):
+    """Transition refusée : mauvaise transition, révision périmée, remplacement d'une référence ou commande
+    interdite en état terminal. Jamais une erreur de système de fichiers (celles-ci appartiennent à la
+    persistance, tranche suivante)."""
+
+
+@dataclass(frozen=True)
+class Start:
+    """Démarre la campagne (`execution_started = True`)."""
+
+
+@dataclass(frozen=True)
+class SetRunning:
+    """Pose `running` (`True` avant une phase coûteuse ; `False` pour un arrêt coopératif)."""
+
+    running: bool
+
+
+@dataclass(frozen=True)
+class AttachWalkForward:
+    """Rattache la preuve Walk-Forward et efface `running` dans la même nouvelle version."""
+
+    run_id: str
+
+
+@dataclass(frozen=True)
+class AttachMonteCarlo:
+    """Rattache la preuve Monte-Carlo (Walk-Forward déjà rattachée) et efface `running`."""
+
+    run_id: str
+
+
+@dataclass(frozen=True)
+class AttachParameterStability:
+    """Rattache la preuve Parameter Stability d'un fold attendu (Walk-Forward déjà rattachée) et efface
+    `running`."""
+
+    fold_id: str
+    run_id: str
+
+
+@dataclass(frozen=True)
+class MarkTechnicalFailure:
+    """Enregistre un échec technique (état terminal) et efface `running`."""
+
+    reason: str
+
+
+# `type(command) in` : une sous-classe d'une commande n'est jamais une commande.
+_COMMAND_TYPES = (
+    Start, SetRunning, AttachWalkForward, AttachMonteCarlo, AttachParameterStability, MarkTechnicalFailure,
+)
+
+
+def _evolve(manifest: GateVCampaignManifestV2, **changes) -> GateVCampaignManifestV2:
+    """Nouveau Manifest = ancien + `changes` (le mapping Parameter Stability est recopié, jamais aliasé)."""
+    values = {field.name: getattr(manifest, field.name) for field in fields(GateVCampaignManifestV2)}
+    values.update(changes)
+    return GateVCampaignManifestV2(**values)
+
+
+def _attach_changes(plan, manifest, command, evidence_by_validation_run_id):
+    """Champs modifiés par un `Attach…`, ou `None` si la même référence est déjà rattachée (idempotence).
+    Une preuve est rattachable si elle est présente, de l'identifiant déterministe et « scoped » (D1) ; sa
+    COMPLÉTUDE n'est pas une condition d'adoption (elle relève de la dérivation du statut)."""
+    run_id = command.run_id
+    if not _is_non_empty_str(run_id):
+        raise ValueError("run_id doit être une chaîne non vide.")
+    command_type = type(command)
+    if command_type is AttachWalkForward:
+        validation_type, fold_id = VALIDATION_TYPE_WALK_FORWARD, None
+        current = manifest.walk_forward_validation_run_id
+    else:
+        if manifest.walk_forward_validation_run_id is None:
+            raise ManifestTransitionError("La preuve Walk-Forward doit être rattachée en premier.")
+        if command_type is AttachMonteCarlo:
+            validation_type, fold_id = VALIDATION_TYPE_MONTE_CARLO, None
+            current = manifest.monte_carlo_validation_run_id
+        else:
+            validation_type, fold_id = VALIDATION_TYPE_PARAMETER_STABILITY, command.fold_id
+            if not _is_non_empty_str(fold_id) or fold_id not in plan.expected_fold_ids:
+                raise ValueError(f"Fold Parameter Stability {fold_id!r} étranger aux folds attendus.")
+            current = manifest.parameter_stability_validation_run_ids_by_fold.get(fold_id)
+    if current is not None:
+        if current == run_id:
+            return None
+        raise ManifestTransitionError("Une référence déjà rattachée ne se remplace jamais.")
+    if run_id != gate_v_v2_validation_run_id(plan, validation_type, fold_id=fold_id):
+        raise ValueError("run_id n'est pas l'identifiant déterministe de cette preuve pour cette campagne.")
+    if validate_scoped_evidence_run_v2(plan, run_id, validation_type, evidence_by_validation_run_id) is None:
+        raise ValueError(f"La preuve {run_id!r} n'est pas dans les preuves fournies.")
+    if command_type is AttachWalkForward:
+        return {"walk_forward_validation_run_id": run_id, "running": False}
+    if command_type is AttachMonteCarlo:
+        return {"monte_carlo_validation_run_id": run_id, "running": False}
+    return {
+        "parameter_stability_validation_run_ids_by_fold": {
+            **manifest.parameter_stability_validation_run_ids_by_fold, fold_id: run_id},
+        "running": False,
+    }
+
+
+def _command_changes(plan, manifest, command, evidence_by_validation_run_id):
+    """Champs modifiés par la commande, ou `None` si elle est idempotente. Lève `ManifestTransitionError` pour une
+    transition interdite, `ValueError` pour une charge utile invalide ou une preuve étrangère."""
+    command_type = type(command)
+    failed = manifest.technical_failure_reason is not None
+    if command_type is MarkTechnicalFailure:
+        if not _is_non_empty_str(command.reason):
+            raise ValueError("reason doit être une chaîne non vide.")
+        if not manifest.execution_started:
+            raise ManifestTransitionError("Un échec technique exige une campagne démarrée.")
+        if failed:
+            if command.reason == manifest.technical_failure_reason:
+                return None
+            raise ManifestTransitionError("Un échec technique déjà enregistré ne change jamais de motif.")
+        return {"technical_failure_reason": command.reason, "running": False}
+    if command_type is SetRunning and not isinstance(command.running, bool):
+        raise ValueError("running doit être un booléen.")
+    if failed:
+        raise ManifestTransitionError("TECHNICAL_FAILURE est terminal : aucune autre commande n'est acceptée.")
+    if command_type is Start:
+        return None if manifest.execution_started else {"execution_started": True}
+    if not manifest.execution_started:
+        raise ManifestTransitionError("La commande exige une campagne démarrée.")
+    if command_type is SetRunning:
+        return None if command.running == manifest.running else {"running": command.running}
+    return _attach_changes(plan, manifest, command, evidence_by_validation_run_id)
+
+
+def apply_gate_v_campaign_manifest_v2_command(
+    plan: GateVCampaignPlanV2, manifest: GateVCampaignManifestV2, command,
+    evidence_by_validation_run_id: Mapping[str, ValidationRun], *, expected_revision: int,
+) -> GateVCampaignManifestV2:
+    """Applique UNE commande à un Manifest, sans E/S, et retourne le Manifest résultant. Ordre : liaison au plan
+    -> `expected_revision` (entier non booléen, égal à la révision du Manifest, même pour une commande qui serait
+    idempotente ; aucun rebase) -> commande de l'ensemble fermé -> statut persisté de l'entrée cohérent avec ses
+    preuves référencées (sauf `MarkTechnicalFailure`, indépendante des preuves) -> transition -> statut dérivé -> `manifest_revision + 1` exactement. Commande
+    idempotente : le MÊME Manifest est retourné, révision inchangée. Le Manifest d'entrée, le plan et les preuves
+    ne sont jamais modifiés ; le résultat n'alias aucun d'eux."""
+    validate_gate_v_campaign_manifest_v2_against_plan(manifest, plan)
+    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+        raise ValueError("expected_revision doit être un entier non booléen >= 0.")
+    if expected_revision != manifest.manifest_revision:
+        raise ManifestTransitionError(
+            f"Révision périmée : attendue {expected_revision}, Manifest à {manifest.manifest_revision}.")
+    if type(command) not in _COMMAND_TYPES:
+        raise ValueError("command doit être l'une des six commandes du Manifest V2.")
+    if type(command) is not MarkTechnicalFailure:
+        # `MarkTechnicalFailure` est la SEULE commande qui ne dépend d'aucune preuve référencée (ni de leur
+        # présence ni de leur validité) : un échec technique peut venir d'une preuve inutilisable. Toutes les
+        # autres commandes restent fail-closed sur le statut persisté et les preuves référencées.
+        validate_gate_v_campaign_manifest_v2_marker_status(manifest, plan, evidence_by_validation_run_id)
+    changes = _command_changes(plan, manifest, command, evidence_by_validation_run_id)
+    if changes is None:
+        return manifest
+    candidate = _evolve(manifest, **changes)
+    by_markers = _statuses_compatible_with_markers(candidate)
+    provisional = "EVIDENCE_INCOMPLETE" if "EVIDENCE_INCOMPLETE" in by_markers else next(iter(by_markers))
+    candidate = _evolve(candidate, status=provisional)
+    result = _evolve(
+        candidate, status=derive_gate_v_campaign_v2_marker_status(plan, candidate, evidence_by_validation_run_id),
+        manifest_revision=manifest.manifest_revision + 1,
+    )
+    validate_gate_v_campaign_manifest_v2_marker_status(result, plan, evidence_by_validation_run_id)
+    return result
