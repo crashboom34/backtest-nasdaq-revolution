@@ -1488,6 +1488,286 @@ réservés refusés non nuls ; V1/V2 mutuellement refusés par les chargeurs ; a
 `ValidationAssessment`, `GateVPolicyAssessment`, exécution WF/MC/PS V2, policy concrète de seuils,
 campagne réelle, Champion, modification de `gate_v_campaign.py`.
 
+## Décision 22 — `FinalHoldoutAccessClaim` : cœur pur et acquisition exclusive (Slice E, 2026-10-11)
+
+**Statut au 2026-10-11** : **E1 = IMPLEMENTED + TESTED localement, NON COMMITTED** ; **E2 = SPECIFIED, NOT
+IMPLEMENTED** ; **E3 = DESIGN NOT LOCKED**. `GATE V` NON PASSÉE, `FINAL_HOLDOUT` NON ACCÉDÉ **par `AF-V-07`** (un accès antérieur et distinct est documenté
+dans `DOMAIN_MODEL.md` §12 ; **aucune fraîcheur de holdout n'est établie par cette Décision**, voir 22.2).
+
+**Portée de cette Décision** : elle précise, sans les contredire, les Décisions 9 (primitif exclusif), 10
+(identité et hash du Claim), 11 (acquisition, course, crash), 13 (extension additive de `HoldoutAccessEvent`
+et du Manifest), 20 (canonicalisation, Plan V2) et 21 (Manifest V2, précondition 21.7, verrou 21.8). **Les
+formules de `claim_id` et de `claim_content_hash` sont exclusivement celles de la Décision 10 ; aucune
+seconde définition n'existe ici ni ne doit exister dans le code.** Aucune formule d'identité ou de hash
+historique n'est modifiée.
+
+### 22.1 — Découpage et périmètre
+
+- **E1** — `gate_v_final_holdout_claim.py` : cœur **pur**, aucune E/S, aucune horloge, aucun accès marché,
+  aucun appel moteur. Dépendances : bibliothèque standard (`hashlib`, `json`, `re`, `dataclasses`,
+  `datetime`) et `gate_v_campaign_plan_v2` uniquement. Il ne modifie aucun module existant ; aucun module
+  existant ne l'importe.
+- **E2** — `gate_v_final_holdout_claim_acquisition.py` : acquisition exclusive durable et chargeur d'audit en
+  lecture seule. Elle ne modifie qu'**un** fichier existant, `atomic_json_store.py` (22.8, strictement
+  additif).
+- **E3** — `run_gate_v_final_holdout_validation` (Décision 13) : **hors Slice E, design non verrouillé.**
+  Seules les obligations de 22.12 le lient.
+- **Interdits en Slice E** : toute lecture de `FINAL_HOLDOUT` ou de donnée de marché ; tout appel à
+  `run_oos_validation` ou au moteur ; tout `HoldoutAccessEvent` ; toute écriture des champs 13-17 du Manifest ;
+  toute modification du Plan V2, du Manifest, de V1 ou de `validation_oos` ; toute suppression, tout
+  renommage, toute réparation ou réécriture d'un Claim, d'un verrou ou d'une sentinelle.
+- **Instancier un `FinalHoldoutAccessClaim` n'autorise rien** : l'autorité d'exclusivité est la création
+  exclusive du fichier (Décision 9), jamais l'objet en mémoire (cf. 21.10).
+
+### 22.2 — Portée de l'exclusivité et contrôle d'exposition obligatoire avant E3
+
+L'exclusivité est **par campagne** : un seul Claim valide existe par `campaign_id`. **Elle ne prouve aucune
+fraîcheur de la donnée `FINAL_HOLDOUT`.** Un registre transversal n'est volontairement pas introduit en E1/E2.
+
+Les artefacts V2 ne relient pas les campagnes entre elles :
+- un autre `ResearchRun`, une autre stratégie, un autre `split_plan_id` ou un autre snapshot produit un autre
+  scope, donc une autre campagne et un autre Claim ;
+- `validation_oos` ne limite pas le nombre d'accès ;
+- une même période calendaire peut avoir été exposée sous des identifiants différents, ou par des exécutions
+  jamais enregistrées (précédents documentés : `DOMAIN_MODEL.md` §12, `GATE DATA` et AF-V-01).
+
+**L'absence de `HoldoutAccessEvent`, de Claim ou de campagne n'est jamais une preuve que le holdout est
+vierge** (`DOMAIN_MODEL.md` §18 point 7). `has_holdout_access_events()` n'établit qu'un constat factuel sur
+un répertoire d'audit donné.
+
+**Contrôle d'exposition du holdout** — artefact à spécifier avant E3, hors Slice E. Exigences minimales :
+1. Il s'exécute **avant** la séquence d'acquisition (Décision 11) : le Claim consomme le droit de façon
+   irréversible, la vérification doit donc le précéder.
+2. Il est lié à `campaign_id`, `dataset_snapshot_id`, `split_plan_id` et `split_plan_fingerprint`.
+3. Il énumère les expositions par **données et fenêtre calendaire** (comparaison de bornes avec fuseau), pas
+   seulement par identifiant :
+   - tous les `HoldoutAccessEvent` de tout plan partageant le snapshot ou chevauchant la fenêtre ;
+   - tous les Claims et campagnes V2 connus, les campagnes V1 avec OOS et les `ValidationRun` de type OOS ;
+   - les snapshots distincts couvrant la même période de marché.
+4. Tout artefact illisible ou invalide d'un répertoire d'audit est un **échec**, jamais ignoré
+   (`list_holdout_access_events()` ignore silencieusement les JSON invalides : elle ne peut pas seule fonder
+   ce contrôle).
+5. Les expositions non enregistrées (scripts, notebooks, grands livres de trades) et les décisions humaines
+   prises après exposition sont **déclarées par attestation humaine nominative**.
+6. Il enregistre le nombre de stratégies, de `ResearchRun` et de campagnes évalués contre ce holdout
+   (comptabilité de multiple testing ; la correction statistique elle-même est hors périmètre).
+7. Il classe dans un ensemble fermé : `FRESH_UNEXPOSED_DECLARED`, `RETROSPECTIVE_EXPOSED`, `UNDETERMINED`.
+   `FRESH_UNEXPOSED_DECLARED` est une **déclaration**, jamais une preuve.
+8. Il est immuable (création exclusive) et son hash est référencé par l'artefact d'audit d'E3. Le porteur exact
+   (champ additionnel de l'événement canonique, ce qui exigerait un amendement additif de la Décision 13, ou
+   artefact distinct) reste à spécifier avec E3. Le schéma du Claim (22.3) ne le porte pas.
+
+E2 n'applique pas ce contrôle ; il relève d'E3 (22.12).
+
+### 22.3 — Schéma du Claim : 14 clés exactes, aucune autre
+
+Fichier : `<campaign_dir>/final_holdout_access_claim.json` (Décision 10). Toutes les valeurs sont des `str`
+JSON (type exact : ni booléen, ni nombre, ni `null`, ni sous-classe de `str`), non vides.
+
+| # | Clé | Contrainte | Provenance |
+|---|---|---|---|
+| 1 | `claim_semantics_version` | `== "final_holdout_access_claim_v1"` | constante `FINAL_HOLDOUT_ACCESS_CLAIM_SEMANTICS_VERSION` |
+| 2 | `claim_id` | SHA-256 hex minuscule, 64 car. | Décision 10 |
+| 3 | `claim_content_hash` | SHA-256 hex minuscule, 64 car. | Décision 10 (hors de sa propre préimage) |
+| 4 | `campaign_id` | `gate_v_v2_` + 64 hex minuscules | Plan V2 |
+| 5 | `preregistration_id` | hex64 | Plan V2 |
+| 6 | `preregistration_content_hash` | hex64 | Plan V2 |
+| 7 | `campaign_protocol_fingerprint` | hex64 | Plan V2 |
+| 8 | `research_run_id` | str non vide | Plan V2 |
+| 9 | `research_run_content_hash` | hex64 | Plan V2 |
+| 10 | `dataset_snapshot_id` | str non vide | Plan V2 |
+| 11 | `split_plan_id` | str non vide | Plan V2 |
+| 12 | `split_plan_fingerprint` | hex64 | Plan V2 |
+| 13 | `assessment_semantics_version` | str non vide | Plan V2 |
+| 14 | `created_at` | format exact ci-dessous, **hors des deux hashes** | argument explicite |
+
+Les clés 4 à 13 sont toutes déjà portées par `GateVCampaignPlanV2` : le Claim est une **projection pure du
+plan**, plus `created_at`. `policy_git_sha` et les identités de policy n'y figurent pas et restent
+transitifs via `preregistration_id`. **La Décision 10 fixe la préimage des deux hashes ; le schéma à 14 clés
+est fixé par la présente Décision.**
+
+**Format exact de `created_at`** (E1 et ADR sont alignés) : instant ISO-8601 **avec fuseau explicite**,
+conforme à l'expression `AAAA-MM-JJTHH:MM:SS[.f]` où la fraction `.f` compte de 1 à 6 chiffres et est
+optionnelle, suivie de `Z` ou de `±HH:MM`. Séparateur `T` obligatoire ; secondes obligatoires ; chiffres
+**ASCII** uniquement ; aucun espace ni saut de ligne en tête ou en queue. Sont **refusés** : l'absence de
+fuseau, `±HHMM`, l'heure sans secondes, la date seule, un espace comme séparateur, un décalage hors plage
+(par exemple `+24:00`), tout instant que `datetime.fromisoformat` refuse. La valeur est **conservée
+verbatim** (jamais normalisée ni réécrite). Les lettres `T` et `Z` sont **majuscules** (`t` et `z` sont
+refusés), une valeur composée d'espaces est refusée, et `Z` suppose Python 3.11 ou plus. **Limite connue (MINOR,
+champ d'audit uniquement)** : la plage des décalages est celle que `datetime.fromisoformat` accepte ; E1 ne la
+restreint pas davantage (par exemple `+00:60` est accepté). Exemples valides : `2026-10-11T10:00:00Z`,
+`2026-10-11T10:00:00+00:00`, `2027-01-02T14:30:00.123456+02:00` ; la valeur par défaut d'E2
+(`datetime.now(timezone.utc).isoformat()`) est conforme.
+
+`created_at` est une métadonnée d'audit **non cryptographique** : il ne prouve pas la chronologie, une
+modification du fichier ou de l'horloge système suffit à l'altérer. Il n'entre dans aucun hash.
+
+### 22.4 — Contrat E1 (pur)
+
+- Constante `FINAL_HOLDOUT_ACCESS_CLAIM_SEMANTICS_VERSION = "final_holdout_access_claim_v1"` ; dataclass
+  `FinalHoldoutAccessClaim` immuable (`frozen`) à 14 champs dans l'ordre de 22.3.
+- `compute_final_holdout_access_claim_id(*, <11 champs de la préimage>)` et
+  `compute_final_holdout_access_claim_content_hash(*, claim_id, <11 champs de la préimage>)` appliquent la
+  Décision 10 avec la canonicalisation de la Décision 20.3 (`sort_keys=True`, séparateurs compacts,
+  `ensure_ascii=False`, `allow_nan=False`) ; ils refusent tout champ absent, vide ou non `str`.
+- `build_final_holdout_access_claim(plan, *, created_at)` valide le plan
+  (`validate_gate_v_campaign_plan_v2_structure`) et `created_at`, projette les 10 champs de liaison, calcule
+  les deux hashes et revalide le résultat. `created_at` est **obligatoire** ; le builder ne lit aucune
+  horloge. Mêmes entrées, même sortie.
+- `validate_final_holdout_access_claim_structure(claim)` impose : type exact, 14 champs `str` non vides,
+  version sémantique exacte, formes `campaign_id` et hex64, format de `created_at`, **recalcul des deux
+  hashes** depuis la préimage. Un Claim auto-cohérent mais sans lien avec un plan est valide ici.
+- `validate_final_holdout_access_claim_against_plan(claim, plan)` revalide la structure du Claim et celle du
+  plan, puis exige l'égalité des 10 champs de liaison. **Tout chargement d'un Claim existant par E2 doit
+  appeler cette fonction.** Elle ne vérifie aucune source (22.5).
+- `final_holdout_access_claim_to_record(claim)` (14 clés, ordre normatif ; refuse un Claim invalide) et
+  `final_holdout_access_claim_from_record(record)` (`dict` exact, clés exactement les 14, aucune tolérance,
+  hashes recalculés).
+- Erreurs : `ValueError` pour toute valeur invalide ; une erreur d'appel (argument obligatoire manquant ou
+  inattendu, dont `created_at`) lève `TypeError` avant tout contrôle. La mention « déterministe » de la Décision 11 étape 5 s'entend
+  **hors `created_at`**.
+
+### 22.5 — Frontière de confiance des sources (contrat E2)
+
+`validate_gate_v_campaign_plan_v2_sources` recalcule depuis les objets qu'on lui fournit : il prouve la
+**cohérence**, pas la **provenance persistée**. Une `GateVPreRegistration` construite en mémoire, jamais
+sauvegardée, pourrait contourner l'unicité « une policy par scope » (Décision 8). E2 **ne reçoit donc aucun
+objet source** ; elle charge, avec les chargeurs stricts existants :
+1. `plan` = `load_gate_v_campaign_plan_v2(<campaign_dir>/plan.json)`, avec `campaign_dir.name ==
+   plan.campaign_id`.
+2. `preregistration` = `load_gate_v_preregistration(preregistration_path)`. Le nom du fichier doit être
+   exactement `<scope_key>.json` et l'agencement doit respecter la Décision 16 : `<campaign_dir>.parent.name ==
+   "campaigns"` et `preregistration_path == <campaign_dir>.parent.parent / "preregistrations" /
+   "<scope_key>.json"` (le répertoire `preregistrations/` est frère de `campaigns/`). La Décision 16 ne donnait
+   cette disposition qu'à titre conceptuel ; la présente Décision en fait une règle contraignante d'E2, qui
+   ancre la préenregistrement à son emplacement exclusif par scope.
+3. `research_run` = `load_research_run(research_run_path)` ; `None` est un refus.
+4. `split_plan` = `load_dataset_split_plan(split_plan_path, strict=True)` ; `None` **ou toute `ValueError`**
+   (le mode strict ne rattrape que `TypeError` et `KeyError`) est un refus.
+5. `policy` = `load_gate_v_validation_policy(policy_path)`.
+
+Puis `validate_gate_v_campaign_plan_v2_sources(...)` est appelée **sans modification**.
+- **Provenance** : le contenu des sources est ancré par les hashes pinnés dans la préenregistrement, elle-même
+  épinglée par `plan.json` (`preregistration_id`, `preregistration_content_hash`).
+- **Policy** : la provenance Git est historique (blob au `policy_git_sha` pinné, Décision 20.10). Le fichier de
+  policy du working tree doit produire un hash égal à `policy_content_hash` ; sinon la précondition échoue
+  **avant** toute création (conservateur).
+- **Données de marché** : E2 ne vérifie pas le contenu du fichier de marché contre `dataset_snapshot_id`
+  (22.12).
+
+### 22.6 — Séquence E2 (Décisions 11 et 21.7, précisées)
+
+Étapes 1 à 5 : aucune création ; leurs erreurs se propagent telles quelles (`ValueError`,
+`GitProvenanceError`, `OSError`) et aucun fichier n'a été créé par l'appel.
+1. Arguments valides ; chargement du plan (22.5-1).
+2. Chargement et ancrage de la préenregistrement (22.5-2).
+3. Chargement des autres sources (22.5-3 à 5).
+4. `validate_gate_v_campaign_plan_v2_sources`.
+5. `manifest_before = assert_gate_v_pre_holdout_evidence_complete(plan, campaign_dir)` : l'**unique** prédicat
+   de la Décision 21.7 ; aucune version allégée n'existe.
+6. L'horloge est lue **une seule fois** si `created_at is None`
+   (`datetime.now(timezone.utc).isoformat()`) ; le Claim est construit par E1 et son record fixé.
+7. **Aucun test d'existence préalable.** Création exclusive durable :
+   `save_exclusive(path, record, kind=…, durable=True)`.
+   - `FileExistsError` devient `FinalHoldoutClaimAlreadyConsumedError` ; le Claim existant n'est ni lu ni
+     inspecté, sans retry.
+   - `ExclusiveCreationIncompleteError` devient `FinalHoldoutClaimPostAcquisitionError`.
+   - Toute autre `OSError` à l'ouverture se propage telle quelle : rien n'a été créé.
+8. Relecture stricte (`from_record`), `against_plan`, et égalité du record relu avec le record voulu (sur le
+   record parsé, jamais sur les octets : sous Windows le mode texte peut écrire `\r\n`).
+8 bis. `manifest_after = assert_gate_v_pre_holdout_evidence_complete(...)` doit être **égal** à
+   `manifest_before`. Cette étape est la revérification de la sentinelle et du verrou exigée « après
+   l'acquisition du Claim et avant toute lecture de marché » (21.8, qui la désigne par « Décision 11, étape
+   8 » ; la numérotation de 11 reste inchangée).
+9. Retour du Claim, uniquement si 1 à 8 bis ont réussi.
+
+Toute exception des étapes 8 et 8 bis lève `FinalHoldoutClaimPostAcquisitionError` (chaînée). **Après toute
+exception d'E2, aucun accès au marché n'est autorisé.** Un Claim créé reste consommé pour toujours.
+
+### 22.7 — État du fichier Claim
+
+Le fichier existant n'est jamais classé « absent » : valide, vide, tronqué ou corrompu, il donne
+`FinalHoldoutClaimAlreadyConsumedError` à l'acquisition. Le chargeur d'audit `load_final_holdout_access_claim(
+plan, campaign_dir)` est en lecture seule : `FileNotFoundError` si absent, `ValueError` si invalide, jamais
+`None`, aucune réparation ni suppression.
+
+### 22.8 — Durabilité : `save_exclusive(path, data, kind, *, durable=False)`
+
+- **`durable=False`** : comportement historique **identique**, exceptions comprises.
+- **`durable=True`** :
+  - avant toute création : le payload est encodé en UTF-8 (une erreur lève avant création) et, sous POSIX,
+    une sonde `fsync` du répertoire parent est effectuée (un échec lève avant création) ;
+  - création `os.open(O_CREAT|O_EXCL|O_WRONLY)` ;
+  - écriture, `flush`, `os.fsync` du fichier, puis `fsync` du répertoire parent sous POSIX ;
+  - toute exception après l'ouverture réussie lève `ExclusiveCreationIncompleteError(OSError)`, chaînée,
+    descripteur fermé, **fichier jamais supprimé**.
+- **Limites (à qualifier avant toute exécution réelle)** :
+  - Windows : `fsync` appelle `FlushFileBuffers` sur le fichier ; la durabilité de l'entrée de répertoire
+    repose sur le journal NTFS et n'est pas démontrable depuis Python ;
+  - Linux local : garantie du noyau pour le fichier et le répertoire, sous réserve de l'absence de cache
+    d'écriture matériel mensonger ;
+  - volume bloc persistant OCI : **non qualifié** ; une qualification réelle est obligatoire avant usage ;
+  - NFS, SMB, object-store : **non supportés**, sans détection automatique (Décision 9) ;
+  - `fsync` ne garantit pas la survie à toutes les pannes matérielles.
+
+### 22.9 — Retry et gouvernance
+
+Une création ne se réessaie pas : si le chemin existe, la tentative échoue fermée. Aucun retry automatique
+n'est autorisé après une exception d'E2. La récupération d'un Claim « consommé sans accès enregistré » est
+une **décision humaine** (matrice de la Décision 11) dont le protocole reste à spécifier avant toute
+exécution réelle. Une erreur transitoire (antivirus, lecture bloquée) après la création peut consommer le
+droit sans accès marché : risque accepté.
+
+### 22.10 — Concurrence : fenêtres résiduelles non fermables par E2
+
+- Entre les étapes 5 et 7 : un changement du Manifest, une sentinelle ou un verrou est détecté à l'étape 8 bis ;
+  le droit est consommé sans accès, ce qui est sûr.
+- Entre le retour d'E2 et la lecture marché d'E3 : non fermable. E3 refait une vérification locale
+  (sentinelle, verrou) immédiatement avant la lecture.
+- Un écrivain hors API ou une suppression manuelle du Claim reste hors modèle de menace (Décision 11).
+
+### 22.11 — Compatibilité
+
+V1 est inchangé. Le Manifest garde ses champs 13-17 à `None` et n'importe pas les modules du Claim.
+`classify_gate_v_campaign_dir` ignore le fichier Claim. Les cinq statuts V2 conservent leur sens. Le verrou
+`manifest.update.lock` n'est pas un Claim (21.8).
+
+### 22.12 — Obligations d'E3 (design non verrouillé)
+
+1. Exécuter le contrôle d'exposition de 22.2 **avant** E2.
+2. Appeler **lui-même** E2 ; ne jamais accepter un Claim fourni en argument, ni relu d'un fichier existant,
+   comme autorisation.
+3. Rester le seul importateur d'E2 (test AST) et le seul chemin vers `run_oos_validation` pour la voie V2
+   (`run_oos_validation` reste publique : l'exclusivité tient à cette discipline, non à son type).
+4. Vérifier le contenu des données de marché contre `dataset_snapshot_id` : **aucune lecture du fichier de
+   marché avant la création du Claim** (Décision 2 : rien du `FINAL_HOLDOUT` avant l'étape 8), puis une
+   vérification portant sur **les octets effectivement transmis au moteur** (même lecture, pas une relecture)
+   avant toute exécution. L'ordonnancement exact est à verrouiller avec E3.
+5. Refaire la vérification locale de 22.10.
+6. Produire l'unique `HoldoutAccessEvent` canonique (Décision 13), écrire le miroir d'audit du Manifest
+   (extension monotone) et traiter l'état « Claim consommé sans accès enregistré ». L'existence du Claim seule
+   ne prouve pas qu'un accès a eu lieu ; un crash entre la lecture et l'événement est traité comme accédé.
+
+### 22.13 — Tests exigés
+
+- **E1 (démontrables par tests unitaires)** : 14 champs dans l'ordre ; version exacte ; vecteurs de hash
+  littéraux calculés hors du code testé ; exclusion de `created_at` des deux hashes ; chaque champ de liaison
+  modifie les deux hashes ; rejet de toute clé inconnue ou manquante, de tout type non `str`, des SHA-256
+  malformés, des `campaign_id` hors forme V2, des `created_at` invalides ou naïfs (y compris après reseal des
+  hashes) ; Claim auto-cohérent divergent du plan refusé par `against_plan` ; canonicalisation identique à celle
+  du Plan V2 et de la Slice B ; imports limités (AST), aucune E/S ni horloge ; aucun module historique ne
+  référence E1 ; aucun fichier créé.
+- **E2 (à spécifier en tests lors de son implémentation)** : refus avant création pour chaque source
+  falsifiée, non persistée ou mal ancrée, preuves incomplètes, sentinelle, verrou résiduel, champs réservés
+  non nuls ; deux puis huit **processus réels** synchronisés (exactement un gagnant) ; crash avant création,
+  après création avant écriture, pendant l'écriture, avant et après `fsync` ; échecs simulés de `fsync`,
+  d'espace disque, de permissions et de relecture ; Claim déjà présent (valide, vide, tronqué, corrompu) ;
+  sentinelle, verrou ou Manifest modifiés entre les deux appels D5 ; aucune lecture de marché ni suppression
+  de Claim (AST) ; `save_exclusive(durable=False)` inchangé ; suite complète verte.
+- **Qualification manuelle du volume cible (non démontrable par tests)** : contention `O_EXCL` multiprocessus
+  et comportement de `fsync` sur le vrai volume, avant toute exécution réelle. La survie à une panne
+  d'alimentation réelle n'est pas démontrable par les tests.
+
 ## Conséquences
 
 - **État réel initial** : `AF-V-07` = **DESIGN ACCEPTED / READY FOR IMPLEMENTATION** (2026-09-29,
@@ -1530,3 +1810,17 @@ campagne réelle, Champion, modification de `gate_v_campaign.py`.
   non encore inspecté ; contenu réel d'une future policy concrète (hors périmètre par
   construction) ; politique opérationnelle exacte de reprise manuelle après un crash mi-vol
   pendant l'unique accès holdout (décision humaine, pas technique).
+- **Mise à jour (2026-10-11, additive, ne remplace rien de ce qui précède)** — état réel des tranches :
+  - **Slices D1–D6 = INTEGRATED** dans `master` (commits `49ce253` D1, `bbb8aea` D2, `57878c8` D3, `2eeade4` D4,
+    `79941df` D5, `86b6473` D6). La mention « `Slice D` = SPEC LOCKED, NOT IMPLEMENTED » de la mise à jour du
+    2026-10-06 décrit l'état à cette date.
+  - **Slice E1 = IMPLEMENTED + TESTED localement, NON COMMITTED** : `gate_v_final_holdout_claim.py` et
+    `tests/test_gate_v_final_holdout_claim.py` (146 tests dédiés ; suite complète 3582/3582 mesurée localement
+    le 2026-10-11). Aucun Claim n'a été créé ni persisté.
+  - **Slice E2 = SPECIFIED (Décision 22), NOT IMPLEMENTED** ; **Slice E3 = DESIGN NOT LOCKED**, conditionnée
+    par le contrôle d'exposition de 22.2 et les obligations de 22.12.
+  - **La Décision 22 précise les Décisions 9, 10, 11, 13, 20 et 21 sans en modifier aucune formule.** L'unicité
+    du Claim est **par campagne** ; elle ne démontre **pas** la fraîcheur du `FINAL_HOLDOUT`, et l'absence de
+    `HoldoutAccessEvent` n'en est jamais la preuve.
+  - `AF-V-07` = IN PROGRESS, `AF-V-08` = DONE, `GATE V` NON PASSÉE, `FINAL_HOLDOUT` NON ACCÉDÉ pour `AF-V-07`
+    (un accès antérieur et distinct est documenté dans `DOMAIN_MODEL.md` §12 pour le plan IG demo d'AF-V-01).
