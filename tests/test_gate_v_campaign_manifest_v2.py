@@ -24,6 +24,7 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Mapping
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -852,6 +853,8 @@ _DECLARED_API = {
     "GATE_V_TECHNICAL_FAILURE_SENTINEL_UNREADABLE_REASON",
     # D4 : quatre issues de persistance distinctes
     "ManifestLockAcquisitionError", "ManifestWriteError", "ManifestWriteUncertainError", "ManifestLockReleaseError",
+    # D5 : l'UNIQUE prédicat normatif de la précondition pré-holdout (ADR 0025 §21.7)
+    "assert_gate_v_pre_holdout_evidence_complete",
 }
 
 
@@ -950,8 +953,11 @@ def test_the_module_contains_no_claim_holdout_assessment_or_later_slice_logic():
         # Claim / FINAL_HOLDOUT / assessments
         "FinalHoldoutAccessClaim", "HoldoutAccessEvent", "run_gate_v_final_holdout_validation",
         "ValidationAssessment", "GateVPolicyAssessment", "validation_oos", "engine",
-        # D5 : vérification publique des preuves persistées et précondition du Claim
-        "assert_gate_v_pre_holdout_evidence_complete",
+        "run_oos_validation", "FinalHoldoutAccess", "final_holdout_access_claim",
+        # D5 : la revalidation aux SOURCES (Git, PreRegistration, ResearchRun, split, policy) est une obligation du
+        # futur appelant du Claim (§21.7) ; le module Manifest ne reçoit, n'importe ni n'utilise rien de cela
+        "GateVPreRegistration", "ResearchRun", "DatasetSplitPlan", "GateVValidationPolicyVersion",
+        "validate_gate_v_campaign_plan_v2_sources", "repo_dir", "policy_path",
         # D6 : discrimination
         "classify_gate_v_campaign_dir", "GateVCampaignDiscriminationError",
         # Réimplémentation des prédicats de complétude : ils restent ceux de D1
@@ -965,10 +971,12 @@ def test_the_module_contains_no_claim_holdout_assessment_or_later_slice_logic():
         # aucun verrou exposé, aucune récupération ni nettoyage automatique de verrou (récupération manuelle gouvernée)
         "acquire_manifest_update_lock", "release_manifest_update_lock", "recover_manifest_update_lock",
         "clean_stale_manifest_update_lock", "mark_technical_failure_sentinel",
-        # D5 / D6
-        "assert_gate_v_pre_holdout_evidence_complete", "classify_gate_v_campaign_dir",
+        # D6, et aucune seconde variante du prédicat D5 : il n'en existe QU'UN, qui lève (jamais un booléen)
+        "classify_gate_v_campaign_dir", "is_pre_holdout_complete", "check_pre_holdout", "verify_pre_holdout",
+        "can_access_holdout", "is_pre_holdout_evidence_complete", "pre_holdout_evidence_is_complete",
     ):
         assert not hasattr(m2, name), name
+    assert [name for name in m2.__all__ if "pre_holdout" in name] == ["assert_gate_v_pre_holdout_evidence_complete"]
 
 
 def test_the_proof_identifier_function_and_the_campaign_id_formula_are_reused_never_redefined():
@@ -4092,3 +4100,757 @@ def test_an_unverifiable_ownership_right_before_the_write_never_writes_outside_t
         _update(plan, campaign_dir, m2.SetRunning(True))
     assert writes == [] and _files(campaign_dir) == before  # rien d'écrit, verrou libéré
     assert syscalls.operations()[-1] == "unlink"
+
+
+# ============================================================================================
+# Tranche 19 — D5 : `assert_gate_v_pre_holdout_evidence_complete` (ADR 0025 §21.7) — LECTURE SEULE
+#   preuves persistées rechargées du disque ; statut persisté == statut dérivé ; jamais une autorisation
+# ============================================================================================
+
+
+def _complete_campaign(root, plan, proofs):
+    """Campagne persistée COMPLÈTE, construite par l'API D4 : Start, WF, MC, PS de chaque fold, preuves au chemin
+    canonique `validations/<id>/validation_run.json`."""
+    ids = _ids(plan)
+    commands = [m2.AttachWalkForward(ids["wf"]), m2.AttachMonteCarlo(ids["mc"])]
+    commands += [m2.AttachParameterStability(fold, ids["ps"][fold]) for fold in plan.expected_fold_ids]
+    return _campaign_with(root, plan, proofs, commands)
+
+
+def _verify(plan, campaign_dir):
+    return m2.assert_gate_v_pre_holdout_evidence_complete(plan, campaign_dir)
+
+
+def _unchanged_by_failure(plan, campaign_dir, error=ValueError, match=None):
+    """La vérification échoue FERMÉ et ne laisse AUCUNE trace : mêmes fichiers, mêmes octets."""
+    before = _files(campaign_dir)
+    with pytest.raises(error, match=match):
+        _verify(plan, campaign_dir)
+    assert _files(campaign_dir) == before
+
+
+def test_d5_returns_the_exact_verified_persisted_manifest_and_changes_nothing(worlds, proofs, tmp_path):
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    persisted = m2.load_gate_v_campaign_manifest_v2(plan, campaign_dir)
+    assert persisted.status == _COMPLETE and persisted.manifest_revision == 6  # Start + WF + MC + 3 PS
+    before = _files(campaign_dir)
+    mtimes = {path: path.stat().st_mtime_ns for path in campaign_dir.rglob("*") if path.is_file()}
+    returned = _verify(plan, campaign_dir)
+    assert type(returned) is m2.GateVCampaignManifestV2 and returned == persisted  # ni booléen, ni jeton, ni enveloppe
+    assert _files(campaign_dir) == before
+    assert {path: path.stat().st_mtime_ns for path in campaign_dir.rglob("*") if path.is_file()} == mtimes
+    assert not (campaign_dir / _LOCK).exists() and not (campaign_dir / _SENTINEL).exists()
+    assert _verify(plan, str(campaign_dir)) == persisted  # `str` accepté comme `Path`, comme D4
+
+
+def test_d5_requires_the_exact_supplied_plan_and_the_canonical_campaign_directory(worlds, proofs, tmp_path):
+    plan, other = worlds.plan, worlds.other_plan
+    campaign_dir = _complete_campaign(tmp_path / "valid", plan, proofs)
+    for bad_plan in (worlds.v1_plan, None, {}, "plan", other):  # V1, non-plan, plan d'une AUTRE campagne
+        with pytest.raises(ValueError):
+            _verify(bad_plan, campaign_dir)
+    for bad_dir in (None, "", "   ", 5, ["x"], campaign_dir.parent, tmp_path):
+        with pytest.raises(ValueError):
+            _verify(plan, bad_dir)
+    misnamed = tmp_path / "misnamed" / "not_the_campaign_id"
+    misnamed.mkdir(parents=True)
+    for source in campaign_dir.iterdir():
+        if source.is_file():
+            (misnamed / source.name).write_bytes(source.read_bytes())
+    with pytest.raises(ValueError):  # le nom du dossier est celui du plan, jamais un autre
+        _verify(plan, misnamed)
+    tampered = dataclasses.replace(plan, campaign_id=_flip_last_hex_digit(plan.campaign_id))
+    with pytest.raises(ValueError):  # la structure du plan est revalidée (barrières internes)
+        _verify(tampered, campaign_dir)
+
+
+def test_d5_refuses_a_missing_or_foreign_persisted_plan(worlds, proofs, tmp_path):
+    plan, other = worlds.plan, worlds.other_plan
+    missing = _complete_campaign(tmp_path / "missing", plan, proofs)
+    (missing / "plan.json").unlink()
+    _unchanged_by_failure(plan, missing)
+    foreign = _complete_campaign(tmp_path / "foreign", plan, proofs)
+    (foreign / "plan.json").write_bytes(
+        (_campaign(tmp_path / "other", other) / "plan.json").read_bytes())  # bon dossier, plan d'une autre campagne
+    _unchanged_by_failure(plan, foreign)
+    garbled = _complete_campaign(tmp_path / "garbled", plan, proofs)
+    (garbled / "plan.json").write_text("{", encoding="utf-8")
+    _unchanged_by_failure(plan, garbled)
+
+
+def test_d5_refuses_an_absent_malformed_or_forged_persisted_manifest(worlds, proofs, tmp_path):
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    path = campaign_dir / "manifest.json"
+    good = path.read_bytes()
+    forged_records = (
+        {**_record(_initial(worlds.other_plan))},  # Manifest valide d'une autre campagne
+        {**json.loads(good), "final_holdout_claim_id": "claim_added_by_hand"},  # champ réservé non nul
+        {**json.loads(good), "manifest_semantics_version": "gate_v_campaign_manifest_v3"},
+        dataclasses.asdict(gate_v_campaign.build_gate_v_campaign_manifest(worlds.v1_plan)),  # V1, jamais de repli
+    )
+    path.unlink()
+    _unchanged_by_failure(plan, campaign_dir)  # absent
+    for content in ("", "{", "[]", "null", good.decode()[: len(good) // 2]):
+        path.write_text(content, encoding="utf-8")
+        _unchanged_by_failure(plan, campaign_dir)
+    for record in forged_records:
+        path.write_text(json.dumps(record), encoding="utf-8")
+        _unchanged_by_failure(plan, campaign_dir)
+
+
+def test_d5_refuses_every_campaign_that_is_not_started_and_stopped(worlds, proofs, tmp_path):
+    """§21.7 terme 3 : `execution_started` et NON `running`. Une campagne `READY_FOR_EXECUTION` ou `RUNNING` n'est
+    jamais complète avant la clôture, même si toutes les preuves existent déjà sur disque."""
+    plan = worlds.plan
+    ids = _ids(plan)
+    ready = _campaign(tmp_path / "ready", plan)
+    m2.create_gate_v_campaign_manifest_v2(plan, ready)
+    _persist(ready, *proofs.values())  # toutes les preuves sont là, mais la campagne n'est pas démarrée
+    _unchanged_by_failure(plan, ready)
+    running = _complete_campaign(tmp_path / "running", plan, proofs)
+    assert _update(plan, running, m2.SetRunning(True)).status == "RUNNING"
+    _unchanged_by_failure(plan, running)
+    assert _update(plan, running, m2.SetRunning(False)).status == _COMPLETE  # le même état, arrêté, repasse
+    assert _verify(plan, running).running is False
+    assert ids["wf"] == _verify(plan, running).walk_forward_validation_run_id
+
+
+def test_d5_refuses_a_technical_failure_marker_even_without_any_sentinel(worlds, proofs, tmp_path):
+    """§21.7 terme 4 : `technical_failure_reason` nul. Le marqueur seul suffit à refuser (sentinelle absente : état
+    hors modèle mais fermé), sans réparation ni mutation."""
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    failed = _step(plan, m2.load_gate_v_campaign_manifest_v2(plan, campaign_dir),
+                   m2.MarkTechnicalFailure("worker crashed"), {})
+    _write_manifest(campaign_dir, failed)
+    assert not (campaign_dir / _SENTINEL).exists() and failed.status == "TECHNICAL_FAILURE"
+    _unchanged_by_failure(plan, campaign_dir)
+
+
+def test_d5_refuses_the_mere_existence_of_the_sentinel_whatever_its_content(worlds, proofs, tmp_path):
+    """§21.7 terme 4 / §21.8 : l'EXISTENCE du chemin est le fait. Le Manifest, lui, reste « complet » (marqueur) : seule
+    la valeur EFFECTIVE bascule. La sentinelle n'est jamais lue pour la décision, ni supprimée, ni réparée."""
+    plan = worlds.plan
+    contents = {
+        "valid": json.dumps(_sentinel_record(plan, "worker crashed")).encode(),
+        "zero_byte": b"",
+        "malformed_json": b'{"technical_failure_sentinel_semantics_version": ',
+        "wrong_version": json.dumps({**_sentinel_record(plan, "x"),
+                                     "technical_failure_sentinel_semantics_version": "v0"}).encode(),
+        "foreign_campaign": json.dumps(_sentinel_record(worlds.other_plan, "x")).encode(),
+        "invalid_reason": json.dumps({**_sentinel_record(plan, "x"), "reason": ""}).encode(),
+    }
+    for kind, content in contents.items():
+        campaign_dir = _complete_campaign(tmp_path / kind, plan, proofs)
+        (campaign_dir / _SENTINEL).write_bytes(content)
+        manifest = m2.load_gate_v_campaign_manifest_v2(plan, campaign_dir)
+        assert manifest.status == _COMPLETE and manifest.technical_failure_reason is None, kind
+        assert m2.derive_gate_v_campaign_v2_effective_status(
+            plan, campaign_dir, manifest, dict(proofs)) == "TECHNICAL_FAILURE", kind
+        _unchanged_by_failure(plan, campaign_dir)
+        assert (campaign_dir / _SENTINEL).read_bytes() == content, kind  # jamais réparée ni supprimée
+    directory_as_sentinel = _complete_campaign(tmp_path / "directory", plan, proofs)
+    (directory_as_sentinel / _SENTINEL).mkdir()  # un dossier à ce chemin est aussi un fait : le chemin existe
+    _unchanged_by_failure(plan, directory_as_sentinel)
+
+
+def test_d5_never_reads_the_content_of_the_sentinel(worlds, proofs, tmp_path, monkeypatch):
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    sentinel = campaign_dir / _SENTINEL
+    sentinel.write_bytes(json.dumps(_sentinel_record(plan, "worker crashed")).encode())
+    real_open = io.open
+
+    def guarded(file, *args, **kwargs):
+        assert os.path.basename(os.fspath(file)) != _SENTINEL, "contenu de la sentinelle lu"
+        return real_open(file, *args, **kwargs)
+    monkeypatch.setattr(io, "open", guarded)
+    monkeypatch.setattr("builtins.open", guarded)
+    with pytest.raises(ValueError):
+        _verify(plan, campaign_dir)
+
+
+def test_d5_refuses_while_the_update_lock_exists_and_never_touches_waits_or_reads_it(worlds, proofs, tmp_path,
+                                                                                    monkeypatch):
+    """ADR §21.13 n° 11, moitié D5 : la précondition ÉCHOUE tant que `manifest.update.lock` existe. Lecteur pur :
+    ni acquisition, ni attente, ni nouvelle tentative, ni lecture du contenu, ni suppression, ni déduction (PID)."""
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    lock = campaign_dir / _LOCK
+    for content in (b"", b"garbage", b'{"command": "AttachMonteCarlo", "campaign_id": "x", "expected_revision": 5}'):
+        lock.write_bytes(content)
+        os.utime(lock, (946684800, 946684800))  # un verrou « ancien » reste un verrou
+        identity = _identity(lock)
+        before = _files(campaign_dir)
+        real_open, real_lstat = io.open, os.lstat
+        lock_lstats = []
+
+        def guarded_open(file, *args, **kwargs):
+            assert os.path.basename(os.fspath(file)) != _LOCK, "contenu du verrou lu"
+            return real_open(file, *args, **kwargs)
+
+        def counting_lstat(path, *args, **kwargs):
+            if os.path.basename(os.fspath(path)) == _LOCK:
+                lock_lstats.append(path)
+            return real_lstat(path, *args, **kwargs)
+
+        def no_wait(*args, **kwargs):
+            raise AssertionError("aucune attente")
+        with monkeypatch.context() as patched:
+            patched.setattr(io, "open", guarded_open)
+            patched.setattr("builtins.open", guarded_open)
+            patched.setattr(os, "lstat", counting_lstat)
+            patched.setattr("time.sleep", no_wait)
+            with pytest.raises(ValueError):
+                _verify(plan, campaign_dir)
+        assert _files(campaign_dir) == before and _identity(lock) == identity
+        assert os.stat(lock).st_mtime == 946684800  # ni touché, ni réécrit
+        assert len(lock_lstats) == 1  # une seule constatation, aucune nouvelle tentative
+        lock.unlink()  # le TEST retire le verrou (jamais D5) : le même état persisté passe
+        assert _verify(plan, campaign_dir).status == _COMPLETE
+    lock.mkdir()  # un dossier à ce chemin : le chemin existe, la précondition échoue
+    _unchanged_by_failure(plan, campaign_dir)
+
+
+def test_d5_never_reads_a_missing_lock_or_sentinel_as_present_nor_an_unreadable_one_as_absent(
+    worlds, proofs, tmp_path, monkeypatch,
+):
+    """Seule l'ABSENCE réelle vaut absence : toute autre erreur en examinant le verrou ou la sentinelle est propagée."""
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    real_lstat = os.lstat
+    for name in (_LOCK, _SENTINEL):
+        def blocked(path, *args, name=name, **kwargs):
+            if os.path.basename(os.fspath(path)) == name:
+                raise PermissionError(13, "accès refusé")
+            return real_lstat(path, *args, **kwargs)
+        with monkeypatch.context() as patched:
+            patched.setattr(os, "lstat", blocked)
+            before = _files(campaign_dir)
+            with pytest.raises(PermissionError):
+                _verify(plan, campaign_dir)
+        assert _files(campaign_dir) == before
+
+
+def _referenced_kinds(plan):
+    """Chaque référence testée SÉPARÉMENT : WF, MC et — « chaque fold » — la première ET la dernière PS."""
+    ids = _ids(plan)
+    first, last = plan.expected_fold_ids[0], plan.expected_fold_ids[-1]
+    return {"walk_forward": ids["wf"], "monte_carlo": ids["mc"],
+            "parameter_stability_first_fold": ids["ps"][first], "parameter_stability_last_fold": ids["ps"][last]}
+
+
+def test_d5_fails_closed_when_the_manifest_is_ahead_of_a_referenced_proof(worlds, proofs, tmp_path):
+    """Manifest « en avance » (ADR §21.6 / §21.8) : une preuve référencée absente, illisible, incohérente ou étrangère
+    est une ERREUR fermée — jamais convertie en `EVIDENCE_INCOMPLETE` ni traitée comme une preuve manquante."""
+    plan = worlds.plan
+    ids = _ids(plan)
+    for kind, run_id in _referenced_kinds(plan).items():
+        record = _record_of_run(proofs[run_id])
+        foreign = _record_of_run(dataclasses.replace(proofs[run_id], strategy_name="Other Strategy"))
+        other_proof = _record_of_run(proofs[ids["mc"] if run_id != ids["mc"] else ids["wf"]])
+        damage = {
+            "file_missing": None,
+            "truncated_json": json.dumps(record)[:40].encode(),
+            "empty_file": b"",
+            "unknown_validation_type": json.dumps({**record, "validation_type": "stress"}).encode(),
+            "incoherent_evidence": json.dumps({**record, "evidence": {"bogus": 1}}).encode(),
+            "unexpected_json_shape": json.dumps({**record, "validation_type": []}).encode(),
+            "foreign_provenance": json.dumps(foreign).encode(),
+            "wrong_validation_run_id": json.dumps(other_proof).encode(),  # le fichier d'une AUTRE preuve à ce chemin
+            "not_an_object": b"[]",
+        }
+        for how, content in damage.items():
+            campaign_dir = _complete_campaign(tmp_path / f"{kind}_{how}", plan, proofs)
+            path = _proof_path(campaign_dir, run_id)
+            if content is None:
+                path.unlink()
+            else:
+                path.write_bytes(content)
+            manifest = m2.load_gate_v_campaign_manifest_v2(plan, campaign_dir)
+            assert manifest.status == _COMPLETE and run_id in _references(manifest), (kind, how)  # le Manifest affirme
+            # Fichier absent/illisible/de forme inattendue : refusé par le CHARGEUR, avant tout jugement de complétude.
+            unreadable = how in ("file_missing", "truncated_json", "empty_file", "not_an_object",
+                                 "unexpected_json_shape")
+            _unchanged_by_failure(plan, campaign_dir, match="sur disque" if unreadable else None)
+
+
+def test_d5_fails_fast_before_reading_any_proof_when_a_cheaper_term_already_fails(worlds, proofs, tmp_path,
+                                                                                 monkeypatch):
+    """Ordre §21.7 : chaque terme local (exécution, marqueur, sentinelle, verrou, champs réservés) refuse AVANT toute
+    lecture de preuve — aucun rechargement inutile d'un dossier que l'on sait déjà refusé."""
+    plan = worlds.plan
+    cases = {}
+    ready = _campaign(tmp_path / "ready", plan)
+    m2.create_gate_v_campaign_manifest_v2(plan, ready)
+    cases["not_started"] = ready
+    running = _complete_campaign(tmp_path / "running", plan, proofs)
+    _update(plan, running, m2.SetRunning(True))
+    cases["running"] = running
+    marker = _complete_campaign(tmp_path / "marker", plan, proofs)
+    _write_manifest(marker, _step(plan, m2.load_gate_v_campaign_manifest_v2(plan, marker),
+                                  m2.MarkTechnicalFailure("worker crashed"), {}))
+    cases["marker"] = marker
+    sentinel = _complete_campaign(tmp_path / "sentinel", plan, proofs)
+    (sentinel / _SENTINEL).write_bytes(b"")
+    cases["sentinel"] = sentinel
+    lock = _complete_campaign(tmp_path / "lock", plan, proofs)
+    (lock / _LOCK).write_bytes(b"busy")
+    cases["lock"] = lock
+    reserved = _complete_campaign(tmp_path / "reserved", plan, proofs)
+    forged = _with(m2.load_gate_v_campaign_manifest_v2(plan, reserved), holdout_access_event_id="event_by_hand")
+    loads = []  # l'espion n'est posé qu'APRÈS la construction des campagnes (D4 recharge des preuves en les bâtissant)
+    real_load = m2.load_validation_run
+    monkeypatch.setattr(m2, "load_validation_run", lambda path: loads.append(path) or real_load(path))
+    refusal = {  # le terme PRÉCIS qui refuse : aucune autre vérification ne peut le masquer
+        "not_started": "démarrée et arrêtée", "running": "démarrée et arrêtée", "marker": "échec technique",
+        "sentinel": "sentinelle", "lock": "manifest.update.lock",
+    }
+    for name, campaign_dir in cases.items():
+        with pytest.raises(ValueError, match=refusal[name]):
+            _verify(plan, campaign_dir)
+        assert loads == [], name
+    monkeypatch.setattr(m2, "_read_manifest", lambda plan_arg, directory: forged)
+    with pytest.raises(ValueError, match="FINAL_HOLDOUT"):
+        _verify(plan, reserved)
+    assert loads == []
+
+
+def test_d5_requires_every_term_of_the_d1_facts_and_never_a_partial_vote(worlds, proofs, tmp_path, monkeypatch):
+    """§21.7 terme 5 : WF complet, MC complet, AUCUN fold PS incomplet, tous les folds complets dans l'ordre du
+    plan, ET `pre_holdout_evidence_complete`. Faits D1 fabriqués : un seul terme faux à la fois, les autres vrais."""
+    from gate_v_evidence_completeness_v2 import GateVPreHoldoutEvidenceFacts
+
+    plan = worlds.plan
+    folds = plan.expected_fold_ids
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    good = dict(walk_forward_complete=True, monte_carlo_complete=True, parameter_stability_complete_fold_ids=folds,
+                parameter_stability_incomplete_fold_ids=(), pre_holdout_evidence_complete=True)
+    bad_terms = {
+        "walk_forward_incomplete": dict(walk_forward_complete=False),
+        "monte_carlo_incomplete": dict(monte_carlo_complete=False),
+        "one_fold_incomplete": dict(parameter_stability_incomplete_fold_ids=(folds[-1],)),
+        "fold_missing_from_complete_list": dict(parameter_stability_complete_fold_ids=folds[:-1]),
+        "folds_out_of_plan_order": dict(parameter_stability_complete_fold_ids=tuple(reversed(folds))),
+        "global_flag_false": dict(pre_holdout_evidence_complete=False),
+        "flag_not_a_true_boolean": dict(pre_holdout_evidence_complete=1),
+        "wf_flag_not_a_true_boolean": dict(walk_forward_complete=1),
+        "mc_flag_not_a_true_boolean": dict(monte_carlo_complete=1),
+    }
+    all_true = GateVPreHoldoutEvidenceFacts(**good)
+    # Le bloc de faits est isolé : les comparaisons D3 (statut persisté) et D4 (statut effectif) sont neutralisées, sans
+    # quoi un drapeau global faux serait refusé par le statut dérivé au lieu de l'être par le terme testé.
+    monkeypatch.setattr(m2, "validate_gate_v_campaign_manifest_v2_marker_status", lambda *args: None)
+    monkeypatch.setattr(m2, "derive_gate_v_campaign_v2_effective_status", lambda *args: _COMPLETE)
+    monkeypatch.setattr(m2, "evaluate_pre_holdout_evidence_v2", lambda plan_arg, evidence: all_true)
+    assert _verify(plan, campaign_dir).status == _COMPLETE
+    for name, change in bad_terms.items():
+        facts = GateVPreHoldoutEvidenceFacts(**{**good, **change})
+        monkeypatch.setattr(m2, "evaluate_pre_holdout_evidence_v2", lambda plan_arg, evidence, facts=facts: facts)
+        with pytest.raises(ValueError, match="pas complètes"):  # le message du bloc de faits, pas un autre terme
+            _verify(plan, campaign_dir)
+
+
+def test_d5_reloads_only_the_referenced_proofs_once_each_and_never_scans_validations(worlds, proofs, tmp_path,
+                                                                                    monkeypatch):
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    (campaign_dir / "validations" / "orphan_run").mkdir()
+    (campaign_dir / "validations" / "orphan_run" / "validation_run.json").write_text("not json", encoding="utf-8")
+    orphan_valid = _proof_path(campaign_dir, _ids(plan)["wf"]).parent.parent / "gate_v_v2_unreferenced_run"
+    orphan_valid.mkdir()
+    (orphan_valid / "validation_run.json").write_bytes(_proof_path(campaign_dir, _ids(plan)["wf"]).read_bytes())
+    real_load = m2.load_validation_run
+    loaded = []
+
+    def spy(path):
+        loaded.append(os.path.relpath(path, campaign_dir).replace(os.sep, "/"))
+        return real_load(path)
+
+    def no_scan(*args, **kwargs):
+        raise AssertionError("aucun balayage de répertoire")
+    with monkeypatch.context() as patched:
+        patched.setattr(m2, "load_validation_run", spy)
+        for owner, name in ((os, "scandir"), (os, "listdir"), (os, "walk"), (Path, "iterdir"), (Path, "glob"),
+                            (Path, "rglob")):
+            patched.setattr(owner, name, no_scan)
+        returned = _verify(plan, campaign_dir)
+    assert returned.status == _COMPLETE
+    expected = sorted(f"validations/{run_id}/validation_run.json" for run_id in _references(returned))
+    assert sorted(loaded) == expected and len(loaded) == len(set(loaded)) == 5  # chaque référence UNE fois
+
+
+def test_d5_never_counts_an_unreferenced_valid_proof(worlds, proofs, tmp_path):
+    """Preuve orpheline VALIDE persistée mais non rattachée : aucune autorité. La campagne reste incomplète tant
+    qu'un `Attach…` explicite ne l'a pas adoptée (§21.6) — D5 ne l'adopte jamais, quelle que soit sa validité."""
+    plan = worlds.plan
+    ids = _ids(plan)
+    folds = plan.expected_fold_ids
+    campaign_dir = _campaign_with(tmp_path, plan, proofs, [
+        m2.AttachWalkForward(ids["wf"]), m2.AttachMonteCarlo(ids["mc"]),
+        *[m2.AttachParameterStability(fold, ids["ps"][fold]) for fold in folds[:-1]]])
+    assert _proof_path(campaign_dir, ids["ps"][folds[-1]]).is_file()  # la PS du dernier fold est là, orpheline
+    assert m2.load_gate_v_campaign_manifest_v2(plan, campaign_dir).status == "EVIDENCE_INCOMPLETE"
+    _unchanged_by_failure(plan, campaign_dir)
+
+
+def _replace_persisted_proof(campaign_dir, run_id, run):
+    """Remplace le fichier canonique d'une preuve par une autre `ValidationRun` valide (octets écrits comme D4)."""
+    path = _proof_path(campaign_dir, run_id)
+    path.unlink()
+    save_validation_run(path, run)
+
+
+def test_d5_trusts_no_persisted_status_it_rederives_it_from_the_reloaded_proofs(worlds, proofs, tmp_path):
+    """§21.7 terme 2 : `status == marker_status`. « En retard » (preuves complètes, statut INCOMPLETE) comme « en
+    avance » (statut COMPLETE, preuve de qualité insuffisante) sont refusés : jamais promus ni réparés."""
+    plan = worlds.plan
+    ids = _ids(plan)
+    behind = _complete_campaign(tmp_path / "behind", plan, proofs)
+    complete = m2.load_gate_v_campaign_manifest_v2(plan, behind)
+    _write_manifest(behind, _with(complete, status="EVIDENCE_INCOMPLETE"))  # structurellement légal, mais faux
+    assert m2.load_gate_v_campaign_manifest_v2(plan, behind).status == "EVIDENCE_INCOMPLETE"
+    _unchanged_by_failure(plan, behind)
+    ahead = _complete_campaign(tmp_path / "ahead", plan, proofs)
+    poor = _poor_parameter_stability(proofs[ids["ps"][plan.expected_fold_ids[0]]])
+    _replace_persisted_proof(ahead, ids["ps"][plan.expected_fold_ids[0]], poor)
+    assert m2.load_gate_v_campaign_manifest_v2(plan, ahead).status == _COMPLETE  # le Manifest dit encore « complet »
+    _unchanged_by_failure(plan, ahead)
+    with pytest.raises(ValueError):  # la dérivation D3 sur les preuves rechargées le dit : le statut persisté est faux
+        m2.validate_gate_v_campaign_manifest_v2_marker_status(
+            m2.load_gate_v_campaign_manifest_v2(plan, ahead), plan,
+            {run_id: m2.load_validation_run(_proof_path(ahead, run_id)) for run_id in _references(complete)})
+
+
+def test_d5_marker_status_comparison_is_the_d3_validator_not_a_second_definition(worlds, proofs, tmp_path,
+                                                                                monkeypatch):
+    """Le seul comparateur est `validate_gate_v_campaign_manifest_v2_marker_status` : s'il refuse, D5 refuse, même quand
+    toutes les autres conditions sont vraies (preuve de l'appel, pas une réimplémentation)."""
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    calls = []
+
+    def refusing(manifest, plan_arg, evidence):
+        calls.append((manifest.status, sorted(evidence)))
+        raise ValueError("statut persisté refusé par D3")
+    monkeypatch.setattr(m2, "validate_gate_v_campaign_manifest_v2_marker_status", refusing)
+    with pytest.raises(ValueError, match="refusé par D3"):
+        _verify(plan, campaign_dir)
+    assert calls == [(_COMPLETE, sorted(_references(m2.load_gate_v_campaign_manifest_v2(plan, campaign_dir))))]
+
+
+def test_d5_requires_the_proofs_of_every_expected_fold_and_judges_them_with_d1(worlds, proofs, tmp_path):
+    """WF, MC et Parameter Stability de CHAQUE fold : une seule preuve absente (référence manquante) ou de qualité
+    insuffisante (rattachable par D4, jamais complète pour D5) refuse. Ni moyenne, ni majorité, ni minimum."""
+    plan = worlds.plan
+    ids = _ids(plan)
+    folds = plan.expected_fold_ids
+    wf_commands = [m2.AttachWalkForward(ids["wf"])]
+    mc_commands = [m2.AttachMonteCarlo(ids["mc"])]
+    ps_commands = {fold: m2.AttachParameterStability(fold, ids["ps"][fold]) for fold in folds}
+    everything = [*wf_commands, *mc_commands, *ps_commands.values()]
+    reference_missing = {  # honnêtement INCOMPLET côté Manifest : la référence n'existe pas
+        "no_reference_at_all": [],
+        "monte_carlo_reference_missing": [*wf_commands, *ps_commands.values()],
+        **{f"ps_reference_missing_{fold}": [c for c in everything if c is not ps_commands[fold]] for fold in folds},
+    }
+    for name, commands in reference_missing.items():
+        campaign_dir = _campaign_with(tmp_path / name, plan, proofs, commands)
+        assert m2.load_gate_v_campaign_manifest_v2(plan, campaign_dir).status == "EVIDENCE_INCOMPLETE", name
+        _unchanged_by_failure(plan, campaign_dir)
+    insufficient = {
+        "walk_forward_not_completed": (ids["wf"], _evidence_edit(execution_status="failed")),
+        "monte_carlo_not_completed": (ids["mc"], _evidence_edit(execution_status="failed")),
+        **{f"poor_parameter_stability_{fold}": (ids["ps"][fold], _poor_parameter_stability) for fold in folds},
+    }
+    for name, (run_id, edit) in insufficient.items():
+        campaign_dir = _started_campaign(tmp_path / name, plan)
+        _persist(campaign_dir, *{**proofs, run_id: edit(proofs[run_id])}.values())
+        for command in everything:  # D4 les rattache toutes : la qualité n'est pas une condition d'adoption
+            _update(plan, campaign_dir, command)
+        persisted = m2.load_gate_v_campaign_manifest_v2(plan, campaign_dir)
+        assert persisted.status == "EVIDENCE_INCOMPLETE" and len(_references(persisted)) == 5, name
+        _unchanged_by_failure(plan, campaign_dir)
+
+
+def test_d5_rejects_a_proof_that_was_valid_when_attached_and_changed_on_disk_afterwards(worlds, proofs, tmp_path):
+    """Les références sont des identifiants immuables, pas des empreintes : D5 relit TOUJOURS le disque, jamais une
+    `ValidationRun` utilisée par D4 à l'attache. Remplacement valide mais incomplet, étranger, ou octets corrompus."""
+    plan = worlds.plan
+    ids = _ids(plan)
+    last = plan.expected_fold_ids[-1]
+    replacements = {
+        "incomplete_but_valid": (ids["ps"][last], lambda: _poor_parameter_stability(proofs[ids["ps"][last]])),
+        "foreign_strategy": (ids["wf"], lambda: dataclasses.replace(proofs[ids["wf"]], strategy_name="Other Strategy")),
+        "not_completed": (ids["mc"], lambda: _evidence_edit(execution_status="failed")(proofs[ids["mc"]])),
+    }
+    for name, (run_id, build) in replacements.items():
+        campaign_dir = _complete_campaign(tmp_path / name, plan, proofs)
+        assert _verify(plan, campaign_dir).status == _COMPLETE  # valide au moment de l'attache
+        _replace_persisted_proof(campaign_dir, run_id, build())
+        _unchanged_by_failure(plan, campaign_dir)
+    garbled = _complete_campaign(tmp_path / "garbled", plan, proofs)
+    assert _verify(plan, garbled).status == _COMPLETE
+    _proof_path(garbled, ids["wf"]).write_bytes(b"\x00corrupted\xff")
+    _unchanged_by_failure(plan, garbled)
+
+
+def test_d5_checks_the_reserved_final_holdout_fields_explicitly(worlds, proofs, tmp_path, monkeypatch):
+    """§21.7 terme 6 : champs 13-17 tous `None`. La structure D2 les impose déjà au chargement ; D5 les revérifie
+    explicitement (un Manifest reconstruit par un chemin non validé ne passe pas). Aucun Claim, aucun événement,
+    aucune preuve OOS."""
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    persisted = m2.load_gate_v_campaign_manifest_v2(plan, campaign_dir)
+    for name in _RESERVED_FIELDS:
+        assert getattr(persisted, name) is None
+        forged = _with(persisted, **{name: "claim_added_by_hand"})  # le constructeur direct ne revalide rien
+        with monkeypatch.context() as patched:
+            patched.setattr(m2, "_read_manifest", lambda plan_arg, directory, forged=forged: forged)
+            with pytest.raises(ValueError, match="FINAL_HOLDOUT"):
+                _verify(plan, campaign_dir)
+        path = campaign_dir / "manifest.json"
+        path.write_text(json.dumps({**json.loads(path.read_text()), name: "claim_added_by_hand"}), encoding="utf-8")
+        _unchanged_by_failure(plan, campaign_dir)  # écrit à la main : refusé dès le chargeur strict
+        _write_manifest(campaign_dir, persisted)
+    assert _verify(plan, campaign_dir) == persisted
+
+
+def test_d5_rechecks_the_lock_and_the_sentinel_after_the_slow_reads_and_never_grants_a_stale_success(
+    worlds, proofs, tmp_path, monkeypatch,
+):
+    """Le rechargement des preuves est la partie lente : un verrou ou une sentinelle apparus PENDANT la vérification
+    sont revus avant le retour (§21.7 termes 4, 7, 8). Fenêtre rétrécie, non supprimée : D5 n'est pas une transaction
+    avec un futur Claim, lequel revérifie lui-même après son acquisition exclusive."""
+    plan = worlds.plan
+    for appears, create in (
+        ("lock", lambda directory: (directory / _LOCK).write_bytes(b"late writer")),
+        ("sentinel", lambda directory: (directory / _SENTINEL).write_bytes(b"")),
+    ):
+        campaign_dir = _complete_campaign(tmp_path / appears, plan, proofs)
+        real_load = m2.load_validation_run
+        loads = []
+
+        def creating_while_reading(path, campaign_dir=campaign_dir, create=create, loads=loads, real_load=real_load):
+            loads.append(path)
+            if len(loads) == 3:
+                create(campaign_dir)
+            return real_load(path)
+        with monkeypatch.context() as patched:
+            patched.setattr(m2, "load_validation_run", creating_while_reading)
+            with pytest.raises(ValueError):
+                _verify(plan, campaign_dir)
+        assert len(loads) == 5, appears  # toutes les preuves ont été lues : seul le contrôle final a refusé
+        assert (campaign_dir / (_LOCK if appears == "lock" else _SENTINEL)).exists()  # jamais supprimé par D5
+
+
+def test_d5_final_term_is_the_effective_status_computed_by_the_d4_helper(worlds, proofs, tmp_path, monkeypatch):
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    seen = []
+
+    def not_complete(plan_arg, directory, manifest, evidence):
+        seen.append((Path(directory).name, manifest.status, sorted(evidence)))
+        return "EVIDENCE_INCOMPLETE"
+    monkeypatch.setattr(m2, "derive_gate_v_campaign_v2_effective_status", not_complete)
+    with pytest.raises(ValueError):
+        _verify(plan, campaign_dir)
+    assert seen and seen[0][0] == plan.campaign_id and seen[0][1] == _COMPLETE and len(seen[0][2]) == 5
+
+
+# ============================================================================================
+# Tranche 20 — D5 : lecture seule, aucune écriture, aucun verrou, aucun Claim, aucune source externe
+# ============================================================================================
+
+_WRITE_OR_LOCK_CALLS = {
+    "save_exclusive", "save_atomic", "save_atomic_overwrite", "open", "write", "write_text", "write_bytes", "unlink",
+    "rename", "replace", "mkdir", "makedirs", "rmdir", "utime", "chmod", "touch", "fsync", "truncate",
+    "_acquire_update_lock", "_release_update_lock", "_write_lock_content", "_unlink_if_still_owned",
+    "_record_technical_failure_sentinel", "_settle_persisted_state", "update_gate_v_campaign_manifest_v2",
+    "create_gate_v_campaign_manifest_v2", "apply_gate_v_campaign_manifest_v2_command", "scandir", "listdir", "walk",
+    "iterdir", "glob", "rglob", "sleep", "monotonic", "time", "getpid", "gethostname",
+}
+
+
+def _called_names_reachable_from(function_name):
+    tree = _module_tree()
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    graph = {}
+    for name, node in functions.items():
+        graph[name] = {
+            call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", None)
+            for call in ast.walk(node) if isinstance(call, ast.Call)
+        }
+    seen, pending = set(), [function_name]
+    while pending:
+        name = pending.pop()
+        for called in graph.get(name, ()):
+            if called not in seen:
+                seen.add(called)
+                pending.append(called)
+    return seen
+
+
+def test_d5_call_graph_reaches_no_write_no_lock_no_scan_no_retry_and_no_transition():
+    """Preuve STATIQUE (graphe d'appels du module) : de `assert_gate_v_pre_holdout_evidence_complete` on n'atteint
+    jamais une écriture, une acquisition ou libération de verrou, une sentinelle créée, un balayage de répertoire,
+    une attente, une commande de transition — et on atteint bien les briques existantes (aucune 2e définition)."""
+    reachable = _called_names_reachable_from("assert_gate_v_pre_holdout_evidence_complete")
+    assert not reachable & _WRITE_OR_LOCK_CALLS, sorted(reachable & _WRITE_OR_LOCK_CALLS)
+    assert {
+        "load_gate_v_campaign_manifest_v2", "load_validation_run", "evaluate_pre_holdout_evidence_v2",
+        "validate_gate_v_campaign_manifest_v2_marker_status", "derive_gate_v_campaign_v2_effective_status",
+        "lstat", "load_json_tolerant", "load_gate_v_campaign_plan_v2",
+    } <= reachable
+
+
+def test_d5_signature_is_exactly_the_normative_one_and_there_is_one_canonical_predicate():
+    import inspect
+
+    signature = inspect.signature(m2.assert_gate_v_pre_holdout_evidence_complete)
+    assert list(signature.parameters) == ["plan", "campaign_dir"]
+    assert all(parameter.default is inspect.Parameter.empty for parameter in signature.parameters.values())
+    assert signature.return_annotation in (m2.GateVCampaignManifestV2, "GateVCampaignManifestV2")
+    assert [name for name in m2.__all__ if "holdout" in name.lower() and callable(getattr(m2, name))
+            and not isinstance(getattr(m2, name), type)] == ["assert_gate_v_pre_holdout_evidence_complete"]
+    forbidden_results = {"bool", "eligible", "token"}
+    assert not forbidden_results & set(str(signature.return_annotation).lower().split("."))
+
+
+def test_d5_performs_no_write_system_call_on_success_nor_on_failure(worlds, proofs, tmp_path, monkeypatch):
+    """Preuve DYNAMIQUE : sous des appels système d'écriture interdits, succès ET échecs représentatifs aboutissent à
+    l'identique ; aucun fichier ni dossier créé, supprimé ou modifié."""
+    plan = worlds.plan
+    ok = _complete_campaign(tmp_path / "ok", plan, proofs)
+    sentinel = _complete_campaign(tmp_path / "sentinel", plan, proofs)
+    (sentinel / _SENTINEL).write_bytes(b"")
+    lock = _complete_campaign(tmp_path / "lock", plan, proofs)
+    (lock / _LOCK).write_bytes(b"busy")
+    ahead = _complete_campaign(tmp_path / "ahead", plan, proofs)
+    _proof_path(ahead, _ids(plan)["mc"]).unlink()
+    snapshots = {directory: _files(directory) for directory in (ok, sentinel, lock, ahead)}
+    real_io_open, real_os_open = io.open, os.open
+
+    def guarded_io_open(file, mode="r", *args, **kwargs):
+        assert not set(mode) & set("wax+"), f"ouverture en écriture interdite : {file!r} {mode!r}"
+        return real_io_open(file, mode, *args, **kwargs)
+
+    def guarded_os_open(path, flags, *args, **kwargs):
+        write_flags = os.O_CREAT | os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_TRUNC | os.O_EXCL
+        assert not flags & write_flags, f"os.open en écriture interdit : {path!r}"
+        return real_os_open(path, flags, *args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("opération d'écriture interdite en lecture seule")
+    with monkeypatch.context() as patched:
+        patched.setattr(io, "open", guarded_io_open)
+        patched.setattr("builtins.open", guarded_io_open)
+        patched.setattr(os, "open", guarded_os_open)
+        for name in ("replace", "rename", "unlink", "remove", "mkdir", "makedirs", "rmdir", "write", "utime",
+                     "chmod", "truncate"):
+            patched.setattr(os, name, forbidden)
+        for name in ("mkdir", "unlink", "rename", "replace", "write_text", "write_bytes", "touch", "rmdir"):
+            patched.setattr(Path, name, forbidden)
+        patched.setattr(m2, "save_exclusive", forbidden)
+        patched.setattr(m2, "save_atomic_overwrite", forbidden)
+        assert _verify(plan, ok).status == _COMPLETE
+        for directory in (sentinel, lock, ahead):
+            with pytest.raises(ValueError):
+                _verify(plan, directory)
+    assert {directory: _files(directory) for directory in snapshots} == snapshots
+
+
+def test_d5_success_leaves_exactly_the_campaign_artifacts_and_no_claim(worlds, proofs, tmp_path):
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    before = sorted(_files(tmp_path))
+    _verify(plan, campaign_dir)
+    after = sorted(_files(tmp_path))
+    assert after == before
+    prefix = f"campaigns/{plan.campaign_id}/"
+    assert set(after) == {prefix + "plan.json", prefix + "manifest.json"} | {
+        f"{prefix}validations/{run_id}/validation_run.json" for run_id in proofs}
+    for name in after:
+        assert not any(word in name.lower() for word in ("claim", "holdout", "event", "oos", ".lock", "failure")), name
+
+
+def test_d5_returns_a_fresh_manifest_each_time_and_aliases_nothing_mutable(worlds, proofs, tmp_path):
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    first, second = _verify(plan, campaign_dir), _verify(plan, campaign_dir)
+    assert first == second and first is not second  # rechargé du disque à chaque appel, jamais mis en cache
+    with pytest.raises(TypeError):
+        first.parameter_stability_validation_run_ids_by_fold["evil"] = "x"  # mapping immuable
+    with pytest.raises(AttributeError):
+        first.status = "EVIDENCE_INCOMPLETE"  # dataclass gelée
+    assert _verify(plan, campaign_dir) == second
+
+
+def test_d5_never_validates_the_plan_against_its_sources_and_receives_none_of_them(worlds, proofs, tmp_path,
+                                                                                  monkeypatch):
+    """§21.7 : la revalidation aux sources (Git, PreRegistration, ResearchRun, split, policy) est l'obligation du futur
+    appelant du Claim. Même un plan que ses sources contrediraient passe D5 s'il est égal au `plan.json` persisté."""
+    import inspect
+
+    import gate_v_campaign_plan_v2 as plan_module
+
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("D5 ne revalide jamais le plan aux sources")
+    monkeypatch.setattr(plan_module, "validate_gate_v_campaign_plan_v2_sources", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    assert _verify(plan, campaign_dir).status == _COMPLETE
+    parameters = set(inspect.signature(m2.assert_gate_v_pre_holdout_evidence_complete).parameters)
+    assert not parameters & {"preregistration", "research_run", "split_plan", "policy", "policy_path", "repo_dir"}
+    imported = {alias.name.split(".")[0] for node in ast.walk(_module_tree()) if isinstance(node, ast.Import)
+                for alias in node.names} | {(node.module or "").split(".")[0] for node in ast.walk(_module_tree())
+                                            if isinstance(node, ast.ImportFrom)}
+    assert not imported & {"subprocess", "git", "gate_v_preregistration", "research_run", "dataset_split",
+                           "gate_v_validation_policy"}
+
+
+def test_d5_does_not_break_the_d4_proof_loading_semantics_through_the_shared_loader(worlds, proofs, tmp_path):
+    """Le chargeur partagé D4/D5 garde les comportements D4 : preuve référencée absente = erreur fermée, orpheline
+    ignorée, `MarkTechnicalFailure` et Manifest terminal sans aucun rechargement."""
+    plan = worlds.plan
+    ids = _ids(plan)
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    _proof_path(campaign_dir, ids["mc"]).unlink()
+    for command in (m2.SetRunning(True), m2.SetRunning(False), m2.Start()):
+        with pytest.raises(ValueError):
+            _update(plan, campaign_dir, command)
+    failed = _update(plan, campaign_dir, m2.MarkTechnicalFailure("proof unreadable"))  # aucune preuve rechargée
+    assert failed.status == "TECHNICAL_FAILURE" and (campaign_dir / _SENTINEL).is_file()
+    with pytest.raises(ValueError):  # et D5 refuse : sentinelle présente
+        _verify(plan, campaign_dir)
+
+
+def test_d5_never_returns_a_manifest_that_a_committed_transaction_replaced_during_the_slow_reads(
+    worlds, proofs, tmp_path, monkeypatch,
+):
+    """Une transaction D4 ENTIÈRE (verrou pris, Manifest validé, verrou libéré) peut tenir dans la fenêtre des lectures
+    de preuves : le verrou et la sentinelle sont alors absents à la dernière revue. D5 relit donc le Manifest à la
+    fin et exige l'égalité : il ne retourne jamais un instantané périmé présenté comme « le Manifest persisté vérifié »."""
+    plan = worlds.plan
+    campaign_dir = _complete_campaign(tmp_path, plan, proofs)
+    real_load = m2.load_validation_run
+    state = {"loads": 0, "fired": False}
+
+    def transaction_during_the_reads(path):
+        state["loads"] += 1
+        if state["loads"] == 3 and not state["fired"]:
+            state["fired"] = True
+            _update(plan, campaign_dir, m2.SetRunning(True))  # transaction complète, verrou déjà libéré au retour
+        return real_load(path)
+    with monkeypatch.context() as patched:
+        patched.setattr(m2, "load_validation_run", transaction_during_the_reads)
+        with pytest.raises(ValueError, match="modifié pendant la vérification"):
+            _verify(plan, campaign_dir)
+    assert state["fired"] and not (campaign_dir / _LOCK).exists()
+    persisted = m2.load_gate_v_campaign_manifest_v2(plan, campaign_dir)
+    assert persisted.running is True  # l'état réellement persisté est celui de la transaction, pas l'instantané lu

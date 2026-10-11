@@ -1,5 +1,5 @@
 """
-gate_v_campaign_manifest_v2.py — GateVCampaignManifestV2 (AF-V-07 Slices D2-D4, ADR 0025 Décision 21.4/21.5/21.8).
+gate_v_campaign_manifest_v2.py — GateVCampaignManifestV2 (AF-V-07 Slices D2-D5, ADR 0025 Décision 21.4 à 21.8).
 
 Manifest de campagne Gate V V2 : type DISTINCT de `gate_v_campaign.GateVCampaignManifest` (V1, jamais
 importé ni modifié ici). Il porte seulement des pointeurs et des marqueurs d'exécution ; il ne déclare
@@ -23,8 +23,17 @@ ni âge, ni PID) : la récupération manuelle gouvernée d'un verrou résiduel r
 Dépendance de déploiement : le chemin canonique d'une preuve Parameter Stability peut dépasser `MAX_PATH` (260) sous
 Windows avec une racine usuelle ; les identifiants ne sont jamais raccourcis : le support des chemins longs est requis.
 
-HORS scope (tranches suivantes) : vérification publique des preuves persistées et précondition du Claim (D5),
-discrimination de dossier (D6), Claim et FINAL_HOLDOUT. Ni le verrou ni la sentinelle ne sont un Claim.
+Scope Slice D5 (LECTURE SEULE) : l'UNIQUE prédicat normatif `assert_gate_v_pre_holdout_evidence_complete(plan,
+campaign_dir)` (ADR 0025 §21.7). Il recharge du disque le plan, le Manifest et les seules preuves RÉFÉRENCÉES, exige
+`status == marker_status`, l'absence de tout échec technique (marqueur ET sentinelle) et de `manifest.update.lock`,
+la complétude D1 de WF, MC et Parameter Stability de CHAQUE fold, et un statut effectif
+`EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT` ; il lève sinon et retourne le Manifest persisté vérifié. Il ne crée
+rien, ne verrouille rien, ne répare rien et n'autorise RIEN : ni Claim, ni accès FINAL_HOLDOUT, ni verdict. La
+revalidation du plan aux sources (Git, PreRegistration, ResearchRun, split, policy) reste l'obligation du futur
+appelant.
+
+HORS scope (tranches suivantes) : discrimination de dossier (D6), Claim et FINAL_HOLDOUT. Ni le verrou ni la
+sentinelle ne sont un Claim.
 """
 
 from __future__ import annotations
@@ -87,6 +96,7 @@ __all__ = [
     "ManifestWriteError",
     "ManifestWriteUncertainError",
     "ManifestLockReleaseError",
+    "assert_gate_v_pre_holdout_evidence_complete",
 ]
 
 GATE_V_CAMPAIGN_MANIFEST_V2_SEMANTICS_VERSION = "gate_v_campaign_manifest_v2"
@@ -703,14 +713,20 @@ def _is_persistable_reason(reason) -> bool:
     return True
 
 
-def _sentinel_exists(directory: Path) -> bool:
-    """L'EXISTENCE du chemin est le fait (fichier vide, tronqué, illisible ou non conforme compris). Toute autre
-    erreur que l'absence est propagée : jamais lue comme « aucun échec »."""
+def _path_exists(path: Path) -> bool:
+    """Le chemin existe-t-il ? (`lstat` : fichier, dossier ou lien, sans jamais l'ouvrir ni le lire.) Seule l'ABSENCE
+    réelle vaut « non » ; toute autre erreur est propagée, jamais lue comme une absence."""
     try:
-        os.lstat(directory / _SENTINEL_FILE)
+        os.lstat(path)
     except FileNotFoundError:
         return False
     return True
+
+
+def _sentinel_exists(directory: Path) -> bool:
+    """L'EXISTENCE du chemin est le fait (fichier vide, tronqué, illisible ou non conforme compris). Toute autre
+    erreur que l'absence est propagée : jamais lue comme « aucun échec »."""
+    return _path_exists(directory / _SENTINEL_FILE)
 
 
 def _sentinel_reason(plan: GateVCampaignPlanV2, directory: Path) -> Optional[str]:
@@ -964,6 +980,23 @@ class _IncoherentCandidateProof:
     (un remplacement de référence reste un conflit de transition, « Walk-Forward d'abord » prime)."""
 
 
+def _load_referenced_evidence(directory: Path, manifest: GateVCampaignManifestV2) -> dict:
+    """Recharge du DISQUE, à leur chemin canonique, chaque preuve que le Manifest RÉFÉRENCE — une fois chacune, sans
+    balayer `validations/` (une preuve orpheline n'a aucune autorité). Une référence dont le fichier est absent,
+    illisible, mal formé ou incohérent est un Manifest « en avance sur les preuves » : `ValueError`, jamais un `None`
+    silencieux ni un simple « incomplet ». Partagé par la mise à jour (D4, étape 6) et la précondition (D5)."""
+    evidence = {}
+    for run_id in _proof_references(manifest):
+        try:
+            run = load_validation_run(_validation_run_path(directory, run_id))
+        except TypeError as error:  # forme JSON inattendue : preuve référencée incohérente, refus fermé typé
+            raise ValueError(f"Preuve référencée {run_id!r} incohérente sur disque : refus fermé.") from error
+        if run is None:
+            raise ValueError(f"Preuve référencée {run_id!r} absente ou illisible sur disque : refus fermé.")
+        evidence[run_id] = run
+    return evidence
+
+
 def _proofs_for_update(directory: Path, manifest: GateVCampaignManifestV2, command) -> dict:
     """Étape 6 : recharge SOUS le verrou, à leur chemin canonique, les SEULES preuves nécessaires — chaque référence
     du Manifest rechargé (incohérente : erreur fermée immédiate), plus la preuve candidate d'un `Attach…` à
@@ -971,14 +1004,7 @@ def _proofs_for_update(directory: Path, manifest: GateVCampaignManifestV2, comma
     automatiquement. Le jugement (présence, provenance, complétude) reste celui de D3/D1."""
     if type(command) is MarkTechnicalFailure or manifest.technical_failure_reason is not None:
         return {}  # exception de D3 : un échec technique et l'état terminal ne dépendent d'aucune preuve
-    proofs = {}
-    for run_id in _proof_references(manifest):
-        try:
-            run = load_validation_run(_validation_run_path(directory, run_id))
-        except TypeError as error:  # forme JSON inattendue : preuve référencée incohérente, refus fermé typé
-            raise ValueError(f"Preuve référencée {run_id!r} incohérente sur disque : refus fermé.") from error
-        if run is not None:
-            proofs[run_id] = run
+    proofs = _load_referenced_evidence(directory, manifest)
     candidate = command.run_id if type(command) in _ATTACH_COMMANDS else None
     if _is_portable_identifier(candidate) and candidate not in proofs:
         try:
@@ -1077,3 +1103,59 @@ def update_gate_v_campaign_manifest_v2(
         _settle_persisted_state(lock, plan, directory, manifest, result, None)
     _release_update_lock(lock, committed=True)
     return result
+
+
+# ---------------------------------------------------------------------------------------------
+# Slice D5 — vérification des preuves PERSISTÉES et précondition pré-holdout (ADR 0025 §21.7), en LECTURE SEULE
+# ---------------------------------------------------------------------------------------------
+
+
+def _require_no_residual_update_lock(directory: Path) -> None:
+    """Un `manifest.update.lock` (résiduel ou tenu) signifie « état d'écriture incertain » : la précondition échoue
+    FERMÉE. Lecteur pur : jamais acquis, attendu, relu, supprimé ni interprété (PID, âge) — son chemin existe ou non."""
+    if _path_exists(directory / _LOCK_FILE):
+        raise ValueError("manifest.update.lock existe : état d'écriture incertain, précondition fermée.")
+
+
+def assert_gate_v_pre_holdout_evidence_complete(plan: GateVCampaignPlanV2, campaign_dir) -> GateVCampaignManifestV2:
+    """UNIQUE prédicat normatif (ADR 0025 §21.7) : l'état persisté de la campagne satisfait la complétude structurelle
+    exigée AVANT qu'un futur Claim puisse seulement être tenté. Lève si un terme échoue ; retourne le Manifest persisté
+    vérifié. Ne crée, n'écrit, ne verrouille ni ne répare RIEN.
+
+    Terme 1 et chargement : le chargeur strict D4 revalide la structure du plan, le nom du dossier et l'égalité du
+    `plan.json` persisté avec le plan fourni, puis reconstruit le Manifest sans repli V1. La revalidation du plan aux
+    SOURCES (Git, PreRegistration, ResearchRun, split, policy) n'est PAS faite ici : c'est l'obligation du futur
+    appelant du Claim (§21.7). Ce prédicat n'autorise rien : ni accès FINAL_HOLDOUT, ni Claim, ni verdict.
+
+    Instantané persisté vérifié fermé, pas une transaction : aucun verrou n'est pris, rien n'est attendu ni retenté.
+    Le futur Claim revérifie lui-même, après son acquisition exclusive et avant toute lecture de marché."""
+    manifest = load_gate_v_campaign_manifest_v2(plan, campaign_dir)
+    directory = Path(campaign_dir)
+    if any(getattr(manifest, name) is not None for name in _RESERVED_FIELDS):
+        raise ValueError("Champs FINAL_HOLDOUT réservés non nuls (claim, événement, OOS) : précondition refusée.")
+    if not manifest.execution_started or manifest.running:
+        raise ValueError("La campagne doit être démarrée et arrêtée (execution_started, non running).")
+    if manifest.technical_failure_reason is not None:
+        raise ValueError("Le Manifest porte un échec technique : précondition refusée.")
+    if _sentinel_exists(directory):
+        raise ValueError("La sentinelle technical_failure.json existe (même illisible) : TECHNICAL_FAILURE effectif.")
+    _require_no_residual_update_lock(directory)
+    evidence = _load_referenced_evidence(directory, manifest)
+    validate_gate_v_campaign_manifest_v2_marker_status(manifest, plan, evidence)
+    facts = evaluate_pre_holdout_evidence_v2(plan, evidence)
+    if not (
+        facts.walk_forward_complete is True and facts.monte_carlo_complete is True
+        and facts.parameter_stability_incomplete_fold_ids == ()
+        and facts.parameter_stability_complete_fold_ids == plan.expected_fold_ids
+        and facts.pre_holdout_evidence_complete is True
+    ):
+        raise ValueError("Les preuves persistées ne sont pas complètes (WF, MC et Parameter Stability de CHAQUE fold).")
+    # Dernière revue, après les lectures lentes : un verrou ou une sentinelle apparus pendant la vérification refusent
+    # (fenêtre rétrécie, non supprimée — D5 n'est pas une transaction avec un futur Claim).
+    _require_no_residual_update_lock(directory)
+    if derive_gate_v_campaign_v2_effective_status(plan, directory, manifest, evidence) != _EVIDENCE_COMPLETE_STATUS:
+        raise ValueError("Le statut effectif n'est pas EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT.")
+    # Une transaction ENTIÈRE peut avoir tenu dans la fenêtre des lectures (verrou déjà libéré) : relecture finale.
+    if _read_manifest(plan, directory) != manifest:
+        raise ValueError("Le Manifest persisté a été modifié pendant la vérification : instantané périmé, refusé.")
+    return manifest
