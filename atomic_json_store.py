@@ -92,7 +92,83 @@ def save_atomic_overwrite(path: Union[str, Path], data: dict, kind: str) -> Path
     return target
 
 
-def save_exclusive(path: Union[str, Path], data: dict, kind: str) -> Path:
+class ExclusiveCreationIncompleteError(OSError):
+    """Levée UNIQUEMENT par `save_exclusive(..., durable=True)`, APRÈS une création exclusive réussie : le chemin
+    existe (et reste consommé) mais son écriture, son flush, sa fermeture ou un fsync a échoué. Jamais confondue
+    avec le refus initial d'`O_EXCL` (`FileExistsError`) : une erreur — même `FileExistsError` — survenue après la
+    création est toujours rangée ici, avec l'erreur d'origine en `__cause__` et le chemin créé en `path`."""
+
+    def __init__(self, message: str, path: Union[str, Path]):
+        super().__init__(message)
+        self.path = Path(path)
+
+
+# Le fsync d'un RÉPERTOIRE n'existe que sous POSIX (ouvrir un répertoire échoue sous Windows) : sous Windows la
+# durabilité de l'entrée de répertoire repose sur le journal NTFS et n'est pas démontrable depuis Python.
+_DIRECTORY_FSYNC_SUPPORTED = os.name == "posix"
+
+
+def _fsync_directory(directory: Union[str, Path]) -> None:
+    descriptor = os.open(str(directory), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _save_exclusive_durable(target: Path, data: dict, kind: str) -> Path:
+    """Mode `durable=True` de `save_exclusive` (ADR 0025 Décision 22.8). Avant toute création : payload encodé en
+    UTF-8 et, sous POSIX, sonde du fsync du répertoire parent — une erreur ici n'a rien créé. Puis création
+    exclusive ; ensuite écriture, flush, fsync du fichier, fermeture et (POSIX) fsync du répertoire : toute
+    erreur à partir de l'ouverture réussie devient `ExclusiveCreationIncompleteError`. Le fichier créé n'est
+    JAMAIS supprimé. Ne garantit pas la survie à toute panne matérielle : seulement que le système a été prié de
+    persister le fichier (et son entrée de répertoire sous POSIX) avant de rendre la main. Une interruption
+    (`KeyboardInterrupt`, autre `BaseException`) n'est PAS rangée en `ExclusiveCreationIncompleteError` : elle se
+    propage telle quelle, le chemin créé restant consommé."""
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except FileExistsError as error:
+        # Le parent existe mais n'est pas un répertoire : AUCUNE tentative n'a eu lieu sur le chemin du Claim. Ce n'est
+        # donc pas le refus d'`O_EXCL` et ne doit jamais être lu comme « déjà consommé » (FileExistsError réservée à
+        # ce refus). Le mode historique garde, lui, son comportement d'origine.
+        raise NotADirectoryError(
+            f"Le parent de {target} existe mais n'est pas un répertoire : le {kind} n'a pas été créé."
+        ) from error
+    body = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    if _DIRECTORY_FSYNC_SUPPORTED:
+        _fsync_directory(target.parent)
+    try:
+        # O_BINARY (Windows) : écriture octet pour octet, sans traduction de fin de ligne.
+        descriptor = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0))
+    except FileExistsError:
+        raise FileExistsError(
+            f"Un {kind} existe déjà à {target} — création exclusive refusée (une écriture "
+            "concurrente a gagné la course, ou ce chemin a déjà été utilisé)."
+        )
+    try:
+        try:
+            handle = os.fdopen(descriptor, "wb")
+        except BaseException:  # y compris une interruption : le descripteur ne fuit jamais ; l'erreur d'origine est relevée
+            try:
+                os.close(descriptor)
+            except OSError:  # `io.open` a pu le fermer lui-même : un EBADF ne doit jamais masquer l'erreur d'origine
+                pass
+            raise
+        with handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if _DIRECTORY_FSYNC_SUPPORTED:
+            _fsync_directory(target.parent)
+    except Exception as error:
+        raise ExclusiveCreationIncompleteError(
+            f"Le {kind} a été créé à {target} (chemin consommé) mais son écriture durable est incomplète : {error}",
+            target,
+        ) from error
+    return target
+
+
+def save_exclusive(path: Union[str, Path], data: dict, kind: str, *, durable: bool = False) -> Path:
     """Création EXCLUSIVE atomique au niveau du système de fichiers — garantit l'exclusivité
     ENTRE PROCESSUS, contrairement à `save_atomic()` : celle-ci documente elle-même ne "pas
     résoudre entièrement le TOCTOU inhérent au contrôle `target.is_file()`" (contrôle et écriture
@@ -116,8 +192,17 @@ def save_exclusive(path: Union[str, Path], data: dict, kind: str) -> Path:
       échouer fermé, jamais l'accepter silencieusement comme valide.
     - crash APRÈS écriture complète : artefact valide, normal.
     - second processus concurrent : reçoit `FileExistsError` de façon synchrone, avant tout accès
-      au contenu du premier — jamais d'inspection du détenteur existant, jamais de retry."""
+      au contenu du premier — jamais d'inspection du détenteur existant, jamais de retry.
+
+    **`durable` (ADR 0025 Décision 22.8, Slice E2)** — `False` (défaut) : comportement historique strictement
+    inchangé (mêmes octets, mêmes exceptions, aucun fsync) pour tous les appelants existants. `True` : voir
+    `_save_exclusive_durable` — flush et fsync du fichier, fsync du répertoire parent sous POSIX, toute erreur
+    postérieure à la création = `ExclusiveCreationIncompleteError` (le chemin reste consommé). Limites :
+    Windows ne permet pas le fsync de répertoire depuis Python (journal NTFS), un volume bloc OCI n'est pas
+    qualifié, NFS/SMB/object-store ne sont pas supportés, et aucun fsync ne garantit la survie à toute panne."""
     target = Path(path)
+    if durable:
+        return _save_exclusive_durable(target, data, kind)
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     try:
