@@ -374,6 +374,10 @@ un second enrichi pour un seul accès physique. `GateVCampaignManifest` gagne `f
 un **miroir de référence pour l'audit uniquement**, jamais l'autorité d'exclusivité elle-même
 (Décision 9).
 
+*Note additive (2026-10-12) : la Décision 23 (23.13, 23.22) précise cet événement canonique — champs optionnels,
+hash stocké, identifiant et nom de fichier déterministes, écriture exclusive durable ; le timing défini ici est
+conservé.*
+
 ## Décision 14 — `ValidationAssessment`/`GateVPolicyAssessment` : contrats exacts
 
 ```
@@ -1748,6 +1752,9 @@ V1 est inchangé. Le Manifest garde ses champs 13-17 à `None` et n'importe pas 
    (extension monotone) et traiter l'état « Claim consommé sans accès enregistré ». L'existence du Claim seule
    ne prouve pas qu'un accès a eu lieu ; un crash entre la lecture et l'événement est traité comme accédé.
 
+*Note additive (2026-10-12) : la Décision 23 verrouille le contrat d'E3 et amende la portée de 22.12.4 (23.5) ;
+22.12 reste la liste historique des obligations.*
+
 ### 22.13 — Tests exigés
 
 - **E1 (démontrables par tests unitaires)** : 14 champs dans l'ordre ; version exacte ; vecteurs de hash
@@ -1767,6 +1774,945 @@ V1 est inchangé. Le Manifest garde ses champs 13-17 à `None` et n'importe pas 
 - **Qualification manuelle du volume cible (non démontrable par tests)** : contention `O_EXCL` multiprocessus
   et comportement de `fsync` sur le vrai volume, avant toute exécution réelle. La survie à une panne
   d'alimentation réelle n'est pas démontrable par les tests.
+
+## Décision 23 — Slice E3 : exécution contrôlée du `FINAL_HOLDOUT` (contrat normatif, 2026-10-12)
+
+**Statut au 2026-10-12** (note factuelle additive ; les notes datées antérieures restent exactes pour leur date) :
+- **E1 publié** : commit `707ec51b7edc52e5b5d8c4b040d9454f83b27e45`. **E2 publié** : commit
+  `9c2bf7ef5ccf692e9d89db7b0ca61038bbd962e4` (HEAD = `origin/master` à la rédaction de cette Décision).
+- Tests rapportés lors de la revue finale d'E2 : 3772 réussis, 2 ignorés. Ils n'ont pas été rejoués pour rédiger
+  cette Décision, qui ne modifie aucun code.
+- **E3 = conception documentée par la présente Décision, en cours de validation documentaire, NON IMPLÉMENTÉE.**
+  Aucun module E3 n'existe. Tout artefact, fonction, champ ou fichier introduit ci-dessous est
+  **SPÉCIFIÉ, NON IMPLÉMENTÉ**, sauf ceux que 23.1 désigne « existant ».
+- **Le mode `REAL` est DÉSACTIVÉ et NON QUALIFIÉ.** Aucune qualification d'infrastructure (hôte Linux, volume, OCI,
+  autorité de temps, fournisseur de données, ingesteur, coffre) n'a été réalisée, et aucune n'est affirmée.
+- Aucun accès `FINAL_HOLDOUT` nouveau n'a eu lieu pour `AF-V-07` (l'accès antérieur et distinct d'AF-V-01 reste
+  documenté dans `DOMAIN_MODEL.md` §12). Aucun Claim réel n'existe. `GATE V` NON PASSÉE. Aucun Champion qualifié.
+
+**Portée** : cette Décision précise sans les contredire les Décisions 2, 9, 10, 11, 13, 16, 20, 21 et 22. Elle ne
+modifie aucune formule d'identité ou de hash existante (`scope_key`, `preregistration_id`,
+`campaign_protocol_fingerprint`, `campaign_id`, `claim_id`, `claim_content_hash`), ni les 14 clés du Claim (22.3), ni
+l'API d'E2, ni la sémantique de V1, ni aucun artefact historique. Ses amendements aux décisions antérieures sont
+inventoriés en 23.22 et sont strictement additifs. **Si une implémentation découvre qu'un contrat existant doit
+changer, elle s'arrête et demande un amendement explicite de cette ADR ; elle ne contourne rien.**
+
+### 23.1 — État de chaque composant (existant ou spécifié)
+
+**Existant** (commit `9c2bf7e`) : `FinalHoldoutAccessClaim` et ses fonctions pures (E1) ;
+`acquire_final_holdout_access_claim(campaign_dir, *, preregistration_path, research_run_path, split_plan_path,
+policy_path, repo_dir=None, created_at=None)` et `load_final_holdout_access_claim(plan, campaign_dir)` (E2) ;
+`atomic_json_store.save_exclusive(path, data, kind, *, durable=False)` et `ExclusiveCreationIncompleteError` ;
+`assert_gate_v_pre_holdout_evidence_complete` (D5) ; `GateVCampaignManifestV2` (champs 13-17 réservés à `None`) ;
+`dataset_split.HoldoutAccessEvent` (8 champs) avec `build_holdout_access_event`, `save_holdout_access_event`
+(`save_atomic`, non exclusif), `load_holdout_access_event` (`load_tolerant`), `list_holdout_access_events` ;
+`validation_oos.run_oos_validation` ; `engine.run_backtest(..., end_boundary=)` ;
+`strategy_contracts.resolve_state_ready_boundary` ; `ResearchRun` (`engine_version`, `git_sha` optionnel) ;
+`market_data.content_hash.content_hash` ; `job_store.build_local_csv_snapshot_id`.
+
+**Spécifié, non implémenté** : tout le reste de cette Décision, dont `GateVProspectiveCommitment`,
+`S0ProvenanceDeclaration`, `IngestionRecord`, `GateVHoldoutSnapshotAttachment`, `CommitmentVoidRecord`, le registre
+et ses admissions, les déclarations, l'inventaire, l'attestation, l'autorisation, `ReadIntent`, `DataReceipt`,
+`ClosingRecord`, le chargeur par octets (`engine.load_data_from_bytes`), l'écrivain exclusif de
+`HoldoutAccessEvent`, le lister strict, l'identifiant OOS déterministe, le générateur synthétique et le wrapper
+`run_gate_v_final_holdout_validation` (Décision 13).
+
+### 23.2 — Modes `SYNTHETIC` et `REAL`
+
+- `SYNTHETIC` est le mode par défaut et le seul utilisable pendant le développement. `REAL` est **désactivé** :
+  une constante `REAL_FINAL_HOLDOUT_ENABLED = False` (spécifiée) ne passe à `True` que par un commit délibéré,
+  postérieur au rapport de qualification de 23.21. Avec la constante à `False`, toute tentative `REAL` est refusée
+  avant toute lecture.
+- **Formats de snapshot disjoints** : `REAL` n'accepte que `local_csv:sha256:<64 hex>` ; `SYNTHETIC` n'accepte que
+  `synthetic_csv:sha256:<64 hex>`. Chaque mode refuse le format de l'autre. `ig_demo:`, Parquet, EODHD et tout autre
+  type sont **refusés dans les deux modes** tant qu'un amendement n'a pas fourni un contrat de vérification d'octets.
+- **Anti-déguisement** : un snapshot `synthetic_csv:` est accompagné d'un manifeste de fixture (graine, nombre de
+  lignes, pas, version du modèle de prix). Le chargeur régénère les octets avec le générateur déterministe et exige
+  l'égalité du SHA-256. Une donnée réelle ne peut donc pas passer pour synthétique.
+- `SYNTHETIC` exerce **le même chargeur, la même séquence et les mêmes écritures exclusives** que `REAL`. Il utilise
+  un registre propre (`mode: SYNTHETIC`, `registry_id` distinct), un coffre synthétique distinct, une autorité de
+  temps simulée **refusée en `REAL`** et des racines marquées synthétiques. Aucun artefact synthétique ne peut être
+  pris pour un artefact `REAL`.
+- **Profils de durabilité.** Le registre déclare un profil dans son identité. `REAL` exige `POSIX_DIR_FSYNC`
+  (`fsync` du fichier puis du répertoire parent) et refuse tout autre profil. Sous Windows ou sur tout hôte sans
+  `fsync` de répertoire, `SYNTHETIC` utilise `SIMULATED_DURABLE` : la même séquence s'exécute, la confirmation de
+  durabilité est simulée et les fautes de `fsync` sont injectables par les tests. Un résultat `PublishedDurable`
+  obtenu sous `SIMULATED_DURABLE` n'a aucune valeur de preuve de durabilité réelle.
+- **Conditions cumulatives de `REAL`** : Linux ; UID effectif égal au compte de service (jamais root) ; worktree
+  propre (aucun fichier suivi modifié) ; identité du code épinglée (23.4) ; rapport de qualification nominatif nommant le
+  SHA du code qualifié, selon la chaîne de commits `X → R → B` de 23.21 ; autorisation d'acquisition valide (23.11) ; autorité du registre vérifiée (23.9) ; preuve de
+  temps vérifiable (23.6) ; provenance suffisante (23.7). **Toute condition manquante, ambiguë ou non vérifiable
+  refuse `REAL`.** Windows est réservé à `SYNTHETIC`.
+
+### 23.3 — Fenêtre, exposition, classes, fraîcheur et indépendance scientifique
+
+**Définitions.** `W = [ws, we)` est la fenêtre `FINAL_HOLDOUT` du `DatasetSplitPlan`, en ISO-8601 offset-aware,
+comparée en instants UTC (borne naïve refusée). `S0` est le snapshot de recherche, égal à
+`plan.dataset_snapshot_id` (donc à celui de la pré-enregistrement, du `ResearchRun`, du split et du Claim). `S_H` est
+le snapshot du holdout (23.5). `E` est l'union des fenêtres de toute exécution ou lecture connue ou déclarée, pour tout
+fournisseur et tout timeframe du même sous-jacent déclaré (`HoldoutAccessEvent`, `ValidationRun` OOS, jobs, campagnes V1
+avec OOS, Claims, enregistrements `CONSUMPTION` du registre, `ReadIntent`, travaux non enregistrés déclarés). Les
+`RESERVATION` et `ADMISSION` sans `CONSUMPTION` ne sont **pas** des expositions (aucune donnée n'a été lue) : elles
+interviennent dans le test de recouvrement de 23.10, pas dans `E`. Un plan de split partageant la fenêtre ne compte
+comme exposition que s'il a servi (événement, `ValidationRun`, job) ou s'il est porté par une `CONSUMPTION` d'une
+autre campagne ; un plan jamais utilisé est inventorié mais n'est pas une exposition.
+`t_sel` est l'instant de la dernière décision de sélection ou de modification de stratégie informée par des données.
+**Il est déclaré par l'humain** à l'engagement (23.4), puis éventuellement repoussé à une date plus tardive par
+une déclaration ultérieure (23.11) : le `t_sel` effectif est le **maximum** entre celui de l'engagement et ceux des
+déclarations, et une déclaration ne peut jamais le ramener à une date plus ancienne ; l'historique Git n'en fournit qu'une borne
+inférieure indicative, établie par l'humain lors de la déclaration (par prudence, les corrections d'ingénierie
+`2e133b3` et `7c1138e` du 2026-09-13 y sont examinées ; elles n'établissent pas à elles seules une sélection informée
+par des données). F2 repose sur la déclaration. `t_anchor` est l'instant borne supérieure donné par une preuve de
+temps forte (23.6). Le fait que `S0` ait un `period_end` ne définit pas `W`.
+
+**Les trois classes de la Décision 22.2 sont inchangées** : `FRESH_UNEXPOSED_DECLARED`, `RETROSPECTIVE_EXPOSED`,
+`UNDETERMINED`. `RETROSPECTIVE_EXPOSED` l'emporte sur `UNDETERMINED`. Toute source illisible, de schéma inconnu, de
+fenêtre ou de fuseau inconnu donne `UNDETERMINED`. Le niveau de chronologie est une **preuve complémentaire, pas une
+quatrième classe** : `PROSPECTIVE_ANCHORED` si les conditions F1 à F6 ci-dessous tiennent, `UNSEEN_HISTORICAL` si
+aucune exposition n'est enregistrée mais que ces conditions ne tiennent pas, `NOT_APPLICABLE` sinon.
+
+**Seule la classe `FRESH_UNEXPOSED_DECLARED` avec le niveau `PROSPECTIVE_ANCHORED` permet l'admission** (23.10).
+`RETROSPECTIVE_EXPOSED`, `UNDETERMINED` et `FRESH_UNEXPOSED_DECLARED` avec `UNSEEN_HISTORICAL` sont refusés avant
+toute admission. Conditions de `PROSPECTIVE_ANCHORED`, toutes obligatoires :
+- **F1** `W ∩ E = ∅` en instants UTC, `E` complet et lisible, aucun élément `UNDETERMINED`.
+- **F2** `ws ≥ max(fin de E, t_sel)` et `t_sel ≤ t_anchor`.
+- **F3** `S0` ne contient aucune donnée de `W` : `max(time)` de `S0` calculé sur ses octets est strictement
+  inférieur à `ws` (vérifié à la création de l'engagement et avant le Claim). La colonne `time`, naïve, est
+  interprétée en UTC, contrat de `engine._add_market_time_columns` ; cette hypothèse est déclarée, non prouvée.
+- **F4** la fenêtre `W` est réservée de façon durable dans le registre (`RESERVATION`, 23.10) avant l'ancrage, puis
+  l'engagement est ancré par une preuve de temps forte vérifiable (23.6) avec `genTime + exactitude + marge ≤ ws`.
+- **F5** `S_H` est ingéré après `we` (23.7) ; la plage d'ingestion est `(fin de S0, we)`.
+- **F6** les déclarations humaines nominatives sont enregistrées et liées par hash (23.11). Aucun mécanisme de
+  signature cryptographique n'est spécifié ; « nominatif » signifie déclaré sous un nom, sans authentification forte.
+
+Un nouveau snapshot, un nouveau `scope_key`, un nouveau `split_plan_id`, un autre fournisseur ou un autre timeframe
+**n'établit jamais la fraîcheur**.
+
+**Indépendance scientifique — séparation obligatoire de cinq dimensions.** Aucune n'est transformée en une autre.
+`FRESH_UNEXPOSED_DECLARED` reste une **classification déclarative**.
+
+| Dimension | Ce qui l'établit | Ce qu'elle ne prouve pas |
+|---|---|---|
+| Provenance technique | hash, taille, enregistrement d'ingestion, écho du fournisseur | la fraîcheur, l'origine économique des prix |
+| Fraîcheur chronologique | preuve de temps forte, `ws` postérieur à `E` et `t_sel` | l'absence de consultation humaine |
+| Historique documenté des expositions | inventaire, admissions, événements | l'absence d'exposition non enregistrée (registre local, `results/` non versionné) |
+| Déclarations humaines | attestation nominative, sans authentification forte | la véracité de la déclaration |
+| Décision de qualification scientifique | Human Gate distinct (ADR 0024 Décision 15, Décision 12) | — (hors E3) |
+
+Une preuve d'horodatage, une attestation nominative, une identité de snapshot ou un enregistrement d'admission **ne
+prouvent pas l'absence absolue de contamination humaine** (connaissance de marché, consultation informelle,
+travaux non enregistrés). E3 produit des preuves d'audit ; il ne certifie jamais l'indépendance et ne prononce aucun
+verdict (23.25).
+
+### 23.4 — `GateVProspectiveCommitment` (engagement prospectif, spécifié)
+
+**Pourquoi.** `dataset_snapshot_id` est le SHA-256 des octets complets d'un fichier (`local_csv:sha256:<hash>`). Il
+entre dans `scope_key`, `preregistration_id`, `campaign_protocol_fingerprint` et donc `campaign_id`, le Plan V2 et le
+Claim. Si ce fichier contenait des barres de `W`, ses octets dépendraient de prix qui n'existent qu'à `we` et son
+identifiant ne serait calculable qu'après `we` : **la chronologie `t_anchor < ws < we < acquisition` est impossible
+pour un snapshot unique contenant le holdout**. Le modèle à deux snapshots (23.5) la rend réalisable sans toucher à
+ces identités : la pré-enregistrement, le Plan V2 et le Claim lient `S0`, qui existe déjà ; `W` est un intervalle futur
+déclaré dans le split (le constructeur de `DatasetSplitPlan` et `_derive_plan` ne contrôlent que l'égalité des
+identifiants et la chronologie des zones, jamais la couverture des données ; `_derive_plan` exige en outre une zone
+`validation` non nulle et calcule la géométrie des folds).
+
+**Artefact.** Chemin `<campaign_dir>/prospective_commitment.json`, création exclusive durable, **un seul par campagne**.
+Version `gate_v_prospective_commitment_v1`. Création **après** que D5 est complète (WF, MC, PS ; statut
+`EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT`) et **avant** `ws`. **Séquence obligatoire** : engagement créé →
+**réservation** durable de `W` dans le registre (`RESERVATION`, 23.10) → preuve de temps **portant sur l'enregistrement
+de réservation** (23.6). Une réservation
+refusée (recouvrement avec une autre réservation, admission ou exposition) rend l'engagement nul : une fenêtre
+ne peut donc jamais être engagée par plusieurs campagnes concurrentes, ce qui interdit de n'admettre qu'après `we` la
+variante la plus favorable parmi plusieurs engagements ancrés. Canonicalisation de la Décision 20.3.
+`commitment_id = SHA256(canonical_json(champs sémantiques))` ; `commitment_content_hash = SHA256(canonical_json(
+champs sémantiques + commitment_id + created_at))`. **Écart voulu avec E1** (où `created_at` est exclu des deux
+hashes, inchangé) : ici le successeur épingle le `content_hash`, ce qui rend une modification a posteriori d'un
+horodatage détectable. Ce n'est pas une preuve de date (23.6).
+
+Champs sémantiques : `campaign_id`, `preregistration_id`, `preregistration_content_hash`,
+`campaign_protocol_fingerprint` (projections du plan) ; `window_start`, `window_end` (égaux à
+`plan.final_holdout`) ; `research_snapshot_id` (S0) ; hash de `S0ProvenanceDeclaration` ; `oos_parameters`
+littéraux et `oos_parameter_selection_rule = "LITERAL_PREDECLARED"` ; configuration d'exécution
+(`initial_capital`, `spread`, `slip_in`, `slip_out` explicites, `strategy_module`) et son hash ; identité du code
+(SHA Git complet, arbre propre, hashs SHA-256 des fichiers du moteur, de la stratégie, de `validation_oos.py`, du
+chargeur, de l'orchestrateur, de l'ingesteur et du registre ; la règle de vérification est l'égalité exacte du SHA Git
+complet courant avec celui engagé, à chaque démarrage `REAL` ; `ENGINE_VERSION`, valeur calculée de `required_warmup(oos_parameters)`) ; références (id et
+`validation_run_record_hash`) des `ValidationRun` WF/MC/PS : le Manifest V2 ne porte que leurs identifiants, et
+`ValidationRun` n'a pas de `content_hash` ; `validation_run_record_hash` (spécifié) = SHA-256 du JSON canonique
+(Décision 20.3) de l'enregistrement persisté ; hash de la configuration source du job qui a servi au Walk-Forward
+(`config_used.json`, base de la comparaison des coûts, 23.16) ; règle d'acquisition de `S_H`
+(fournisseur, symbole, convention de cotation, timeframe, fuseau d'origine, calendrier et sessions, règle de
+couverture, adaptateur et sa version, nombre maximal de tentatives d'ingestion, plage `(fin de S0, we)`) ;
+`registry_id` logique ; `t_sel` déclaré à l'engagement (une déclaration ultérieure ne peut que le repousser à une date plus tardive ; `t_sel`
+effectif = maximum, 23.3 et 23.11).
+
+**Immuabilité.** Aucun champ ne change après la création. Un changement de protocole, de paramètres, de coûts, de
+code ou de règle d'acquisition invalide l'engagement. Un engagement non ancré ou invalide est annulé par un
+`CommitmentVoidRecord` (23.8) et la campagne devient inutilisable pour E3 ; une nouvelle tentative exige une nouvelle
+campagne (nouveau scope), donc un nouvel engagement ancré avant son propre `ws`, sur une fenêtre qui ne recoupe pas
+celle de la campagne nulle si une réservation avait été publiée (elle n'est jamais libérée, 23.10). Rien de cet artefact n'entre dans
+les identités historiques.
+
+### 23.5 — Deux snapshots, `S0` et `S_H` ; audit de ce qui a réellement été consulté
+
+- **`S0`** : snapshot de recherche. Le Plan V2, la pré-enregistration, le `ResearchRun` et le Claim continuent de le
+  référencer, inchangés. Il est vérifié (hash, `max(time) < ws`) et analysé **avant** le Claim : c'est une donnée de
+  recherche, pas du holdout.
+- **`S_H`** : snapshot futur scellé, contenant les barres contiguës de `(fin de S0, we)`, donc le contexte entre
+  `S0` et `ws` et la fenêtre `W` elle-même. Il est lié par l'attachment (23.8), jamais par le Claim. L'exécution
+  `FINAL_HOLDOUT` consulte `S_H` après vérification de l'attachment et de son hash, avec `S0` comme contexte.
+- **Amendement de la portée de 22.12.4** (sans modifier E1 ni E2) : « vérifier le contenu des données de marché
+  contre `dataset_snapshot_id` » s'entend, pour une campagne prospective, comme (i) les octets de `S0` sont vérifiés
+  contre `plan.dataset_snapshot_id` et (ii) les octets de `S_H` sont vérifiés, au moment de l'unique lecture,
+  contre l'identifiant de `S_H` porté par l'attachment. **Le Claim n'atteste jamais `S_H`.**
+
+**Liens d'audit exacts.** Chaque identité a un porteur nommé ; aucune n'est déduite d'une autre.
+
+| Identité | Porteurs |
+|---|---|
+| Snapshot de recherche (`S0`) | Plan V2, pré-enregistration, Claim, `ReadIntent.research_snapshot_id`, `DataReceipt` |
+| Snapshot réellement consulté (`S_H`) | `Attachment`, `ReadIntent.holdout_snapshot_id` (attendu), `DataReceipt.holdout_bytes_sha256` (observé), `ClosingRecord` ; `HoldoutAccessEvent` canonique via son champ `reason`, qui contient `read_intent_id` et l'identifiant de `S_H` (donc couvert par le hash de la Décision 13) ; `ValidationRun` OOS via le `ClosingRecord` (qui épingle son `validation_run_record_hash`) et via l'événement qui la référence |
+| Fenêtre effectivement exécutée | `plan.final_holdout`, `ReadIntent`, spécification de la `ValidationRun` OOS (`holdout_start`, `holdout_end`), `ClosingRecord` ; l'événement canonique ne la porte qu'indirectement (`split_plan_id`, et `read_intent_id` dans `reason`) |
+| Hash et taille des octets de `S_H` | `IngestionRecord` (ingestion), `DataReceipt` (unique lecture) |
+| Entrée transmise au moteur | `DataReceipt.engine_input` : preuve de construction + empreinte (ci-dessous) |
+| Version et paramètres du moteur | `ReadIntent` et `ClosingRecord` : `ENGINE_VERSION`, SHA Git, hashs de fichiers, `end_boundary`, coûts, module de stratégie, `oos_parameters`, `required_warmup` |
+
+`DataReceipt.engine_input` contient : `s0_sha256`, `holdout_bytes_sha256`, identifiant, version et hash de code du
+chargeur, colonnes et dtypes, `n_rows_s0`, `n_rows_s_h`, dernière heure de `S0` et première heure de `S_H`,
+`n_rows_transmitted`, première et dernière heure UTC transmises, borne de troncature `end` (exclusive) et
+`engine_input_digest` = SHA-256 d'une sérialisation canonique ligne à ligne des lignes effectivement transmises à
+`run_oos_validation` (sérialisation fixée par la slice du chargeur, avec vecteurs littéraux calculés hors du code
+testé). La preuve de construction (hashs d'entrée, version et code du chargeur, règle de troncature) et l'empreinte
+sont toutes deux obligatoires.
+
+**Règle d'attribution.** La `ValidationRun` OOS conserve le schéma existant ; son `dataset_snapshot_id` vaut
+`plan.dataset_snapshot_id`, c'est-à-dire `S0`. **Aucun consommateur ne doit lire ce champ comme le snapshot consulté
+d'une campagne prospective** : le snapshot consulté est celui du `ClosingRecord` et du `DataReceipt`. Un résultat
+n'est jamais attribué à `S0` seul. Il en va de même du champ `dataset_snapshot_id` de l'événement canonique, fixé à
+`S0` (23.13). `validation_run.py` n'est pas modifié.
+
+### 23.6 — Preuves chronologiques recevables et conditions de refus
+
+| Niveau | Preuve | Statut |
+|---|---|---|
+| Fort | jeton RFC 3161 sur l'empreinte `reservation_content_hash` (les 32 octets du SHA-256, hex décodé ; l'enregistrement de réservation épingle `commitment_content_hash`) avec chaîne de certificats stockée ; ou preuve OpenTimestamps **confirmée** dans un bloc | obligatoire en `REAL` |
+| Corroboration | enregistrement d'hébergeur Git (événement de push, release) figé et haché | jamais suffisant seul : modifiable par le propriétaire |
+| Non recevable | hash Git, date de commit, `created_at`, `attested_at`, mtime, horloge système | jamais une preuve de date |
+
+- Une preuve de temps prouve que l'empreinte **existait** avant sa borne ; elle ne prouve ni la date de création, ni
+  l'absence de consultation.
+- RFC 3161 : le jeton est vérifié contre une liste d'autorités de confiance (chaînes et politiques) **committée dans le
+  dépôt** ; la validité du certificat est contrôlée à `genTime` ; la révocation n'est vérifiable qu'en ligne et son
+  absence de vérification donne `REVOCATION_UNKNOWN`. La borne est `genTime + exactitude`. Un `nonce` évite le rejeu.
+- OpenTimestamps : seule une attestation de bloc confirmée compte ; une attestation en attente est insuffisante.
+- Condition : `borne + marge ≤ ws`. La marge est une décision opérationnelle ouverte (23.24).
+- **Fail-closed** : outil de vérification indisponible, chaîne absente, autorité hors liste, empreinte différente,
+  `genTime` illisible ou postérieur, ou preuve en attente : état `TIME_PROOF_UNVERIFIABLE`, l'engagement n'est pas
+  ancré, aucune campagne prospective n'existe, `REAL` est refusé. Aucune autorité de temps ni outil de vérification
+  n'est choisi ou qualifié par cette Décision.
+- La vérification a lieu deux fois : à l'ancrage (en ligne, avec révocation) et au démarrage d'E3 (hors ligne, contre
+  la chaîne figée).
+- **Ce qui est horodaté** : l'enregistrement `RESERVATION` (23.10), jamais l'engagement seul. Comme la réservation
+  épingle `commitment_content_hash` et occupe un slot de la chaîne du registre, la preuve établit à la fois l'existence
+  de l'engagement, l'antériorité de la réservation et son rang. Un jeton obtenu sur l'engagement seul n'établit
+  aucune réservation antérieure à `ws` et n'est pas recevable : deux engagements ancrés « à la main » avant `ws`, dont
+  la réservation n'aurait lieu qu'après `we`, ne peuvent donc pas être départagés a posteriori.
+- **Artefact `ReservationTimeProof`** (spécifié) : `<campaign_dir>/reservation_time_proof.json`, création exclusive
+  durable, un seul par engagement, écrit **seulement** pour une preuve vérifiée (un échec de vérification n'écrit
+  aucun artefact et laisse l'engagement non ancré). Champs : version de schéma, type de preuve (`RFC3161` ou
+  `OPENTIMESTAMPS`), `reservation_content_hash` visé et `commitment_content_hash` correspondant, octets de la preuve
+  (ou référence et SHA-256) avec la chaîne ou les en-têtes nécessaires, identité et version de l'outil de
+  vérification, empreinte de la liste de confiance utilisée (elle doit égaler celle du dépôt au SHA épinglé par
+  l'engagement), borne de temps UTC retenue (`genTime + exactitude`), résultat de la vérification, `created_at`. Son
+  `content_hash` est épinglé par l'admission et le `ReadIntent` (23.10, 23.13). L'`ADMISSION` vérifie que la preuve
+  vise **sa propre** réservation et que `borne + marge ≤ ws`.
+- **Témoin de tête du registre** (spécifié) : après chaque enregistrement (`RESERVATION`, `ADMISSION`, `CONSUMPTION`,
+  `REBIND`, calendrier précisé en 23.10 étape 6 bis), le couple (`seq`, `content_hash`) de la tête de la chaîne est
+  couvert par une preuve de temps de même niveau et copié sur un support
+  indépendant de l'hôte (support : décision opérationnelle, 23.24). Il sert uniquement à détecter un retour en
+  arrière du registre (23.9).
+
+### 23.7 — Ingestion technique cloisonnée et provenance
+
+**Quatre classes d'accès aux octets de `S_H`.**
+
+| Classe | Qui | Quand | Permis | Interdit |
+|---|---|---|---|---|
+| A. Ingestion et stockage | ingesteur dédié | après `we` | copier en flux vers le coffre scellé | analyser, afficher, échantillonner, journaliser le contenu |
+| B. Identité et intégrité | le même ingesteur, puis E3 à l'unique lecture | ingestion, puis à l'unique lecture après le `ReadIntent` | SHA-256 en flux et taille | toute autre statistique |
+| C. Recherche ou personne | personne | jamais avant le Claim | rien | tout affichage, backtest, sélection de paramètres |
+| D. Moteur de validation | E3 seul | après Claim et `ReadIntent` | une lecture unique | toute relecture |
+
+**Exemption d'ingestion, bornée.** L'ingesteur traite les octets en flux pour le transport, le SHA-256 et la taille.
+Il ne produit qu'un `IngestionRecord` : taille, SHA-256, plage demandée, `acquired_at`, écho du fournisseur
+(transport et métadonnées de réponse), identité de l'ingesteur (SHA Git, hash de fichier), hôte. Interdits :
+parsing, affichage, échantillonnage, statistique, journalisation du contenu, copie hors coffre, transmission à un
+autre processus. Le module de l'ingesteur n'importe aucune bibliothèque d'analyse (test AST).
+
+**Portée exacte des garanties** : le hash et la taille sont des fonctions déterministes de tout le contenu. La taille
+indique grossièrement le nombre de barres ; le hash permet de confirmer une hypothèse sur un fichier connu. Le
+cloisonnement garantit l'absence de **valeurs, statistiques et information par barre** avant le Claim. **Il ne
+garantit pas une absence absolue d'information dérivée du contenu.**
+
+**Cloisonnement requis (à démontrer sur la machine cible, non démontré aujourd'hui)** : coffre lisible par un seul
+compte de service ; source non interactive (script ou API) ; un export manuel depuis une interface graphique est
+exclu car il affiche les prix ; fournisseur, instrument et timeframe identiques à ceux déclarés pour `S0`. Tant que
+cette démonstration manque, `REAL` reste non qualifié.
+
+**Provenance de `S_H`.**
+
+| Champ | Statut | Où et comment | Si absent ou insuffisant |
+|---|---|---|---|
+| Fournisseur réel | déclaré (engagement) + constaté localement par l'ingesteur (hôte, certificat TLS, entêtes de réponse capturés ; l'`IngestionRecord` est auto-produit, non signé, sans preuve de temps) | ingesteur | `REAL` refusé |
+| Instrument exact (symbole fournisseur) | déclaré + écho de la réponse du fournisseur ; impossible à prouver depuis les octets | ingesteur | `REAL` refusé si l'adaptateur ne fournit pas d'écho |
+| Convention de cotation | déclaré, égale à celle de `S0` | déclaration humaine | refus si absente ; inscrit dans `provenance_residuals` |
+| Timeframe | déclaré + écho + calculé après Claim (écarts d'horodatage multiples du pas) | ingesteur, E3 | `REAL` refusé |
+| Fuseau d'origine, conversion UTC | déclaré, non prouvable ; cohérence avec `S0` contrôlée après Claim | déclaration, E3 | refus si absent |
+| Calendrier et sessions | déclaré | engagement | refus si absent |
+| Plage demandée | calculé (paramètres de requête) | ingesteur | refus |
+| Plage réellement couverte | calculé après Claim (première et dernière barre) contre la règle de couverture engagée | E3 | `EXECUTION_VOID` |
+| Continuité avec `S0` | calculé après Claim (première barre de `S_H` strictement postérieure à la dernière de `S0`, colonnes et en-tête égaux) | E3 | `EXECUTION_VOID` |
+| Hash, taille, heure d'acquisition | calculé à l'ingestion, hash recalculé à l'unique lecture | ingesteur, E3 | refus |
+| Version et identité de l'ingesteur | calculé (SHA Git, hash de fichier) | ingesteur | refus |
+| Identité économique réelle de l'instrument, intégrité des prix du courtier | impossible à prouver | — | résiduel accepté par l'humain |
+
+**Règle de suffisance.** Les champs de niveau 1 (fournisseur, symbole, timeframe, plage demandée, hash, ingesteur)
+doivent être vérifiés ou constatés localement par l'ingesteur (jamais attestés par le fournisseur : aucune signature
+n'est spécifiée). Les champs de niveau 2 (convention, fuseau, calendrier)
+peuvent rester déclarés mais doivent être explicitement égaux à ceux de `S0` ; leur caractère non prouvé est inscrit
+dans `ClosingRecord.provenance_residuals`. Le niveau 3 est impossible à prouver. **Aucun fournisseur n'a été vérifié ;
+la capacité d'écho des API reste à établir par fournisseur.** Sans adaptateur fournissant l'écho de niveau 1, `REAL`
+est refusé.
+
+**`S0ProvenanceDeclaration`** (spécifié, additif). Les artefacts de `S0` n'établissent que des noms de fichier : son
+`data_manifest.json` porte `provider: "local_csv"`, `instrument: "nasdaq_3m"` et `timezone: "UTC"` déclaré. Une
+déclaration nominative, liée à l'identifiant de `S0`, énonce le fournisseur, le symbole, la convention de cotation et le
+fuseau réels. Aucune identité historique de `S0` n'est modifiée.
+
+### 23.8 — Attachment `S_H` : unicité et absence de sélection opportuniste
+
+- **Une seule ingestion complète par engagement.** Le coffre contient un répertoire `<coffre>/<commitment_id>/` avec
+  `s_h.csv`, `ingestion_record.json`, et `attempt_<n>.json` (`gate_v_ingestion_attempt_v1`) pour les tentatives échouées (classe d'erreur, nombre
+  d'octets et SHA-256 des octets reçus, jamais de contenu : l'absence de sélection entre tentatives reste auditable). La création est exclusive : une seconde ingestion complète est impossible. La première
+  ingestion déclarée complète lie l'engagement. « Complète » est défini par le contrat de l'adaptateur (fin de plage
+  rapportée par le fournisseur et `IngestionRecord.complete = true`) ; un adaptateur dont le contrat ne définit pas
+  cette notion est refusé. Le nombre maximal de tentatives est celui de l'engagement ; l'échéance d'ingestion après
+  `we` est une décision opérationnelle (23.24). Les tentatives échouées sont journalisées et comptées (23.11).
+- **Un seul attachment immuable par engagement**, `<campaign_dir>/holdout_snapshot_attachment.json`, création
+  exclusive durable, **dérivé** de l'`IngestionRecord`, jamais choisi. Il lie : `commitment_id` et
+  `commitment_content_hash`, `S0`, `S_H`, `content_hash` de l'`IngestionRecord`, plage et fenêtre égales à celles
+  engagées. Toute inégalité l'invalide. Il n'entre dans l'identité d'aucun artefact antérieur.
+  `attachment_id = SHA256(canonical_json({attachment_semantics_version, commitment_id, research_snapshot_id,
+  holdout_snapshot_id, ingestion_record_content_hash}))` ; `attachment_content_hash` = hash du contenu complet,
+  `created_at` inclus.
+- Le coffre ne doit contenir que les fichiers attendus ; un fichier supplémentaire fait refuser `REAL`.
+
+| Cas | Traitement |
+|---|---|
+| Plusieurs ingestions du même intervalle | la seconde est refusée |
+| Deux fichiers `S_H` de hashs différents | impossible via l'ingesteur ; si copiés à la main, seul le fichier désigné par l'attachment est lu et son hash vérifié |
+| Snapshot partiel | la règle de couverture engagée avant la fenêtre est contrôlée après le Claim ; sinon `EXECUTION_VOID` |
+| Erreur d'ingestion permanente | engagement nul, jamais remplacé |
+| Nouvelle tentative de rattachement | refusée |
+| Attachment créé, non utilisé | reste ; aucun effet ; la fenêtre n'est pas consommée |
+| Changement de fournisseur ou de timeframe, ou de période | non conforme à l'engagement : nul |
+
+**Engagement nul.** `CommitmentVoidRecord` (spécifié) : enregistrement exclusif, nominatif, avec une classe de cause
+(`INGESTION_FAILED_PERMANENT`, `PROVENANCE_MISMATCH`, `SNAPSHOT_INTEGRITY`, `PROTOCOL_ERROR`,
+`TIME_PROOF_UNVERIFIABLE`, `RESERVATION_REFUSED`). Une annulation survenue avant toute réservation ne protège aucune
+fenêtre : seule une `RESERVATION` publiée protège. `RESERVATION_STALE` est enregistrée avec la cause
+`RESERVATION_REFUSED` (la protection de la fenêtre se lit dans la chaîne du registre, pas dans la cause : une
+réservation publiée protège, même devenue `RESERVATION_STALE`). La `RESERVATION` de la
+campagne nulle n'est **jamais libérée** (23.10) : la fenêtre est perdue pour `GATE V`, que l'annulation ait lieu avant
+ou après `ws`. Une nouvelle campagne doit, si une réservation avait été publiée, viser une fenêtre qui ne recoupe pas la sienne, et
+être ancrée avant son propre `ws`. Un `CommitmentVoidRecord` est refusé dès qu'une `CONSUMPTION` ou un `ReadIntent` existe ; `EXECUTION_VOID_<cause>` et
+`CLOSED_COMPLETE` sont des états finaux. **Une erreur de snapshot ne donne donc jamais le droit de choisir un fichier de remplacement.** Deux
+campagnes rivales sur la même fenêtre : la première **réservation** gagne (23.10) ; la seconde ne peut pas être
+ancrée. Une réservation sans `ClosingRecord` terminal est comptée comme tentative abandonnée dans la comptabilité des
+essais (23.11) : un abandon sélectif reste visible.
+
+### 23.9 — Registre transversal mono-hôte Linux : autorité physique et limites
+
+**Garantie réelle, restreinte** : le registre est autoritaire **uniquement pour un déploiement contrôlé sur un hôte
+Linux et un volume local qualifié**. `registry_id`, `instance_id`, permissions et hashs **ne sont jamais une preuve
+universelle d'unicité entre machines**. Deux hôtes indépendants avec chacun leur dépôt et leur registre ne sont pas
+détectables par ce mécanisme.
+
+- **Constat** : `campaign_root` est toujours fourni par l'appelant (`results/job_xxx/gate_v/...`, Décision 16) ;
+  `results/` est gitignoré, donc chaque worktree et chaque job a son propre espace. Un registre par job ou par
+  worktree ne peut pas empêcher deux admissions incompatibles : un registre global unique est donc requis.
+- **Chemin et configuration.** Un chemin canonique fixe, hors dépôt, hors worktrees, hors `results/`, déclaré
+  uniquement dans un fichier de configuration appartenant à root, non modifiable par les comptes de recherche
+  (permissions exactes : décision opérationnelle, 23.24). En `REAL`, aucun paramètre,
+  aucune variable d'environnement et aucun champ de campagne ne redéfinit ce chemin. Le même fichier déclare le chemin
+  du coffre, le compte de service et la liste des hôtes autorisés (identifiants machine).
+- **Protection par le système** : répertoire propriété du compte de service, écriture réservée à ce compte, fichiers
+  en lecture seule après création (permissions exactes : décision opérationnelle, 23.24) ; `REAL` refuse si l'UID effectif n'est pas celui du service ou est root. Un attribut `append-only` sur le
+  répertoire des admissions est une option à qualifier, non supposée.
+- **Identité logique et physique.** Logique : `registry_id`, committé dans le dépôt. Physique : `instance_id`
+  aléatoire créé à l'initialisation, plus une liaison (UUID du volume, type de système de fichiers, inode du répertoire,
+  identifiant machine) écrite dans la configuration de root, **hors** du registre. Une copie du répertoire reproduit
+  `registry_id` et `instance_id` mais change l'inode ou le volume.
+- **Vérifications** à chaque démarrage `REAL`, avant l'admission et avant le `ReadIntent` : propriétaire et mode de la
+  configuration ; chemin réel égal au chemin configuré, sans lien symbolique ; système de fichiers dans une liste
+  fermée de systèmes locaux à qualifier (réseau, overlay, FUSE, tmpfs refusés) ; UUID, inode et identifiant machine égaux
+  à la liaison ; `identity.json` conforme (`registry_id`, `instance_id`, mode `REAL`, profil de durabilité `POSIX_DIR_FSYNC`) ; intégrité de la chaîne ; tête de
+  chaîne au moins égale au dernier témoin de tête (23.6) ; hôte autorisé. Une restauration de l'ensemble de la
+  machine ou du volume (instantané de machine virtuelle) conserve UUID, inode et identifiant machine : seul le témoin
+  de tête, copié hors de l'hôte, permet de la détecter.
+- **Copies, sauvegardes, restaurations, montages.** Une sauvegarde est une copie en lecture seule hors du chemin
+  canonique et échoue à la liaison. Une restauration est une cérémonie humaine : nouveau répertoire, nouvel
+  `instance_id`, liaison mise à jour par root, enregistrement `REBIND` dans la chaîne (anciennes et nouvelles
+  liaisons, tête restaurée, justification). La tête restaurée doit être au moins égale à la plus haute tête
+  référencée par un artefact connu et par le dernier témoin de tête (23.6), sinon refus. Un montage lié du même volume (même UUID
+  et même inode) désigne le même registre.
+- **Un seul domaine d'admission par déploiement** : la configuration déclare exactement un registre ; configuration
+  absente, ambiguë ou hôte non listé donne un refus.
+- **`REAL` est refusé** si l'autorité est ambiguë, absente, inaccessible, divergente, corrompue, incomplète ou non
+  qualifiée. Il n'existe aucun repli sur un registre local.
+- **Conservation** : append-only ; copie après chaque enregistrement sur un support indépendant ; aucune
+  restauration par dessus un registre existant.
+- **Limites explicites** : plusieurs hôtes indépendants ; un administrateur root qui falsifie configuration et
+  registre ; E2 appelée hors E3 ; lecture manuelle des données ; `run_oos_validation` (publique) ; matériel qui ment
+  sur `fsync` ; multi-machine et OCI non qualifiés ; tout enregistrement postérieur au dernier témoin de tête et non
+  référencé par un artefact connu, qu'une restauration complète de la machine ferait disparaître ; un code antérieur à
+  la Décision 23 (autre worktree ou branche), qui ignore silencieusement les événements étendus (23.13).
+
+### 23.10 — Admission atomique, publication durable et concurrence
+
+**Enregistrements du registre** (spécifiés) : un fichier `admissions/admission_<seq>.json` par enregistrement (le
+répertoire et le motif de nom, hérités de l'ordre de conception, désignent **tous** les types), append-only, chaînés,
+de quatre types.
+- **`RESERVATION`** (avant `ws`, 23.4) : réserve `W` pour une campagne. Liée à `commitment_id` et
+  `commitment_content_hash`. Refusée si `W` recoupe une autre réservation ou admission, ou si le lister strict des
+  sources des racines d'audit (le même que celui de l'inventaire, sans attestation) renvoie une source pertinente.
+  Elle n'ouvre aucun droit d'accès.
+- **`ADMISSION`** (après `we`, 23.17) : convertit la réservation de la même campagne en droit d'enchaîner jusqu'au
+  Claim. Liée à la réservation (`reservation_content_hash` ; `reservation_seq` est informatif), à `attachment_id` et
+  `attachment_content_hash`, au `content_hash` de la `ReservationTimeProof`, aux hashs d'attestation et d'autorisation.
+- **`CONSUMPTION`** (après le retour durable d'E2, avant le `ReadIntent`) : marque que le droit de la campagne est
+  consommé. Liée à `claim_id`, `claim_content_hash` et à l'admission. C'est le **verrou d'exclusivité par
+  `campaign_id` dans le registre** : il ne dépend pas du chemin du dossier de campagne.
+- **`REBIND`** (23.9) : cérémonie de restauration.
+
+**Unicité par campagne.** La chaîne contient au plus un enregistrement de chaque type `RESERVATION`, `ADMISSION` et
+`CONSUMPTION` par `campaign_id`. Cette unicité est vérifiée à l'étape 2 de la publication, sous la même
+sérialisation que le recouvrement. **Un second enregistrement du même type et de la même campagne n'est jamais
+publié, même à contenu identique** : le chemin de publication le refuse (`CAMPAIGN_ALREADY_REGISTERED`, ou
+`CAMPAIGN_ALREADY_CONSUMED` pour une `CONSUMPTION`). Pour `RESERVATION` et `ADMISSION` seulement, l'orchestrateur peut
+**relire** l'enregistrement existant de sa campagne et le réutiliser sans rien publier si son contenu sémantique est
+identique (reprise après crash, ci-dessous) ; cette réutilisation est une lecture, jamais une publication. **Pour une
+`CONSUMPTION`, il n'existe aucune réutilisation ni idempotence** : elle est refusée dans tous les cas où une
+`CONSUMPTION` de ce `campaign_id` existe, et la re-confirmation de durabilité n'est permise qu'à l'intérieur de l'appel
+qui l'a publiée (il en connaît le slot). Une copie ou une restauration du dossier de campagne sous une autre racine
+conserve son `campaign_id` : elle ne peut ni réserver une seconde fois, ni réutiliser une admission déjà suivie d'une
+`CONSUMPTION`, ni atteindre le `ReadIntent` sans sa propre `CONSUMPTION`, que le registre n'accorde qu'une fois.
+
+**Champs communs** à tous les types : `admission_semantics_version`, `registry_id`, `instance_id` (celui en vigueur,
+voir `REBIND`), `seq`, `prev_content_hash` (slot 0 : SHA-256 de la chaîne UTF-8
+`"gate_v_registry_genesis:" + instance_id`), type, `created_at`.
+**Champs des types de campagne** (`RESERVATION`, `ADMISSION`, `CONSUMPTION`) : `campaign_id`, fenêtre, `commitment_id`,
+`commitment_content_hash`, hash d'identité du code, `campaign_dir_locator` (indication de localisation, **hors
+identité** : un déplacement du dossier n'invalide rien, Décision 16). `RESERVATION` ajoute `static_sources_digest`
+calculé à la réservation par le lister strict. `ADMISSION` ajoute `static_sources_digest`, le hash de la projection de
+recouvrement et les liens ci-dessus. `CONSUMPTION` ajoute `claim_id`, `claim_content_hash` et `admission_content_hash`.
+**`REBIND`** n'a ni `campaign_id` ni fenêtre : `old_binding_hash`, `new_binding_hash`, tête restaurée (`seq`,
+`content_hash`), justification, nouvel `instance_id`. Règle de chaîne : l'`instance_id` de chaque enregistrement est
+celui du slot 0 jusqu'au premier `REBIND`, puis celui du dernier `REBIND` ; l'`instance_id` du `REBIND` lui-même est le
+**nouveau** ; la continuité repose sur `prev_content_hash`, pas sur la valeur de genèse. `record_content_hash` (pour
+une `RESERVATION`, `reservation_content_hash`) = SHA-256 du JSON canonique de l'enregistrement complet, `seq`,
+`prev_content_hash` et `created_at` inclus : c'est lui que la preuve de temps horodate et que les successeurs épinglent. `admission_id` = hash sémantique (sans `seq`, `prev_content_hash`,
+`campaign_dir_locator`, `reservation_seq` ni `created_at`) ; `admission_content_hash` = hash du contenu complet.
+**Aucune libération ni suppression en V1** : une réservation ou une admission protège la fenêtre définitivement,
+même sans Claim.
+
+**Définitions.** *Ensemble pertinent* : les sources de l'inventaire dont la fenêtre recoupe `W` ou est inconnue, plus
+les réservations et admissions d'autres campagnes qui recoupent `W`. Pour une campagne `FRESH_UNEXPOSED_DECLARED`,
+cet ensemble est vide. `static_sources_digest` = SHA-256 de la liste canonique triée de l'ensemble pertinent
+(identifiant canonique et `content_hash` de chaque élément) : c'est donc une constante tant qu'aucune exposition ni
+aucun rival n'apparaît, et un ajout sans rapport avec `W` ne la modifie pas. `projection de recouvrement` = hash de la
+liste des réservations et admissions d'autres campagnes qui recoupent `W` (ou illisibles).
+
+**Granularité globale.** Aucun artefact ne porte d'instrument vérifié (le plan, la pré-enregistration, le
+`ResearchRun` et le Claim n'ont pas de champ instrument ; seul `dataset_snapshot_id` existe). L'exclusivité porte donc
+sur les fenêtres de l'ensemble du registre, sans clé d'instrument ni de timeframe ; l'instrument déclaré est noté pour
+audit. Test de recouvrement : `a.start < b.end ∧ b.start < a.end` en instants UTC, contre toute réservation ou
+admission d'un autre `campaign_id` ; une fenêtre illisible bloque tout.
+
+**Publication** (tout type d'enregistrement). Succès atomique ≠ succès durable.
+1. Lire la chaîne entière, vérifier hashs et numérotation dense ; barrière de lecture : `fsync` du répertoire.
+2. Vérifier, selon le type :
+   - types de campagne (`RESERVATION`, `ADMISSION`, `CONSUMPTION`) : unicité par campagne (ci-dessus) ; absence de
+     recouvrement avec les enregistrements d'autres campagnes ;
+   - `RESERVATION` : engagement valide ; `static_sources_digest` recalculé et ensemble pertinent vide ; aucune
+     attestation à ce stade ;
+   - `ADMISSION` : une `RESERVATION` de la **même** campagne, du même `commitment_content_hash` et de la même
+     fenêtre existe, est durable, et aucune `ADMISSION` de cette campagne n'existe (une admission sémantiquement identique
+     est réutilisée par relecture sans publication ; une admission différente donne un refus) ; la `ReservationTimeProof` vise
+     cette réservation avec `borne + marge ≤ ws` ; préfixe de chaîne épinglé présent ; projection de recouvrement et
+     `static_sources_digest` identiques à ceux de l'attestation ; attestation valide (classification recalculée
+     égale), autorisation valide, déclarations inchangées ;
+   - `CONSUMPTION` : une `ADMISSION` durable de la même campagne existe ; aucune `CONSUMPTION` de ce `campaign_id`
+     n'existe ; `claim_content_hash` égal à celui du Claim relu par E2.
+   - `REBIND` : cérémonie humaine (23.9) ; le test de recouvrement ne s'applique pas (pas de fenêtre) ; la tête
+     restaurée est vérifiée contre les témoins de tête.
+3. Construire l'enregistrement du slot `n+1`.
+4. Écrire un temporaire complet dans le **même répertoire** que les slots, avec un nom unique par tentative ;
+   `fsync` du fichier.
+5. `os.link(tmp, slot_n+1)`. `FileExistsError` signifie qu'un enregistrement concurrent a occupé le slot : jamais une
+   raison de continuer silencieusement. On revient à l'étape 1 ; si les vérifications de l'étape 2 passent encore
+   (la projection de recouvrement n'a pas changé), la tentative suivante vise le nouveau slot ; sinon, pour une
+   `ADMISSION`, l'attestation est périmée (arrêt, nouvelle attestation et nouvelle autorisation humaines) et, pour une
+   `RESERVATION`, l'engagement est nul. Le nombre de tentatives par appel est borné (valeur : décision opérationnelle,
+   23.24) ; au-delà : arrêt `REGISTRY_CONTENTION`, rien n'est publié.
+6. `fsync` du répertoire. Seul son succès donne `PublishedDurable`.
+6 bis. **Témoin de tête** (`REAL`) : après chaque `RESERVATION`, `ADMISSION`, `CONSUMPTION` et `REBIND`, la tête
+   publiée est couverte par une preuve de temps (23.6) et copiée hors de l'hôte. Pour une `RESERVATION`, la
+   `ReservationTimeProof` fournit la preuve de temps ; la copie hors de l'hôte reste requise. Pour une `ADMISSION`, le témoin doit exister avant l'appel d'E2 ; pour une
+   `CONSUMPTION`, avant le `ReadIntent` ; pour un `REBIND`, avant toute réutilisation du registre. Un échec de la
+   preuve ou de la copie arrête la progression ; l'enregistrement reste, et le témoin peut être rejoué, jamais la
+   publication.
+7. Supprimer le temporaire, nommé `.registry.tmp.<uuid>` (un échec laisse un orphelin inoffensif, ignoré par le
+   motif `admission_*.json`).
+8. Pour une `RESERVATION` ou une `ADMISSION`, revérifier `static_sources_digest` ; s'il a changé (une exposition ou
+   un rival est apparu), l'enregistrement reste et la campagne s'arrête : `RESERVATION_STALE` avant la preuve de temps
+   (engagement nul), `ADMITTED_STALE` pour une admission (état **terminal pour E3**, sans transition sortante ; seule
+   une décision humaine peut la déclarer nulle). Un changement détecté à l'étape 13 de 23.17, après le Claim, donne
+   `EXECUTION_VOID_EXPOSURE_CHANGED` (terminal, sans lecture). Un changement de l'ensemble pertinent est une
+   information d'exposition nouvelle.
+
+**E3 ne crée jamais le Claim si l'admission n'est pas `PublishedDurable`** selon le contrat du volume cible. Sous
+Windows, le `fsync` d'un répertoire n'est pas disponible : la durabilité du lien n'est pas démontrable et `REAL` y est
+refusé. Un slot visible mais non confirmé durable reste binding pour les autres écrivains (conservateur). Une
+re-confirmation (nouveau `fsync` du répertoire) est permise, sauf pour une `CONSUMPTION` hors de l'appel qui l'a
+publiée ; une re-publication ou une suppression ne l'est pas.
+
+**Matrice de crash de la publication** (tout type ; échec fermé, aucune reprise destructive) :
+
+| Crash ou échec | État disque | Effet | Reprise |
+|---|---|---|---|
+| Barrière de lecture (`fsync` du répertoire) en échec | rien de publié | refus | rejeu |
+| Avant le temporaire, temporaire partiel ou complet avant `link` | orphelin `.registry.tmp.<uuid>` éventuel | aucun slot | rejeu avec un nouveau nom |
+| `link` fait, avant `fsync` du répertoire | slot visible, peut disparaître après coupure | `PublishedUnconfirmed` : étape suivante interdite ; les autres écrivains le traitent comme binding | re-confirmation ; si le slot a disparu, rien n'a été publié (le rejeu reste soumis à l'unicité) ; **sauf `CONSUMPTION`** : après un redémarrage, décision humaine seulement (aucune re-confirmation hors de l'appel qui l'a publiée) |
+| `fsync` du répertoire en échec (`EIO`) | slot possiblement présent | idem | re-confirmation (sauf `CONSUMPTION` : décision humaine), sinon décision humaine |
+| `fsync` réussi, avant la suppression du temporaire | slot durable + orphelin | enregistrement confirmé | rien (orphelin ignoré) |
+| Échec du témoin de tête (preuve ou copie) | slot durable, pas de témoin | progression arrêtée | rejeu du témoin seul (pour une `CONSUMPTION`, après redémarrage : décision humaine) |
+| Étape 8 : `static_sources_digest` changé | enregistrement durable | `RESERVATION_STALE` (engagement nul) ou `ADMITTED_STALE`, terminal | décision humaine |
+| `CONSUMPTION` durable, pas de `ReadIntent` | `CONSUMPTION` | droit consommé, lecture non déduite ; terminal (Décision 11) | aucune lecture, aucun second Claim |
+| Slot illisible ou trou de numérotation | chaîne rompue | arrêt de tout `REAL` | décision humaine |
+
+**Instant de péremption de l'inventaire.** Il devient périmé au premier de ces événements : une source non registre
+change ; une réservation ou une admission d'une autre campagne dont la fenêtre recoupe (ou est illisible) apparaît ;
+le préfixe épinglé n'est plus un préfixe de la chaîne ; la tête des déclarations change ; la version de la
+classification change. Une réservation ou une admission **sans recouvrement** qui avance la tête ne périme **pas**
+l'attestation.
+
+**Argument de sérialisation.** `os.link` réussit pour exactement un appelant par slot. Invariant : si le slot `k`
+existe, les slots `0..k-1` existent (un écrivain ne tente le slot `n+1` qu'après avoir lu `0..n`, et les slots ne
+sont jamais supprimés). Si une fenêtre B recoupe A avec A au slot `i` et B au slot `j > i`, B a lu le slot `i` avant
+son `link` et voit le recouvrement. Aucune paire recouvrante de campagnes différentes ne coexiste dans la chaîne.
+Cet argument vaut pour E3 contre E3 sur un registre unique ; il ne couvre pas les accès hors E3 (23.9).
+
+**Même `campaign_id`, deux tentatives.** Une admission existante de la même campagne est réutilisable seulement si
+son contenu sémantique est identique (campagne, fenêtre, engagement et son `content_hash`, réservation, attachment,
+preuve de temps, hashs d'attestation, d'autorisation et de projection, `static_sources_digest`, identité de code,
+liaison du registre), qu'aucune `CONSUMPTION` n'existe dans le registre pour ce `campaign_id` **et** qu'aucun Claim ni
+aucun `ReadIntent` n'existe localement (le seul test local est insuffisant : un dossier copié le passerait). Sinon
+`AlreadyInProgressOrConsumed` : arrêt avant tout appel d'E2. Si deux processus passent ces contrôles en parallèle,
+E2 est exclusif par dossier et la `CONSUMPTION` est exclusive par `campaign_id` dans le registre : un seul des deux
+atteint le `ReadIntent`, y compris pour une copie du dossier de campagne.
+
+**Crash avant le Claim.** Au redémarrage, la campagne retrouve sa propre admission, rejoue les vérifications et la
+réutilise si l'identité sémantique est inchangée. Un enregistrement relu après un crash est d'abord re-confirmé
+durable par un `fsync` explicite du répertoire (permis pour une `RESERVATION` ou une `ADMISSION` relue, jamais pour
+une `CONSUMPTION`). Si l'attestation a été remplacée, refus : l'admission reste et
+réserve la fenêtre. Réutiliser une admission n'ouvre aucun accès ; seul le Claim d'E2 ouvre le droit.
+
+### 23.11 — Inventaire, déclarations, classification, attestation, autorisation
+
+Séquence non circulaire. Chaque artefact est créé en exclusif et durable ; `_id` = hash sans horodatage,
+`_content_hash` = hash du contenu complet avec horodatage, épinglé par le successeur.
+1. **Inventaire A0** : calculé sans entrée humaine. Contient les sources **trouvées** dans les racines d'audit
+   configurées (déclarées dans le fichier de configuration de root, 23.9 : répertoires `results/` des worktrees
+   concernés, répertoires d'événements des plans, campagnes référencées par la chaîne du registre), la projection de
+   recouvrement du registre, `static_sources_digest`, la **comptabilité des essais** (ci-dessous) et la version des
+   règles. Les sources que seul l'humain connaît entrent uniquement par les déclarations (étape 2). Un répertoire
+   d'audit manquant, un
+   JSON illisible ou une clé inconnue refuse (lister **strict** ; `list_holdout_access_events` ignore les JSON invalides
+   et ne peut pas fonder ce contrôle, 22.2-4). Les artefacts du dossier de la campagne courante sont exclus. En
+   revanche, tout enregistrement du registre portant le `campaign_id` courant autre que ses propres `RESERVATION` et
+   `ADMISSION` attendus (par exemple une `CONSUMPTION`, ou une seconde réservation) n'est **jamais** ignoré : c'est
+   une condition d'arrêt. Un `campaign_dir_locator` introuvable ne bloque pas le test de recouvrement (la fenêtre est
+   portée par l'enregistrement du registre lui-même) ; il rend la campagne « abandonnée » pour la comptabilité ; un
+   répertoire d'audit **configuré** manquant, lui, refuse.
+2. **Déclarations D1..Dn** : nominatives, versionnées, en slots denses, chacune liée à l'inventaire et à la précédente.
+   Elles ne peuvent que durcir (une déclaration d'exposition passe la classe vers `RETROSPECTIVE_EXPOSED` ou
+   `UNDETERMINED`), jamais assouplir une classe automatique. Une déclaration peut aussi repousser `t_sel` à une date
+   plus tardive ; le `t_sel` effectif utilisé par F2 et par C est le maximum de celui de l'engagement et de ceux des
+   déclarations, jamais une date plus ancienne.
+3. **Classification C** : fonction pure de A0, des déclarations et des **preuves de chronologie** (engagement,
+   réservation, `ReservationTimeProof`, `IngestionRecord`, `max(time)` de `S0` calculé, `t_sel` et `t_anchor`
+   déclarés ou vérifiés), recalculée à chaque vérification. Le niveau de chronologie (23.3) en résulte et est inscrit
+   dans l'attestation.
+4. **Attestation T** : nominative, liée à C, à A0, à la tête des déclarations, à l'engagement, à l'attachment, à la
+   projection de recouvrement et au préfixe de chaîne (`seq`, `content_hash`). Elle est périmée dès que l'un de ces
+   éléments change. **Elle n'autorise rien.**
+5. **Autorisation d'acquisition** : décision humaine **distincte**, nominative, liée à T, à l'engagement, au `claim_id`
+   (calculable depuis le plan), à la fenêtre, au mode, au SHA du code, au rapport de qualification, à la projection et
+   au préfixe de chaîne. Seule elle déclenche l'admission.
+6. **Vérification avant admission** : A0, D\* et C sont recalculés et doivent égaler T ; sinon refus.
+
+**Comptabilité des essais (reprise de 22.2-6).** L'inventaire et le `ClosingRecord` enregistrent : le nombre de
+`ResearchRun`, de stratégies et de campagnes évalués (toutes les `RESERVATION`, `ADMISSION` et `CONSUMPTION` de la
+chaîne du registre, **quelles que soient leurs fenêtres**, les campagnes V1 avec OOS et les nombres déclarés), le
+nombre de réservations **abandonnées** (sans `ClosingRecord` terminal), de tentatives d'ingestion échouées et
+d'engagements nuls. Une campagne dont le `ClosingRecord` est introuvable (localisation périmée, dossier déplacé) est
+comptée comme abandonnée (conservateur). C'est une comptabilité de
+multiple testing : aucune correction statistique n'est calculée ni aucun seuil fixé (hors périmètre, Human Gate).
+
+Trois décisions humaines distinctes : (1) attestation des expositions historiques ; (2) autorisation explicite d'une
+acquisition irréversible ; (3) Human Gate de qualification scientifique d'un éventuel Champion (hors E3). L'identité
+de l'attestant est déclarative : pas d'authentification forte, donc pas de non-répudiation.
+
+### 23.12 — Acquisition du Claim par E2, inchangée
+
+E2 reste le **seul** chemin d'acquisition et E3 le seul importeur d'E2 (test AST, 22.12.3). Le Claim reste la projection
+à 14 clés du plan ; il ne porte ni l'admission, ni l'engagement, ni `S_H` : ces liens sont portés par le `ReadIntent`.
+E3 appelle E2 elle-même, ne reçoit ni ne relit un Claim comme autorisation, et refait la vérification locale de 22.10
+(sentinelle, verrou) avant le `ReadIntent`, puis une seconde fois immédiatement avant l'ouverture de `S_H` (23.17).
+L'admission durable précède le Claim ; la `CONSUMPTION` (23.10) suit le retour durable d'E2 et précède le
+`ReadIntent`. Après toute exception d'E2, aucun accès marché n'est autorisé. Un Claim sans `CONSUMPTION` (crash entre
+les deux) est traité comme consommé : la campagne est close sans lecture (`EXECUTION_VOID_CLAIM_ONLY`) et une
+`CONSUMPTION` de régularisation ne peut être publiée que par un acte humain.
+
+### 23.13 — `ReadIntent`, `DataReceipt`, `ValidationRun` OOS, `HoldoutAccessEvent`, `ClosingRecord`
+
+Tous créés en exclusif et durables, chacun épinglant le `content_hash` de son prédécesseur dans la chaîne causale
+ci-dessous, sauf la `ValidationRun` OOS dont le schéma est fixe : elle est liée par son identifiant déterministe et
+par son `validation_run_record_hash` (23.4) épinglé dans le `ClosingRecord`.
+- **`ReadIntent`** (`<campaign_dir>/read_intent.json`, un seul par campagne) : écrit après la `CONSUMPTION` durable et
+  avant toute ouverture de `S_H`.
+  Contient `claim_id`, hash sémantique et `seq` de l'admission, de la réservation et de la `CONSUMPTION`, liaison du
+  registre, `commitment_id`
+  et `commitment_content_hash`, `attachment_id` et `attachment_content_hash`, `content_hash` de la preuve de temps,
+  hashs d'attestation et d'autorisation, mode, fenêtre, `end_boundary`, coûts, identité du code, `oos_parameters`,
+  hash de provenance, `research_snapshot_id`, `holdout_snapshot_id` attendu, répertoire d'événements du plan,
+  `created_at`.
+  `read_intent_id = SHA256(canonical_json({claim_id, admission_id, commitment_id, attachment_id,
+  read_intent_semantics_version}))`.
+- **`DataReceipt`** (`<campaign_dir>/data_receipt.json`) : `holdout_bytes_sha256`, taille, `engine_input` (23.5), bracket
+  `fstat`. Écrit avant le lancement du moteur ; son échec empêche le lancement.
+- **`ValidationRun` OOS** : schéma existant, écriture exclusive durable via un écrivain additif sous
+  `<campaign_dir>/validations/<oos_validation_run_id>.json` (`save_validation_run` reste `save_atomic`, inchangé). Identifiant déterministe `oos_validation_run_id = "oos_" +
+  sha256(campaign_id + ":" + claim_id)[:32]` (hex minuscule), indépendant de `gate_v_v2_validation_run_id`
+  (WF, MC, PS, inchangé).
+- **`HoldoutAccessEvent` canonique** (Décision 13, **extension additive**) : champs `Optional` à défaut `None`
+  `campaign_id`, `final_holdout_claim_id`, `gate_v_preregistration_id`, `gate_v_preregistration_content_hash`, plus
+  `holdout_access_event_content_hash` stocké, calculé par la formule de la Décision 13 (inchangée). **Les champs
+  additionnels ne sont sérialisés que lorsqu'ils sont non nuls**, par `save_holdout_access_event` comme par l'écrivain
+  canonique : la sortie d'un événement legacy reste donc identique octet pour octet à celle d'aujourd'hui. Les
+  événements legacy restent lisibles. Un **lister strict** additif (échec sur JSON illisible, clé inconnue ou hash
+  faux) fonde le contrôle d'exposition : un événement sans aucun champ additionnel est accepté comme événement legacy
+  (sans hash) ; dès qu'un champ additionnel est présent, le hash est obligatoire et vérifié.
+  `load_holdout_access_event`, `list_holdout_access_events` conservent leur signature et leur comportement. Le
+  constructeur `build_holdout_access_event` reçoit un complément additif (ou un constructeur frère) pour les champs
+  additionnels et le hash (`dataset_split.py` est donc modifié de façon additive, 23.23). **Limite** : un code
+  antérieur à cette Décision (autre worktree ou branche) fait `cls(**data)` puis `None` sur `TypeError`
+  (`load_tolerant`) et ignore donc silencieusement un événement étendu ; seul le code à jour et un worktree propre
+  (23.2) sont garantis de le voir. `event_id = "hoe_" + sha256(claim_id + ":" + read_intent_id)[:32]` ; `accessed_at` = `created_at`
+  du `ReadIntent`, mot pour mot ; `validation_run_id` = identifiant OOS déterministe (ou `null` si aucune `ValidationRun` n'existe) ;
+  `reason` = `"gate_v_final_holdout_oos_v1;read_intent=" + read_intent_id + ";holdout_snapshot=" + <identifiant de
+  S_H>` (constante de version plus deux identifiants : l'identité de `S_H` entre ainsi dans le hash de la Décision 13
+  sans changer le schéma) ; `locked_state = "locked"` ; `dataset_snapshot_id` de l'événement = `S0` (champ legacy, comme
+  dans l'événement construit par `run_oos_validation`) : ce n'est pas le snapshot consulté, et la règle d'attribution
+  de 23.5 s'y applique aussi ; `accessed_at` désigne l'instant d'intention de lecture (il précède l'accès réel :
+  minorant du début d'accès, non majorant) ; le nom de fichier existant devient une fonction déterministe d'artefacts persistés. Le répertoire est le répertoire d'événements du plan de
+  split (convention `holdout_access/` du répertoire du plan), fourni par l'appelant, consigné dans le `ReadIntent` et
+  contenu dans les racines d'audit configurées (23.11). Écriture par la primitive de publication par lien
+  (`tmp + fsync + os.link + fsync`, complète ou absente : aucun fichier canonique tronqué n'est possible) ;
+  `FileExistsError` = « déjà écrit » : relecture stricte et comparaison du hash, échec fermé s'il diffère. Un seul
+  événement par accès physique ; **l'événement construit par `run_oos_validation` (uuid4, horloge) est jeté** ;
+  le **timing de la Décision 13 est conservé** (événement après la `ValidationRun` ; le `ReadIntent` est le
+  write-ahead séparé).
+- **`ClosingRecord`** (`<campaign_dir>/final_holdout_closing_record.json`) : marqueur de validation. Liste les hashs de
+  tous les artefacts de la chaîne, `result_attribution` (identités de 23.5), `provenance_residuals`, `terminal_state`
+  (`CLOSED_COMPLETE` ou `EXECUTION_VOID_<cause>`, seule graphie admise). Pour un état `EXECUTION_VOID_<cause>` sans
+  `DataReceipt`, les champs correspondants valent `null` avec la cause explicite. Si un `ReadIntent` existe, un
+  événement canonique est écrit avant le `ClosingRecord`, même sans `ValidationRun` (accès possible). **Aucun verdict.**
+- Chaîne causale (liens par hash) : engagement → réservation → preuve de temps → attachment → attestation →
+  autorisation → admission → Claim (E2) → `CONSUMPTION` → `ReadIntent` → `DataReceipt` → `ValidationRun` OOS →
+  événement → `ClosingRecord`.
+- **Chemins et versions sémantiques** (noms normatifs, relatifs à `<campaign_dir>` sauf mention) : `prospective_commitment.json`
+  (`gate_v_prospective_commitment_v1`), `s0_provenance_declaration.json` (`gate_v_s0_provenance_declaration_v1`),
+  `reservation_time_proof.json` (`gate_v_reservation_time_proof_v1`), `holdout_snapshot_attachment.json`
+  (`gate_v_holdout_attachment_v1`), `commitment_void_record.json` (`gate_v_commitment_void_v1`),
+  `exposure/inventory_<content_hash>.json` (`gate_v_exposure_inventory_v1`), `exposure/declaration_<seq>.json`
+  (`gate_v_exposure_declaration_v1`), `exposure/attestation.json` (`gate_v_exposure_attestation_v1`),
+  `acquisition_authorization.json` (`gate_v_acquisition_authorization_v1`), `read_intent.json`
+  (`gate_v_read_intent_v1`), `data_receipt.json` (`gate_v_data_receipt_v1`), `final_holdout_closing_record.json`
+  (`gate_v_closing_record_v1`) ; registre : `admissions/admission_<seq>.json` (`gate_v_registry_admission_v1`) ; coffre :
+  `<coffre>/<commitment_id>/ingestion_record.json` (`gate_v_ingestion_record_v1`),
+  `<coffre>/<commitment_id>/attempt_<n>.json` (`gate_v_ingestion_attempt_v1`) et `<coffre>/<commitment_id>/s_h.csv`
+  (octets de `S_H`, sans version de schéma). Les
+  attestations successives suivent la règle de supersession par slots denses des déclarations.
+- **Miroir Manifest** (champs 13-17) : slice optionnelle, monotone `None → id`, jamais autorité d'exclusivité ; le
+  Manifest n'importe aucun module Claim. Tant qu'elle n'est pas spécifiée plus finement, E3 n'écrit pas ces champs et
+  le `ClosingRecord` fait foi.
+
+### 23.14 — Lecture unique du holdout et vérification des octets exploités
+
+- **Avant le Claim** : aucune lecture des octets de `S_H` (hors l'ingesteur, borné par 23.7). `S0` peut être lu,
+  vérifié et analysé (donnée de recherche) ; **les octets de `S0` qui construisent le DataFrame transmis au moteur sont
+  revérifiés (hash) dans le même buffer que celui qui sert à les parser**, jamais lus une première fois pour un hash
+  puis relus pour l'analyse.
+  Les contrôles de métadonnées de `S_H` se limitent à `lstat` (fichier régulier, ni lien symbolique ni point de
+  reparse) et à la taille, jamais aux octets.
+- **Après le `ReadIntent`**, une lecture unique : `lstat`, `os.open`, `fstat` comparé à `lstat`, lecture exacte de la
+  taille dans un buffer avec SHA-256 incrémental, `fstat` final inchangé, comparaison du hash avec l'attachment, puis
+  parsing **depuis ce même buffer** via une aide additive `engine.load_data_from_bytes`, dont l'équivalence bit à bit
+  avec `engine.load_data` est testée sur des fixtures. Scénario interdit : lire pour hasher, créer le Claim, relire pour
+  exécuter.
+- **Hash incorrect** : Claim brûlé, moteur non lancé, état `EXECUTION_VOID`.
+- **Contrôles du DataFrame** : colonnes et en-tête égaux à `S0` ; `time` strictement croissant et unique (le moteur
+  appelle `searchsorted` sans le vérifier) ; sans `NaT` ; première barre de `S_H` strictement postérieure à la
+  dernière de `S0` ; règle de couverture engagée respectée ; nombre de lignes de contexte au moins égal à
+  `required_warmup`. Troncature à `time_paris < end` avant l'appel ; le buffer est libéré après le parsing.
+- Un fichier remplacé entre `lstat` et lecture est détecté par la comparaison `fstat` ; le hash du buffer reste
+  l'autorité d'identité du contenu, le chemin n'en est jamais une. Une limite mémoire (taille maximale déclarée) est une
+  décision opérationnelle (23.24).
+
+### 23.15 — Bornes `[start, end)` et adaptateur moteur
+
+- `FINAL_HOLDOUT = [start, end)`. `run_oos_validation` est appelée **inchangée**, avec
+  `run_backtest_fn = functools.partial(engine.run_backtest, end_boundary="exclusive", initial_capital=…, spread=…,
+  slip_in=…, slip_out=…)` : `run_oos_validation` appelle `run_backtest_fn(df, strategy, params, start_date=,
+  end_date=)`, les arguments du `partial` s'ajoutent sans conflit. Le défaut du moteur reste inclusif ; le
+  comportement de V1 est inchangé.
+- Les bornes sont des ISO-8601 offset-aware ; une chaîne naïve est refusée (le moteur appellerait `tz_localize` et
+  lèverait sur les heures DST ambiguës ou inexistantes).
+- Le contexte avant `start` reste visible pour `prepare()` ; le moteur n'exécute aucune opération avant
+  `exec_start_idx`. Si moins de `required_warmup` lignes précèdent `start`, l'exécution démarrerait plus tard en
+  silence : E3 le refuse (23.14).
+- **Tests aux bornes** (barres synthétiques) : `start−pas`, `start`, `start+pas`, `end−pas`, `end`, `end+pas` ; même
+  instant exprimé en `Z` et en `+02:00` ; transitions DST de Paris au voisinage de la fenêtre engagée, avec au moins celles du 2025-03-30 et du 2025-10-26
+  comme vecteurs fixes ; borne naïve refusée ;
+  temps dupliqué ou non croissant refusé ; contexte égal à `warmup` puis à `warmup−1` ; résultat exclusif égal au
+  résultat sur un DataFrame pré-tronqué ; aucune barre `≥ end` n'atteint `strategy.prepare()` (espion) ; résultats
+  inclusif et exclusif identiques sans barre à `end`, différents avec une barre à `end` ; tests V1 inchangés.
+
+### 23.16 — Paramètres OOS pré-engagés, coûts, warm-up, readiness, identité du code
+
+| Élément | Persisté aujourd'hui | Manque | Règle E3 |
+|---|---|---|---|
+| `initial_capital` | `global_params` de la config d'optimisation, `config_used.json` (job) ; lu par Monte-Carlo | pré-enregistrement, plan, empreinte (Décision 7), `ValidationRun` | engagé ; refus si absent |
+| `spread`, `slip_in`, `slip_out` | `global_params` ; défauts silencieux de l'optimiseur | tout le chaînage V2 | engagés, valeurs explicites ; aucun défaut |
+| Version du moteur | `ENGINE_VERSION = "1.0"` (constante manuelle), `ResearchRun.engine_version` | liée au contenu du code | insuffisante seule ; SHA Git et hashs de fichiers engagés |
+| Version du code | `ResearchRun.git_sha` (optionnel) | non garanti propre | arbre propre exigé ; SHA engagé |
+| Identité de la stratégie | `strategy_name` (pré-enregistrement) | `strategy_module`, hash du source | engagés |
+| `base_params` | dans l'empreinte (Décision 7) | — | déjà épinglé |
+| Paramètres OOS | aucune règle dans les modules lus | tout | `oos_parameters` littéraux, règle `LITERAL_PREDECLARED` |
+| Warm-up | calculé à l'exécution (`required_warmup`) | non persisté | valeur engagée et vérifiée |
+| Readiness | `readiness_spec` (empreinte) ; appliquée aux bornes de folds du Walk-Forward | non appliquée par `run_oos_validation` | pré-contrôle pur en phase P, **avant la réservation** : `resolve_state_ready_boundary` ne doit pas ajuster `start` ; pour `end`, la règle exacte est alignée sur celle que le Walk-Forward applique à la fin des folds de test (à confirmer par un test RED en E3-I) ; sinon refus |
+
+La Décision 7 n'est pas modifiée (changer l'empreinte changerait tous les `campaign_id` V2). Les éléments manquants sont
+épinglés dans l'engagement. Les coûts engagés sont comparés à la configuration source du job dont le hash est épinglé
+dans l'engagement ; leur identité avec les coûts effectivement utilisés par les folds Walk-Forward n'est pas prouvée
+par les artefacts V2 (limite, 23.25). Les contrôles purement déterministes (readiness, valeur de `required_warmup`,
+bornes offset-aware, lignes de contexte de `S0`) sont exécutés en phase P, avant la réservation, afin de ne pas brûler
+une fenêtre réservée pour une erreur prévisible. **Si une donnée indispensable à l'équivalence WF/OOS est absente, le refus est explicite ;
+aucun défaut silencieux n'est inventé.** Aucune règle de dérivation d'un jeu de paramètres final unique à partir des
+preuves par fold n'a été trouvée dans les modules lus ; la correspondance entre `oos_parameters` et les preuves
+WF/MC/PS est donc **déclarée et référencée**, vérifiée seulement pour la cohérence avec `base_params` et le schéma de
+la stratégie, et relève du Human Gate.
+
+### 23.17 — Séquence normative d'E3 et points de non-retour
+
+**Phase P — avant `ws`** : P1 mode et UID ; P2 autorité du registre ; P3 lecture, vérification et analyse de `S0`
+(hash, `max(time) < ws`, lignes de contexte ≥ `required_warmup`) ; P3 bis contrôles déterministes : readiness,
+valeur de `required_warmup`, bornes offset-aware (23.16) ; P3 ter `S0ProvenanceDeclaration` créée (23.7) ; P4 D5
+complète ; P5 engagement créé (23.4) ; P6
+**`RESERVATION`** durable de `W` — **point de non-retour R : la fenêtre est protégée définitivement pour cette
+campagne** ; P7 preuve de temps (`ReservationTimeProof`) sur l'enregistrement de réservation, vérifiée, avec
+`borne + marge ≤ ws`.
+
+**Phase I — après `we`** : I1 ingestion de `S_H` par l'ingesteur, `IngestionRecord` ; I2 attachment (23.8).
+
+**Phase E — exécution** :
+0. mode et UID ; 1. autorité du registre ; 2. preuve de temps revérifiée hors ligne ; 3. lecture, vérification et
+analyse de `S0` (hash, `max(time) < ws`, lignes de contexte ≥ `required_warmup`) ; 4. pré-contrôle de readiness ;
+5. valeur de `required_warmup` égale à celle engagée ; 6. provenance de niveau 1 ; 7. chargement strict des sources,
+D5 ; 8. inventaire, déclarations, classification, attestation valide ; 9. autorisation ; 10. métadonnées de `S_H`
+(`lstat`, taille, type de snapshot) ; 11. **`ADMISSION`** durable (23.10) ; 12. **E2 : Claim durable** — **point de
+non-retour 1 : le droit de la campagne est consommé** ; 12 bis. **`CONSUMPTION`** durable dans le registre (23.10),
+verrou d'exclusivité par `campaign_id` : sans elle, aucune étape suivante ; 13. recontrôle : autorité du registre,
+sentinelle, verrou (22.10), admission propre et chaîne dense, **attestation, tête des déclarations, autorisation et
+`static_sources_digest` revérifiés** ; 14. **`ReadIntent`** durable — **point de non-retour 2 : lecture possiblement commencée, fenêtre traitée comme
+exposée** ; 14 bis. second recontrôle de la sentinelle et du verrou **immédiatement avant l'ouverture de `S_H`**
+(22.10) : en cas d'échec, aucune lecture n'a lieu et le `ReadIntent` existant est traité comme exposé (conservateur) ;
+15. lecture unique, contrôles, `DataReceipt` ; 16. `run_oos_validation` via l'adaptateur — **point de non-retour 3 :
+résultat observé** ; 17. `ValidationRun` OOS, événement canonique, `ClosingRecord`. Chaque étape exige le retour
+durable de la précédente.
+
+### 23.18 — Crash, états dérivés et récupération humaine
+
+Règle générale : **aucune suppression de Claim, aucune seconde acquisition, aucun retry du `FINAL_HOLDOUT`, aucune
+relecture, aucun nettoyage automatique d'une preuve de consommation.** Les états sont dérivés des artefacts présents et
+aucun ne signifie « aucun accès prouvé ».
+
+| Transition | Prouvé durablement | Seulement inféré | Perdu | Restaurable depuis des artefacts persistés | Réexécution |
+|---|---|---|---|---|---|
+| Engagement → `RESERVATION` → preuve de temps | engagement, puis réservation durable | — | — | preuve de temps rejouable ; sans preuve valide, la réservation reste et la campagne est inutilisable | permise (preuve) |
+| Inventaire → attestation → autorisation | rien de consommé | — | — | recalcul | permise |
+| Autorisation → admission | autorisation | — | — | — | permise |
+| Admission durable → Claim | admission, fenêtre réservée | aucune lecture | — | réutilisation sémantique (23.10) | permise (E2) |
+| Claim → `CONSUMPTION` | Claim | absence de lecture (déduction conditionnelle) | — | `CONSUMPTION` de régularisation, acte humain, sans lecture | **interdite** |
+| `CONSUMPTION` → `ReadIntent` | Claim, `CONSUMPTION` | absence de lecture (déduction conditionnelle) | — | — | **interdite** |
+| `ReadIntent` → `DataReceipt` | intention | lecture possible | contenu lu | — | **interdite** |
+| `DataReceipt` → `ValidationRun` | octets lus (hash) | — | résultat | rien d'autre que le reçu | **interdite** |
+| `ValidationRun` → événement | `ValidationRun` | — | — | événement déterministe, sans marché | **interdite** |
+| Événement → `ClosingRecord` | événement | — | — | clôture | **interdite** |
+
+États dérivés : `RESERVED`, `RESERVATION_STALE`, `ADMITTED`, `ADMITTED_STALE`, `CLAIM_ONLY`, `CONSUMED`, `CONSUMED_UNCONFIRMED` (consommation visible mais non
+confirmée durable, traitée comme `CONSUMED`), `INTENT_RECORDED`,
+`INTENT_UNREADABLE` (`ReadIntent` tronqué ou illisible : lecture possiblement commencée), `RECEIPT_RECORDED`,
+`RESULT_PRESENT_NOT_CLOSED`, `CLOSED_COMPLETE`, `EXECUTION_VOID_<cause>`, `INCONSISTENT` (dont : Claim sans
+admission, `ADMISSION` sans `RESERVATION` correspondante, `CONSUMPTION` sans `ADMISSION`, deux enregistrements du même
+type pour un `campaign_id`, trou dans la chaîne, artefact contradictoire). Un `ReadIntent` sans événement terminal est traité comme exposé. Un crash entre la
+lecture physique et la création de l'événement est traité comme accédé. La reconstruction d'un événement manquant est
+un acte humain depuis des artefacts persistés, écrit au même nom donc exclusif ; sans `ValidationRun`, elle porte un
+`reason` explicite. Récupération d'une publication d'enregistrement du registre (crash à chaque étape) : matrice de
+23.10 ; un trou de numérotation après coupure est une corruption qui arrête tout `REAL` jusqu'à décision humaine.
+
+### 23.19 — Courses et concurrence
+
+Deux campagnes distinctes sur des fenêtres recouvrantes, depuis deux répertoires de job distincts, se coordonnent
+**uniquement** par le registre unique (23.9, 23.10). Deux processus pour le même `campaign_id`, y compris depuis un
+dossier de campagne copié ou restauré : 23.10. Au plus un lecteur par `campaign_id` : la `CONSUMPTION`, exclusive par
+`campaign_id` dans le registre, précède tout `ReadIntent` ; le Claim et le `ReadIntent` ne sont exclusifs que par
+dossier. Un script qui contourne E3 reste hors modèle (23.9).
+
+### 23.20 — Obligations de test (toutes synthétiques ; aucun test ne consulte le véritable `FINAL_HOLDOUT`)
+
+**Exécutables localement (L)** (avec le profil `SIMULATED_DURABLE`, fautes de `fsync` injectées, sous Windows comme
+sous Linux) : deux engagements rivaux sur la même fenêtre ou une fenêtre recoupante (la seconde `RESERVATION` est
+refusée, donc non ancrable, y compris avec des `split_plan_id` différents) ; jeton de temps obtenu sur l'engagement
+seul, ou réservation publiée après la borne de la preuve : non recevable ; `ADMISSION` sans `RESERVATION`
+correspondante (même campagne, même `commitment_content_hash`, même fenêtre) refusée ; deux réservations de la même
+campagne avec des engagements différents refusées ; copie du dossier de campagne sous une autre racine (seconde
+`CONSUMPTION` refusée, aucun second `ReadIntent`, aucune seconde lecture) ; réservation abandonnée comptée dans la
+comptabilité des essais, y compris avec `ClosingRecord` introuvable ; garde d'attribution (aucun consommateur ne lit
+`ValidationRun.dataset_snapshot_id` ni `HoldoutAccessEvent.dataset_snapshot_id` comme le snapshot consulté d'une
+campagne prospective) ; sortie sérialisée d'un
+événement legacy identique octet pour octet après l'extension ; événement canonique complet ou absent après crash ;
+lister strict acceptant un événement legacy sans hash et refusant un événement étendu au hash faux ; seconde
+`CONSUMPTION` de même contenu refusée (aucune idempotence) ; `REBIND` et chaîne d'`instance_id` ; `ADMITTED_STALE`,
+`RESERVATION_STALE` et `REGISTRY_CONTENTION` ; témoin de tête manquant ou en retard (progression arrêtée) et
+restauration plus ancienne détectée par le témoin ; engagement ancré avant la fenêtre et snapshot acquis après ; snapshot impossible à
+connaître à l'engagement ; deux copies de registre avec le même `registry_id` ; deux worktrees et une seule autorité ;
+admission concurrente pendant la validation de l'attestation ; deux admissions simultanées du même `campaign_id` ;
+crash après admission durable avant Claim ; slot visible non durable (fsync de répertoire simulé en échec) ; deux
+attachments `S_H` ; premier `S_H` incorrect (engagement nul) ; snapshot valide d'instrument erroné (écho différent) ;
+source sans preuve suffisante de timeframe ; `S0` qui chevauche la fenêtre ; décalages UTC et DST ; engagement
+temporel non vérifiable ; exécution refusée avant Claim pour chaque précondition manquante ; mode synthétique de bout
+en bout avec faute injectée à chaque point ; coûts WF/OOS manquants ou divergents ; fichiers supplémentaires dans
+`campaign_dir` sans effet sur D5 et E2 ; le module d'exécution d'E3 seul importeur d'E2 (AST) ; ingesteur sans import d'analyse (AST) ;
+aucune ouverture des octets de `S_H` avant le Claim (espion d'ouvertures) et une seule ensuite ; équivalence
+`load_data_from_bytes` ; tests aux bornes de 23.15 ; V1 et suite existante inchangés ; processus multiples réels
+avec barrière pour les admissions (fenêtres identiques, incluses, partielles, adjacentes).
+
+**À démontrer sur la cible (Q, non démontrables localement)** : exclusivité multiprocessus sur le volume réel ;
+comportement de `link` et de `fsync` de répertoire ; survie à une coupure d'alimentation réelle ; permissions et
+cloisonnement du coffre ; liaison physique du registre ; comportement sous OCI.
+
+### 23.21 — Portes de qualification `REAL` (aucune n'est remplie à la date de cette Décision)
+
+1. Hôte Linux, volume local, liste de systèmes de fichiers acceptés.
+2. Test de coupure d'alimentation réelle sur le volume cible.
+3. Comportement de `link` et de `fsync` de répertoire démontré sur ce volume.
+4. Test d'exclusivité multiprocessus sur ce volume.
+5. Compte de service, permissions et cloisonnement du coffre démontrés.
+6. Adaptateur de fournisseur non interactif avec écho de niveau 1 vérifié.
+7. Autorité de temps choisie, liste de confiance committée, outil de vérification qualifié.
+8. Procédure de sauvegarde et cérémonie `REBIND` documentées.
+9. Liaison physique du registre démontrée (une copie est refusée ; une restauration est détectée grâce au témoin
+   de tête copié hors de l'hôte).
+10. Comportement sous OCI démontré, si OCI est la cible.
+11. Répétition générale de bout en bout en mode `SYNTHETIC` sur la machine cible, avec coupure et reprise à chaque
+    point de 23.18.
+12. Rapport de qualification nominatif, nommant le SHA `X` du code qualifié.
+
+Aucune qualification n'est fictive ni supposée. Le passage de `REAL_FINAL_HOLDOUT_ENABLED` à `True` est un commit
+délibéré, relu, postérieur aux douze portes. **Chaîne de commits `X → R → B`** : le rapport nomme le SHA `X` du code
+qualifié ; il est ajouté au dépôt par un commit `R`, enfant direct de `X`, dont le seul diff est le fichier du
+rapport ; la bascule est un commit `B`, enfant direct de `R`, dont le seul diff est le passage de la constante à
+`True`. La vérification `REAL` contrôle ces deux diffs (`X → R` : le rapport seul ; `R → B` : la constante seule) et
+que le SHA courant est `B`. Le rapport ne contient donc jamais son propre SHA. Tout engagement est créé après `B` et
+épingle le SHA de `B` (égalité exacte, 23.4) ; toute modification ultérieure du dépôt, y compris documentaire, change
+le SHA courant et invalide l'engagement (conservateur).
+
+### 23.22 — Amendements aux décisions antérieures (additifs, traçables)
+
+| Décision | Amendement |
+|---|---|
+| 2 | Ordre inchangé ; les étapes 8-10 sont précisées par 23.17 |
+| 9 | Primitif du Claim inchangé ; une publication `tmp + fsync + os.link + fsync` est ajoutée pour les enregistrements du registre et pour l'événement canonique seulement. Le support filesystem ciblé de la Décision 9 (Windows et Linux locaux) reste vrai pour le Claim ; E3 en mode `REAL` est restreint à Linux, ce qui est une restriction d'usage et non une modification |
+| 11 | Étapes 1-9 inchangées ; les phases P et I et les étapes 0-11 d'E3 (23.17) précèdent toute la séquence d'acquisition d'E2 ; la `CONSUMPTION` et le `ReadIntent` suivent son retour durable |
+| 13 | Extension additive de l'événement (champs `Optional` sérialisés seulement s'ils sont non nuls, donc sortie d'un événement legacy identique octet pour octet ; hash stocké ; lister strict ; `event_id` et nom de fichier déterministes ; écriture par publication par lien, complète ou absente) ; timing conservé ; `ValidationRun` OOS écrite en exclusif avec identifiant déterministe ; le miroir Manifest de 22.12.6 est explicitement reporté (le `ClosingRecord` fait foi) |
+| 14 | Inchangée ; les `ValidationAssessment` OOS consomment la `ValidationRun` OOS et la règle d'attribution de 23.5 s'applique |
+| 16 | Disposition portable inchangée ; fichiers additionnels dans `campaign_dir` ; registre et coffre **hors** de `results/job_xxx/` |
+| 22.2 | Le « porteur exact » du contrôle d'exposition est résolu : artefacts distincts (inventaire, déclarations, attestation), référencés par hash |
+| 22.12.1 | Le contrôle d'exposition précède l'admission, puis E2 |
+| 22.12.4 | Portée précisée pour `S0` (analysable et vérifiable avant le Claim, car donnée de recherche) et resserrée pour `S_H` (unique lecture après le `ReadIntent`, 23.5) ; le Claim n'atteste pas `S_H` |
+| 22.12.6 | Événement canonique et `ClosingRecord` précisés ; miroir Manifest reporté |
+
+### 23.23 — Compatibilité E1/E2 et contrats préservés
+
+- E1 : les 14 clés, `claim_id` et `claim_content_hash` (Décision 10) et toutes les fonctions pures sont inchangés.
+- E2 : l'API, la séquence 22.6 et `save_exclusive` sont inchangés.
+- Pré-enregistration, `scope_key`, `campaign_protocol_fingerprint`, `campaign_id`, Plan V2, Manifest V2 et D5 : inchangés.
+  `validate_gate_v_campaign_plan_v2_sources` ne contrôle que l'égalité des identifiants et la chronologie des
+  zones ; un `FINAL_HOLDOUT` futur est donc compatible (à confirmer par un test RED d'implémentation).
+- V1, `results/job_xxx/`, moteurs, stratégies et artefacts historiques : inchangés. `validation_oos.py`,
+  `validation_run.py` et `engine.run_backtest` ne sont pas modifiés (seule l'aide additive du chargeur est ajoutée).
+  **Modifications additives futures, signalées** : `dataset_split.py` (champs `Optional` de `HoldoutAccessEvent`
+  sérialisés seulement s'ils sont non nuls, complément du constructeur, lister strict, écrivain par publication par
+  lien) et `atomic_json_store.py` (primitive de publication par lien, E3-C) ; aucune n'altère le contrat de lecture
+  existant ni la sortie d'un événement legacy ; seul un code antérieur à cette Décision ignore les événements étendus
+  (23.13).
+
+### 23.24 — Décisions opérationnelles encore ouvertes (aucune valeur inventée ici)
+
+**Aucune de ces valeurs n'a de défaut** : une valeur absente ou nulle refuse `REAL`.
+
+Nombre maximal de tentatives de publication par appel dans le registre ; chemin canonique, compte de service et liste des hôtes du registre ; longueur de la fenêtre prospective et date `ws` ;
+marge entre l'ancrage et `ws` ; choix de l'autorité de temps (RFC 3161 ou OpenTimestamps) ; support du témoin de
+tête copié hors de l'hôte ; nombre maximal de tentatives d'ingestion ; échéance d'ingestion après `we` ; règle de
+couverture ; limite mémoire du chargeur ; permissions exactes du registre, de sa configuration et du coffre ; liste
+des systèmes de fichiers acceptés ;
+marge de fuseau pour les fenêtres sans offset vérifié (à défaut : `UNDETERMINED`) ; règle de sélection des
+`oos_parameters` autre que `LITERAL_PREDECLARED` ; fournisseur et adaptateur d'acquisition ; politique de
+sauvegarde du registre ; chemin normatif du fichier du rapport de qualification (fixé par la slice E3-Q, nécessaire à
+la vérification `X → R → B` de 23.21) ; spécification fine du miroir Manifest.
+
+### 23.25 — Limites résiduelles et absence de verdict
+
+Travaux manuels non enregistrés ; `run_oos_validation` publique ; `results/` local et non versionné ; plusieurs hôtes
+indépendants ; administrateur root ; connaissance de marché humaine pendant la fenêtre ; information dérivée du hash et
+de la taille ; provenance de niveau 2 déclarée et de niveau 3 impossible à prouver ; `oos_parameters` sans règle de
+dérivation officielle ; identité non prouvée entre les coûts engagés et ceux effectivement utilisés par les folds
+Walk-Forward (les artefacts V2 ne les portent pas) ; blocage définitif d'une fenêtre par une réservation abandonnée
+(conservateur, comptabilisé) ; enregistrements du registre postérieurs au dernier témoin de tête et non référencés,
+perdus par une restauration complète de la machine ; code antérieur à cette Décision qui ignore les événements
+étendus ; peu de trades possibles sur une fenêtre courte (la longueur relève de la policy). **E3 n'écrit
+jamais de verdict `GATE V`, de Champion, de « robuste » ni de qualification scientifique.**
+
+### 23.26 — Découpage TDD indicatif
+
+E3-A modèles purs et classification ; E3-B intervalles et inventaire strict ; E3-C primitive de publication durable ;
+E3-D registre et admissions ; E3-E engagement, preuves de temps, attachment et nullité ; E3-F ingesteur et provenance ;
+E3-G événement canonique, `ValidationRun` exclusive, identifiant OOS ; E3-H chargeur par octets ; E3-I adaptateur
+moteur ; E3-J orchestrateur et mode `SYNTHETIC` ; E3-K diagnostic en lecture seule ; E3-L miroir Manifest (optionnel) ;
+E3-Q qualification (cible). Chaque tranche : RED, GREEN, revue, suite existante verte.
 
 ## Conséquences
 
@@ -1824,3 +2770,13 @@ V1 est inchangé. Le Manifest garde ses champs 13-17 à `None` et n'importe pas 
     `HoldoutAccessEvent` n'en est jamais la preuve.
   - `AF-V-07` = IN PROGRESS, `AF-V-08` = DONE, `GATE V` NON PASSÉE, `FINAL_HOLDOUT` NON ACCÉDÉ pour `AF-V-07`
     (un accès antérieur et distinct est documenté dans `DOMAIN_MODEL.md` §12 pour le plan IG demo d'AF-V-01).
+- **Mise à jour (2026-10-12, additive, ne remplace rien de ce qui précède)** — état réel des tranches :
+  - **E1 = PUBLIÉ** (commit `707ec51b7edc52e5b5d8c4b040d9454f83b27e45`) et **E2 = PUBLIÉ** (commit
+    `9c2bf7ef5ccf692e9d89db7b0ca61038bbd962e4`) dans `origin/master` ; les mentions « E1 NON COMMITTED » et
+    « E2 SPECIFIED, NOT IMPLEMENTED » de la mise à jour du 2026-10-11 décrivent l'état à cette date. Tests E2
+    rapportés précédemment : 3772 réussis, 2 ignorés (non rejoués pour cette mise à jour documentaire).
+  - **E3 = conception formalisée par la Décision 23, en cours de validation documentaire, NON IMPLÉMENTÉE** ; la
+    mention « E3 = DESIGN NOT LOCKED » du 2026-10-11 décrit l'état à cette date. Le mode `REAL` est
+    **désactivé et non qualifié** ; aucune qualification d'infrastructure n'est affirmée.
+  - Aucun accès `FINAL_HOLDOUT` nouveau, aucun Claim réel. `AF-V-07` = IN PROGRESS, `GATE V` NON PASSÉE, aucun
+    Champion qualifié.
