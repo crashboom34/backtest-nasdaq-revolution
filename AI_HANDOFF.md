@@ -2903,3 +2903,113 @@ doivent pas être mélangées à un commit documentaire (`AGENTS.md`, `docs/adr/
 `docs/agents/skills-usage.md`) ; le fichier non suivi `=1.12.0` est également préexistant. Utiliser
 `git commit --only -- <chemin>` pour isoler un commit. Un hook « Fact-Forcing Gate » exige de présenter des faits avant la
 première commande Bash ou la première écriture sur un fichier de la session.
+
+## 43. `AF-V-07` — addenda 23.27/23.28 PUBLIÉS ; mission TDD d'E3-A autorisée (2026-10-14) — fait foi sur le §42
+
+Cette section **prévaut sur le §42** là où celui-ci est devenu périmé (le §42 reste l'historique).
+
+**Checkpoint Git publié au démarrage de la mission TDD** : `master` = `origin/master` =
+`72febdecdc7a73fa6c5194b8c1c05d77ec077391` (commit « docs(gate-v): align E3-A classification contract and handoff »),
+parent `25f395f5bb3ed0d9dd3266de617a12e2598ce301`. Les addenda **23.27 et 23.28 de l'ADR 0025 sont PUBLIÉS** (poussés,
+fast-forward). La mention du §42 « lot documentaire local, non publié » est **périmée**.
+
+**Statut au démarrage** : E3-A = **DESIGN LOCKED** ; l'implémentation TDD est **autorisée par la mission du 2026-10-14**
+(fichiers : `gate_v_final_holdout_protocol.py`, `tests/test_gate_v_final_holdout_protocol.py`, `AI_HANDOFF.md`), mais
+**n'était pas réalisée au démarrage**. `REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE. Aucun Champion. Aucun
+accès `FINAL_HOLDOUT`, aucun Claim réel. `AF-V-07` = IN PROGRESS.
+
+**Précautions inchangées** : trois modifications indexées préexistantes (`AGENTS.md`, ADR 0016,
+`docs/agents/skills-usage.md`, empreinte du diff indexé `8b78a333b37710b5987d1e535c8487e797984df193dc80362efd946ed9670e6f`)
+et le fichier non suivi `=1.12.0` ne font pas partie de cette série. `DOMAIN_MODEL.md` est absent à la racine
+mais **existe sous `docs/architecture/DOMAIN_MODEL.md`** (correction : une version antérieure de cette section le disait
+inexistant, ce qui était inexact) ; le glossaire reste `CONTEXT.md`.
+
+### 43.1 E3-A — implémentation locale, revue finale et régression (2026-10-14) — NON PUBLIÉ
+
+**Checkpoint initial et état Git** : `master` = `origin/master` = `72febdecdc7a73fa6c5194b8c1c05d77ec077391` au démarrage et à
+la fin des vérifications. Le lot E3-A est **local** : `gate_v_final_holdout_protocol.py` et
+`tests/test_gate_v_final_holdout_protocol.py` (nouveaux), `AI_HANDOFF.md` (modifié). **Il n'est pas publié** ; aucun push
+n'a eu lieu. Si `git log origin/master..HEAD` montre un commit « feat(gate-v): implement pure E3-A exposure
+classification », il s'agit de ce lot, commité localement et toujours non poussé (son SHA n'est volontairement pas
+inscrit ici). Les trois modifications indexées préexistantes (empreinte du diff indexé
+`8b78a333b37710b5987d1e535c8487e797984df193dc80362efd946ed9670e6f`) et le fichier non suivi `=1.12.0` ne font pas
+partie de la série.
+
+**Statut réel** : E3-A = **IMPLÉMENTÉ ET TESTÉ LOCALEMENT, NON PUBLIÉ**. `AF-V-07` = IN PROGRESS. `REAL` = DISABLED,
+NOT QUALIFIED. `GATE V` = NON PASSÉE. Aucun Champion. `FINAL_HOLDOUT` non accédé, aucun Claim réel, aucun backtest, aucune
+donnée de marché lue.
+
+**API implémentée (module pur, stdlib seule : `__future__`, `dataclasses`, `datetime`, `enum`, `hashlib`, `json`, `re`,
+`typing`)**
+- 11 énumérations : `ExposureClass`, `ChronologyLevel`, `OverlapVerdict`, `SourceStatus`, `SourceKind` (12 valeurs, propriétés
+  `exposes_data` et `capability_unknown`), `UnresolvedCause` (7), `ConditionStatus`, `TimeProofStatus`, `ReasonCode` (32 = 7 + 25),
+  `AdmissionRefusal` (4), `OwnRecordStage` (5).
+- 11 dataclasses immuables, champs dans l'ordre approuvé : `ExposureFinding` (10), `TrialAccounting` (6), `ExposureInventory` (7),
+  `ExposureDeclaration` (8), `DeclarationSet` (2), `TimeProofFact` (3), `ChronologyFacts` (7), `OwnCampaignContext` (2),
+  `ClassificationInput` (4), `FConditionResult` (3), `ExposureClassificationResult` (16).
+- 16 fonctions publiques : `normalize_utc_instant`, `build_exposure_finding`, `build_exposure_inventory`,
+  `build_exposure_declaration`, `build_chronology_facts`, `partition_own_records`, `compute_exposure_inventory_id`,
+  `compute_inventory_content_digest`, `compute_declaration_id`, `compute_classification_input_digest`,
+  `compute_static_sources_digest`, `compute_overlap_projection_hash`, `compute_effective_t_sel`, `classify_exposure`,
+  `admission_refusals`, `classification_result_to_record`. Les fonctions d'identité qui dépendent de l'absorption prennent
+  `(inventory, own_context)`.
+
+**Résultats complets des tests** (environnement : Windows-10-10.0.19045, Python 3.13.7, `.venv` du dépôt)
+- Tests dédiés : **345 réussis, 0 ignoré, 0 échoué** (`.venv/Scripts/python.exe -B -m pytest tests/test_gate_v_final_holdout_protocol.py -q -p no:cacheprovider`).
+- **Suite complète sur la version finale, tests E3-A inclus** : `.venv/Scripts/python.exe -B -m pytest -q -p no:cacheprovider -rs`
+  → **4114 réussis, 5 ignorés, 0 échoué** en 582 s. Les fichiers E3-A n'ont pas changé pendant cette campagne
+  (SHA-256 du module `81fbb24b…1b82`, du test `717d07e2…0ba2`, identiques avant et après).
+- 5 ignorés, **non démontrés sous Windows** (aucune qualification de `REAL` n'en découle) :
+  `tests/test_atomic_json_store_durable.py:270` (`fsync` de répertoire POSIX) ; `tests/test_gate_v_final_holdout_claim_acquisition.py:837`,
+  `:873`, `:945` (liens symboliques, privilège Windows requis) ; `:878` (FIFO, POSIX uniquement).
+- Contrôle de pureté par AST (imports restreints à la liste blanche, aucun appel `open`, aucune lecture d'horloge, aucune
+  référence à E1/E2, au moteur ou à Streamlit) : inclus dans les 345 tests, avec contre-épreuves sur sources interdites.
+- Compatibilité E1/E2 : tests E1/E2 et `atomic_json_store` verts dans la suite complète ; `_canonical_json` égal à celui d'E1 (test).
+- Campagnes de mutation sur copies hors dépôt : **32 mutations distinctes, 0 survivante**.
+
+**Revues indépendantes et corrections**
+- Revue de la première implémentation : 0 BLOCKER, 0 MAJOR, 8 MINOR, dont 7 corrigés en TDD (débordement de la marge F4, marge
+  négative jugée `UNVERIFIED`, ordre des déclarations, invariants du résultat, projection `REGISTRY_UNREADABLE`, racines
+  dédupliquées, trous de tests).
+- Revue finale à deux axes (skill `code-review`) : axe Standards 0 BLOCKER, 0 MAJOR, 14 MINOR ; axe Spec 0 BLOCKER, 0 MAJOR,
+  7 MINOR/INFO ; aucune contradiction normative avec l'ADR.
+- Contournement traité en TDD : les fonctions d'identité acceptaient une réservation ou admission étrangère `RESOLVED` non
+  recoupante que `ClassificationInput` refusait ; la règle de listabilité est maintenant appliquée par **toutes** les fonctions
+  qui prennent le contexte (RED : 11 échecs, puis GREEN).
+- Défauts trouvés par les nouveaux tests : offset ISO `+00:60` accepté (regex resserré) ; `TypeError` fuyant des builders sur
+  élément invalide (désormais `ValueError`) ; raisons de condition incohérentes avec leur statut et codes F orphelins dans
+  `reasons` (nouveaux invariants du résultat) ; trous de couverture comblés.
+- Relecture indépendante ciblée des corrections tardives : 0 BLOCKER, 0 MAJOR, 2 MINOR (constante morte supprimée ;
+  `ValueError` sur un engagement de mauvais type conservé, D9).
+- MINOR acceptés sans changement (aucun défaut fonctionnel démontré) : recalculs redondants de `partition_own_records`,
+  `**_unused` des évaluateurs F3 à F5, table de jumelage classe/F1 répétée, longueur de `classify_exposure`, `pytest.raises`
+  sans `match=`. Aucun refactor n'a été fait pour réduire les lignes.
+
+**Décisions d'interprétation D1 à D10** (aucune ne nécessite de modifier l'ADR ; aucune contradiction normative majeure)
+- Application directe de l'ADR : D6 (cumul littéral de R2 et de 23.27.2 : un enregistrement propre non exposant non résolu est
+  non résolu ET anomalie), D9 (convention E1 : `TypeError` pour une erreur d'appel, `ValueError` pour une valeur invalide),
+  D10 (`admission_refusals` : refus de classe, SINON refus de niveau, puis chevauchement ; 23.28).
+- Choix d'implémentation compatible avec l'ADR : D1 (position des identifiants déclarés à partir de 1), D2 (pas de `t_sel` à
+  l'engagement donne un `t_sel` effectif absent, ligne « absent » de la matrice 23.28 ; une déclaration ne le fournit pas),
+  D3 (ingestion ou plage inconnue donne `F5_INGESTION_MISSING`, faute de code dédié), D4 (marge jugée seulement pour une
+  preuve `VALID` de sa propre réservation), D5 (source de capacité inconnue non résolue comptée en `F2_EXPOSURE_WINDOW_UNKNOWN`,
+  conservateur).
+- Choix compatible **à ratifier explicitement** : D7 (`declared_trial_counts` est `Optional[TrialAccounting]` ; leur présence
+  entre dans `declaration_id` et `input_digest`), D8 (libellés `missing:RESERVATION` et `missing:ADMISSION` issus de l'ADR,
+  `missing:FINAL_HOLDOUT_CLAIM` et `missing:CONSUMPTION` extrapolés ; ils entrent dans la préimage de `classification_id`).
+
+**Risques résiduels** : (1) rien n'est persisté ni branché : E3-B à E3-J restent à faire ; (2) les vecteurs SHA-256 figés
+ne couvrent que le scénario B0 (les autres préimages sont vérifiées par un calcul indépendant dans le test) ; (3) aucun
+recoupement des faits chronologiques avec l'étage (non exigé par l'ADR) ; (4) les 5 tests POSIX ignorés sous Windows ;
+(5) `fromisoformat` accepte les fractions de 1 à 5 chiffres sous Python >= 3.11 seulement (le projet est en 3.13) ; (6) un
+tuple de refus vide n'est jamais une autorisation : E3-J devra refuser de traiter une classification d'étage `ADMITTED` ou
+supérieur comme une autorisation (test E3-J obligatoire, 23.27.7).
+
+**Compatibilité avec les futures slices** : E3-B construira l'inventaire avec les builders (racines `scanned_roots`
+statiques, verdicts de recouvrement calculés hors E3-A, règle de listabilité déjà appliquée ici) et la primitive publique de
+recouvrement (`_windows_overlap` est privée ici) ; E3-D dérivera l'étage des artefacts persistés ; E3-E fournira les faits
+de `ChronologyFacts` ; E3-J reclassifiera, comparera les identités et ne tirera jamais une admission d'un tuple vide.
+
+**Prochaine étape** : revue de publication de ce lot (push uniquement sur autorisation explicite). La mission E3-B
+(construction et lecture stricte de l'inventaire, persistance du A0 et des déclarations) ne démarre qu'**après publication
+d'E3-A**.
