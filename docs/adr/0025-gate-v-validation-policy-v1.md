@@ -2335,7 +2335,9 @@ durable par un `fsync` explicite du répertoire (permis pour une `RESERVATION` o
 une `CONSUMPTION`). Si l'attestation a été remplacée, refus : l'admission reste et
 réserve la fenêtre. Réutiliser une admission n'ouvre aucun accès ; seul le Claim d'E2 ouvre le droit. *(Précisé par
 23.27.3 : la reprise ne rejoue jamais la comptabilité ; « Même `campaign_id`, deux tentatives » ci-dessus est inchangé
-et compatible avec 23.27.2 et 23.27.4.)*
+et compatible avec 23.27.2 et 23.27.4.)* *(Précisé par 23.29.3 : « remplacée » signifie que le fichier d'attestation épinglé par hash est
+absent ou diffère ; un slot d'attestation postérieur à l'`ADMISSION` n'est pas un remplacement et n'a aucun effet sur l'exécution en
+cours.)*
 
 ### 23.11 — Inventaire, déclarations, classification, attestation, autorisation
 
@@ -2361,7 +2363,8 @@ ce sont des sources dérivées, exclues de `scanned_roots` (23.27.3).)*
    Elles ne peuvent que durcir (une déclaration d'exposition passe la classe vers `RETROSPECTIVE_EXPOSED` ou
    `UNDETERMINED`), jamais assouplir une classe automatique. Une déclaration peut aussi repousser `t_sel` à une date
    plus tardive ; le `t_sel` effectif utilisé par F2 et par C est le maximum de celui de l'engagement et de ceux des
-   déclarations, jamais une date plus ancienne.
+   déclarations, jamais une date plus ancienne. *(Complété par 23.29.1 et 23.29.2 : une chaîne de déclarations par `inventory_id`,
+   reliées en lignée avec report cumulatif des expositions et du `t_sel` ; E3-A inchangé.)*
 3. **Classification C** : fonction pure de A0, des déclarations et des **preuves de chronologie** (engagement,
    réservation, `ReservationTimeProof`, `IngestionRecord`, `max(time)` de `S0` calculé, `t_sel` et `t_anchor`
    déclarés ou vérifiés), recalculée à chaque vérification. Le niveau de chronologie (23.3) en résulte et est inscrit
@@ -2369,7 +2372,8 @@ ce sont des sources dérivées, exclues de `scanned_roots` (23.27.3).)*
 4. **Attestation T** : nominative, liée à C, à A0, à la tête des déclarations, à l'engagement, à l'attachment, à la
    projection de recouvrement et au préfixe de chaîne (`seq`, `content_hash`). Elle est périmée dès que l'un de ces
    éléments change. **Elle n'autorise rien.** *(Complété par 23.27.3 : elle épingle `inventory_content_hash`, qui couvre la
-comptabilité des essais, et `inventory_id`.)*
+comptabilité des essais, et `inventory_id`. Complété par 23.29.2 et 23.29.3 : « tête des déclarations » = sommet de la chaîne
+terminale de la lignée, épinglé avec le `declaration_lineage_digest`.)*
 5. **Autorisation d'acquisition** : décision humaine **distincte**, nominative, liée à T, à l'engagement, au `claim_id`
    (calculable depuis le plan), à la fenêtre, au mode, au SHA du code, au rapport de qualification, à la projection et
    au préfixe de chaîne. Seule elle déclenche l'admission.
@@ -2384,7 +2388,8 @@ nombre de réservations **abandonnées** (sans `ClosingRecord` terminal), de ten
 d'engagements nuls. Une campagne dont le `ClosingRecord` est introuvable (localisation périmée, dossier déplacé) est
 comptée comme abandonnée (conservateur). C'est une comptabilité de
 multiple testing : aucune correction statistique n'est calculée ni aucun seuil fixé (hors périmètre, Human Gate).
-*(Portée des compteurs, absence de double comptage et rôle du `ClosingRecord` remplacés par 23.27.5.)*
+*(Portée des compteurs, absence de double comptage et rôle du `ClosingRecord` remplacés par 23.27.5 ; provenance
+`OBSERVED` / `PARTIAL` / `NOT_OBSERVED` de chaque compteur : 23.29.5.)*
 
 Trois décisions humaines distinctes : (1) attestation des expositions historiques ; (2) autorisation explicite d'une
 acquisition irréversible ; (3) Human Gate de qualification scientifique d'un éventuel Champion (hors E3). L'identité
@@ -2470,7 +2475,8 @@ par son `validation_run_record_hash` (23.4) épinglé dans le `ClosingRecord`.
   `<coffre>/<commitment_id>/ingestion_record.json` (`gate_v_ingestion_record_v1`),
   `<coffre>/<commitment_id>/attempt_<n>.json` (`gate_v_ingestion_attempt_v1`) et `<coffre>/<commitment_id>/s_h.csv`
   (octets de `S_H`, sans version de schéma). Les
-  attestations successives suivent la règle de supersession par slots denses des déclarations.
+  attestations successives suivent la règle de supersession par slots denses des déclarations. *(Chemins remplacés par
+  23.29.1 et 23.29.3 : `exposure/<inventory_id>/declaration_<seq4>.json` et `exposure/<inventory_id>/attestation_<seq4>.json`.)*
 - **Miroir Manifest** (champs 13-17) : slice optionnelle, monotone `None → id`, jamais autorité d'exclusivité ; le
   Manifest n'importe aucun module Claim. Tant qu'elle n'est pas spécifiée plus finement, E3 n'écrit pas ces champs et
   le `ClosingRecord` fait foi.
@@ -2708,7 +2714,8 @@ des systèmes de fichiers acceptés ;
 marge de fuseau pour les fenêtres sans offset vérifié (à défaut : `UNDETERMINED`) ; règle de sélection des
 `oos_parameters` autre que `LITERAL_PREDECLARED` ; fournisseur et adaptateur d'acquisition ; politique de
 sauvegarde du registre ; chemin normatif du fichier du rapport de qualification (fixé par la slice E3-Q, nécessaire à
-la vérification `X → R → B` de 23.21) ; spécification fine du miroir Manifest.
+la vérification `X → R → B` de 23.21) ; spécification fine du miroir Manifest. *(Ajout par 23.29.6 : nombre d'essais de la double
+passe de listage strict ; en `REAL` une valeur absente refuse, en `SYNTHETIC` un essai unique suffit.)*
 
 ### 23.25 — Limites résiduelles et absence de verdict
 
@@ -3079,6 +3086,231 @@ raison, F1 à F6 `MET`, aucun refus, réservation propre absorbée.
 | pureté (test AST), vecteurs de hash littéraux calculés hors du code testé | imports ⊆ bibliothèque standard ; aucune E/S, horloge ni accès marché |
 | propriété de monotonie : `D ⊆ D'` | sévérité de classe non décroissante, `t_sel` effectif non décroissant |
 
+### 23.29 — Addendum E3-B (2026-10-13) : déclarations par inventaire, continuité, attestations successives
+
+**Statut.** Amendement **normatif ciblé** issu de la revue de conception E3-B (question Q-1). **E3-B reste NON IMPLÉMENTÉ.**
+E3-A (publié, commit `7f30d0752465b755e8c08460e8ffb4ac13ff1d47`) est **inchangé** : API, énumérations, identités, formules, et
+en particulier `DeclarationSet`, `ClassificationInput` et `compute_declaration_id`. E1, E2 et les Décisions 13 et 22 sont inchangés,
+ainsi que toutes les identités et formules existantes. Aucun artefact E3-B n'existe à ce jour : l'amendement n'est rétroactif sur
+aucun fichier. `REAL` reste désactivé et non qualifié, `GATE V` non passée.
+
+**Contradiction corrigée.** E3-A refuse toute déclaration qui référence un autre `inventory_id` que l'inventaire courant et exige une
+chaîne dense `seq` 1..n (23.27.6) ; le chemin de 23.13 `exposure/declaration_<seq>.json` est unique par campagne. Dès que
+l'`inventory_id` change (23.27.4 : exposition étrangère nouvelle), la nouvelle chaîne devait repartir à `seq` 1 sur des fichiers déjà
+occupés, et rien ne garantissait qu'elle reprenne les expositions déjà déclarées. De même `exposure/attestation.json` est unique
+alors que 23.13 prévoit des attestations successives.
+
+**Vocabulaire.** *Chaîne* : les déclarations `declaration_0001.json`… d'un répertoire d'inventaire. *Sommet (tip)* : dernière déclaration
+d'une chaîne. *Lignée* : suite linéaire des chaînes d'une campagne. *Chaîne terminale* : dernière chaîne de la lignée, seule passée
+à E3-A. Le mot « tête » reste réservé à la tête du registre (23.10).
+
+**Hiérarchie.** En cas de divergence entre 23.29 et une clause listée ci-dessous, **23.29 prévaut**. Les clauses d'origine ne sont pas
+réécrites, hors notes additives ; la présente table les signale (des notes de renvoi existent en outre pour certaines lignes de 23.10, 23.11,
+23.13 et 23.24). **[R]** = clarification rédactionnelle, **[N]** = changement normatif.
+
+| Clause d'origine | Traitement | Nature |
+|---|---|---|
+| 23.11 étape 2, « Déclarations D1..Dn … en slots denses, chacune liée à l'inventaire et à la précédente » | complétée par 23.29.1 et 23.29.2 (portée par inventaire, lignée de chaînes) | [N] |
+| 23.13, chemin `exposure/declaration_<seq>.json` | remplacé par `exposure/<inventory_id>/declaration_<seq4>.json` | [N] |
+| 23.13, chemin `exposure/attestation.json` | remplacé par `exposure/<inventory_id>/attestation_<seq4>.json` | [N] |
+| 23.13, « les attestations successives suivent la règle de supersession par slots denses des déclarations » | précisée par 23.29.3 | [N] |
+| « tête des déclarations » : 23.10 (péremption, étape 2), 23.11 étape 4, 23.17 étape 13, 23.27.4 (contrôle 5) | = sommet de la chaîne terminale **et** `declaration_lineage_digest` (23.29.2) | [N] |
+| 23.11, « Comptabilité des essais » | complétée par 23.29.5 (provenance des compteurs) | [N] |
+| 23.27.3, énumération du contenu persisté du A0 | complétée : provenance des compteurs (23.29.5) | [N] |
+| 23.27.6, « une déclaration qui référence un autre `inventory_id` est refusée » | précisée : vaut pour l'ensemble passé à E3-A (chaîne terminale) ; E3-B lit les autres chaînes pour la continuité | [R] |
+| 23.27.7, E3-B « persistance des déclarations » | précisée : la **publication** dépend de la primitive d'E3-C (23.29.4), la lecture et la vérification non | [N] |
+| 23.22 (ligne Décision 9) et 23.11 préambule (« créé en exclusif et durable »), publication par lien « pour le registre et l'événement canonique seulement » | complétées : publication par lien étendue aux déclarations et aux attestations | [N] |
+| 23.11 étape 1, listage strict | complétée par la double passe de 23.29.6 (clause nouvelle ; nombre d'essais = valeur opérationnelle de 23.24) | [N] |
+| 23.10, « Crash avant le Claim » (« Si l'attestation a été remplacée, refus ») | précisée par 23.29.3 : « remplacée » = fichier épinglé par hash absent ou différent ; un slot postérieur n'est pas un remplacement | [N] |
+| 23.24, liste des décisions opérationnelles | complétée : nombre d'essais de la double passe de listage strict | [N] |
+
+#### 23.29.1 — Portée par inventaire
+
+- **Arborescence de `<campaign_dir>/exposure/`** : des fichiers `inventory_<inventory_content_hash>.json` (inchangé) et des répertoires
+  `<inventory_id>` (64 hexadécimaux minuscules). Tout autre nom, y compris les anciens chemins `exposure/declaration_<seq>.json` et
+  `exposure/attestation.json`, est refusé par la lecture stricte. Chaque répertoire d'inventaire ne contient que
+  `declaration_<seq4>.json`, `attestation_<seq4>.json` et, éventuellement, des **orphelins de publication** de motif
+  `.exposure.tmp.<32 hexadécimaux>` (motif imposé à la primitive de publication d'E3-C pour ces artefacts) : ignorés et consignés,
+  jamais lus comme déclaration. Aucune collision de casse, aucun lien ni point d'analyse (`lstat` de chaque composant). La
+  construction d'une table de sources par E3-B traite `<campaign_dir>/exposure/` et ses répertoires d'inventaire comme une structure
+  **connue** (artefacts informatifs), pour ne pas faire des chaînes d'une autre campagne des sources inconnues.
+- **Création d'un répertoire d'inventaire** : par `os.mkdir` sans parents, juste avant la publication de sa première déclaration, par la
+  fonction de publication d'E3-B / E3-C. Un répertoire **sans aucune déclaration** (vide, ou ne contenant que des orphelins de
+  publication, par exemple après un arrêt entre `mkdir` et `os.link`) n'est **pas une chaîne** : il est ignoré et consigné, ne
+  compte ni comme racine ni comme bifurcation, et la publication peut le réutiliser. Un répertoire qui contient une attestation mais
+  **aucune déclaration** est une altération : la lecture refuse.
+- **Validité d'un répertoire** : son nom est égal à l'`inventory_id` de **chacune** de ses déclarations ; un A0 persisté de même
+  `inventory_id` existe avant la première déclaration. Plusieurs A0 de même `inventory_id` mais de `inventory_content_hash` distincts
+  (comptabilité ou `created_at` différents) **partagent la même chaîne** : les déclarations portent l'`inventory_id` scientifique,
+  jamais un A0. Un `inventory_<hash>.json` illisible ou tronqué est un **orphelin consigné** (le nom étant le hash du contenu, un
+  nouveau A0 prend un autre nom) sauf s'il est épinglé par une attestation ou une `ADMISSION`, auquel cas la lecture refuse.
+- **Numérotation** : `seq4` = entier décimal sur quatre chiffres (`%04d`), dense à partir de `0001`, plafond `9999` (capacité du format
+  `declared:<seq4>:<pos4>` d'E3-A) ; au-delà, refus. Les séquences de déclarations et d'attestations sont indépendantes.
+- **Enveloppe persistée d'une déclaration** (version `gate_v_exposure_declaration_v1`) : `declaration` (les 8 champs d'E3-A),
+  `declaration_id` (`compute_declaration_id`, **inchangé**), `prev_declaration_content_hash` (nul si et seulement si `seq` = 1),
+  `carried_from` (nul sauf pour `seq` = 1 d'une chaîne non racine, 23.29.2), `created_at` (injecté, jamais lu d'une horloge par le
+  cœur) et `declaration_content_hash` = SHA-256 du JSON canonique (20.3) de l'enveloppe **sans** ce champ, `created_at` inclus.
+  Le `declaration_id` d'E3-A n'inclut pas l'enveloppe : seul `declaration_content_hash` la couvre.
+- **Aucune suppression, aucun remplacement, aucune réécriture** d'un fichier existant. Les déclarations ne peuvent que durcir
+  (23.11 étape 2) ; **aucune rétractation n'existe dans cette version** (une `RESERVATION` n'est jamais libérée, 23.10, donc une autre
+  campagne ne peut pas reprendre la même fenêtre) : toute correction d'une exposition déclarée à tort relèverait d'une décision
+  normative ultérieure. Une exposition déclarée non résolue (`UNRESOLVED`) empêche `FRESH_UNEXPOSED_DECLARED` pour toute la lignée
+  (`UNDETERMINED` au plus, sauf exposition établie par ailleurs, R1).
+
+#### 23.29.2 — Continuité entre inventaires (lignée)
+
+La **lignée** d'une campagne est la suite linéaire de chaînes `C1 → C2 → … → Ck`. `C1` (racine) a une première déclaration sans
+`carried_from` ; chaque `Cj` (`j` ≥ 2) a une première déclaration dont `carried_from` vaut
+`{inventory_id, tip_seq, tip_declaration_id, tip_declaration_content_hash}` du **sommet** de `Cj-1`. La **chaîne terminale** est `Ck`.
+
+Règles, toutes vérifiées par la **publication** et par la **lecture stricte** (échec fermé) :
+1. **Découverte** : toutes les chaînes du répertoire `exposure/` sont découvertes ; chacune est lue entièrement (E3-B ne suppose
+   jamais qu'une chaîne ancienne est « sans intérêt »).
+2. **Linéarité** : exactement une racine, chaque chaîne référencée par au plus un successeur, aucun cycle, une seule chaîne
+   terminale. Deux racines, deux successeurs d'une même chaîne, une chaîne non reliée ou des copies sous un autre nom =
+   **bifurcation** (`DeclarationChainFork`) : refus, sans réparation automatique.
+3. **Report cumulatif** : la première déclaration de `Cj` reprend **explicitement** dans `declared_exposures` toutes les expositions
+   **déclarées** dans `Cj-1` (toutes ses déclarations), comparées par contenu (tous les champs d'`ExposureFinding` sauf `source_id`, en
+   multiensemble). Elles reçoivent les identifiants `declared:0001:<pos4>` d'E3-A (le renumérotage est obligatoire : E3-A refuse un
+   identifiant déclaré portant un autre `seq`) et sont donc vues par la classification comme toute exposition déclarée. `W` étant
+   fixe pour une campagne, leurs verdicts de recouvrement restent valides. Le report est **récurrent** : la première déclaration de
+   `Cj-1` ayant elle-même repris toutes les expositions de `Cj-2`, celles de `Cj` couvrent par construction **toutes** les chaînes
+   antérieures et pas seulement la dernière déclaration. Si le report exige plus de 9 999 expositions (capacité `<pos4>` d'E3-A), la
+   publication **refuse** : aucune troncature, aucune répartition sur plusieurs déclarations.
+4. **`t_sel`** : `declared_t_sel_utc` de la première déclaration de `Cj` est supérieur ou égal au maximum des `declared_t_sel_utc` de
+   `Cj-1` (et ne peut pas être nul si ce maximum existe) ; le `t_sel` effectif (E3-A) ne diminue donc jamais d'une chaîne à la suivante.
+5. **Épinglage** : `carried_from.tip_declaration_content_hash` égale le hash réel du sommet de `Cj-1` ; ajouter une déclaration à une
+   chaîne qui a déjà un successeur est interdit, et le constater à la lecture est une rupture de continuité.
+6. **Chaîne utilisée par la classification** : celle de l'`inventory_id` courant, qui doit être la chaîne terminale. Si l'`inventory_id`
+   courant n'a pas encore de chaîne : aucune déclaration, donc aucune classification possible (E3-A exige au moins une déclaration)
+   jusqu'à la publication d'une première déclaration qui satisfait 3 et 4. S'il correspond à une chaîne **non terminale** (retour à un
+   ancien inventaire) : refus (`InventoryReversion`).
+- **Les comptes déclarés** (`declared_trial_counts`) ne sont ni reportés ni contraints (question Q-3).
+- **Brouillon** : E3-B peut proposer un brouillon de première déclaration (reports pré-remplis) ; il ne publie jamais une déclaration
+  à la place du déclarant, qui reste nominatif (sans authentification forte).
+- **Effet sur E3-A** : seule la chaîne terminale est passée à `DeclarationSet`, uniquement par un chargeur de lignée qui a vérifié 1 à 6.
+  Toute violation de 1 à 6, ainsi qu'une chaîne manquante, illisible, tronquée ou à trou, ou un fichier dont le
+  `declaration_content_hash` ou le `declaration_id` ne se recalcule pas, **refuse** : aucun `DeclarationSet` n'est produit, donc aucune
+  classification `FRESH_UNEXPOSED_DECLARED`. Un lien `prev_declaration_content_hash` rompu dans une chaîne **non terminale** refuse aussi.
+  **`hash_linked`** n'est faux que dans un seul cas : une chaîne dont chaque fichier est valide
+  et dont les `declaration_id` s'enchaînent, mais dont un `prev_declaration_content_hash` ne vaut pas le hash réel du fichier précédent
+  (F6 `NOT_MET` ; niveau `UNSEEN_HISTORICAL`, ou `NOT_APPLICABLE` si une exposition établie rend la classe `RETROSPECTIVE_EXPOSED`) ;
+  sinon il est vrai.
+- **`declaration_lineage_digest`** = SHA-256 du JSON canonique de la liste, de la racine à la chaîne terminale, de
+  `{inventory_id, tip_seq, tip_declaration_content_hash}` de chaque chaîne. L'attestation (23.29.3) l'épingle.
+- **Concurrence** : aucun verrou de campagne ne sérialise deux répertoires distincts. Deux premières déclarations concurrentes de
+  chaînes successeurs, l'ajout d'une déclaration à une chaîne déjà suivie, ou un retour à un ancien `inventory_id` produisent une
+  bifurcation ou une inversion détectée à la lecture suivante : **échec fermé définitif**, sans réparation ; une sérialisation éventuelle
+  est déléguée à E3-C.
+- **Limites** : (a) le report ne couvre que les expositions **déclarées** : une exposition trouvée par le scan disparaît si le fichier est
+  supprimé ou si les racines scannées changent, puis le nouvel `inventory_id` peut être classé sans elle (défaut préexistant de l'absence de
+  trace, 23.3) ; (b) la suppression physique de toute l'historique des chaînes, ou des dernières déclarations de la chaîne terminale,
+  avant la première attestation n'est pas détectable par E3-B ; l'attestation épingle ensuite le digest de lignée, et l'`ADMISSION`
+  épingle l'attestation par son hash ; (c) les SHA-256 sont supposés sans collision, et deux répertoires de contenu identique sous des
+  noms différents sont refusés comme copies. Ces risques relèvent du Human Gate et de la protection du répertoire : E3-B ne
+  prétend jamais prouver l'absence absolue d'exposition ou de contamination.
+
+#### 23.29.3 — Attestations successives
+
+- Chemin : `<campaign_dir>/exposure/<inventory_id>/attestation_<seq4>.json` (version `gate_v_exposure_attestation_v1` conservée), dans le
+  répertoire de l'inventaire attesté. Slots denses à partir de `0001`, indépendants de ceux des déclarations, créés en exclusif, **jamais
+  écrasés ni supprimés** : une nouvelle attestation est un nouveau slot.
+- Une attestation épingle au minimum : l'`inventory_id` (égal au répertoire) **et** l'`inventory_content_hash` du A0 persisté attesté
+  (identité complète), le sommet de la chaîne de ce répertoire (`seq` et `declaration_content_hash`) et le `declaration_lineage_digest`.
+  Son schéma complet relève d'E3-E ; la présente clause ne fixe que le chemin, la conservation et ces épinglages. E3-B ne fournit que
+  les chemins, les slots et leur lecture stricte ; l'évaluation des épinglages appartient à E3-E et à E3-J. Une attestation
+  **n'autorise rien** (23.11 étape 4) : elle n'ouvre aucun droit d'accès et ne remplace pas l'autorisation d'acquisition (23.11 étape 5) ;
+  E3-B ne fabrique ni attestation ni autorisation humaine.
+- **Avant l'`ADMISSION`**, l'attestation valide est le slot de plus haut `seq` du répertoire de la chaîne terminale, si ses épinglages sont
+  satisfaits ; sinon **aucune** attestation n'est valide (aucun repli sur un slot antérieur) ; les slots antérieurs sont de l'historique
+  et ne se réactivent jamais. **Après l'`ADMISSION`**, la seule attestation
+  pertinente est celle que l'`ADMISSION` épingle par hash ; un slot postérieur n'a aucun effet sur l'exécution en cours (23.10 « Crash
+  avant le Claim », 23.17 étape 13). Les épinglages s'évaluent selon 23.27.3 et 23.27.4 : l'`inventory_content_hash` désigne le A0
+  **persisté** (relu par hash) et le A0 recalculé se compare par `inventory_id`, `static_sources_digest`, projection et
+  `inventory_content_digest`, jamais par égalité littérale de `inventory_content_hash` (un recalcul porte un `created_at` neuf).
+  **Avant l'`ADMISSION`**, une attestation d'un répertoire qui n'est plus la chaîne terminale est périmée définitivement ; **après
+  l'`ADMISSION`**, un changement de chaîne terminale est un changement d'exposition au sens de 23.27.3 (étape 13 de 23.17).
+
+#### 23.29.4 — Publication et lecture stricte
+
+- Toutes les lectures sont strictes (échec fermé, jamais de repli) : octets UTF-8 stricts sans BOM, clés dupliquées, constantes et
+  flottants non finis refusés, jeu de clés exact, recalcul de `declaration_id` et de `declaration_content_hash`, nom de fichier égal au
+  contenu, et **point fixe d'octets** (le record relu, re-sérialisé par le sérialiseur normatif de l'artefact, redonne exactement les
+  octets lus). Le sérialiseur normatif des déclarations, des attestations et du A0 est unique :
+  `json.dumps(record, sort_keys=True, ensure_ascii=False, indent=2, allow_nan=False)` suivi d'un `\n`, encodé en UTF-8 avec fins de ligne
+  LF, sans flottant ; il est imposé à la primitive de publication d'E3-C. `save_exclusive` ne trie pas les clés et n'interdit pas les
+  valeurs non finies : E3-B lui passe un `dict` déjà trié récursivement (octets identiques) et refuse toute valeur non finie avant l'appel.
+- **Déclarations et attestations** : un slot tronqué consomme une chaîne dense sans réparation possible. Elles ne sont donc publiées
+  que par la primitive de publication par lien d'E3-C (`tmp + fsync + os.link + fsync`, complète ou absente, 23.13), avec la matrice de
+  crash de 23.10 (dont `PublishedUnconfirmed`), la durabilité du répertoire restant non démontrable sous Windows. **Aucun repli sur
+  `O_EXCL` direct pour ces artefacts.** Tant que cette primitive n'est pas disponible, la publication de déclarations et d'attestations
+  est **indisponible** : rien n'est publié. `FileExistsError` = relecture stricte, égalité du contenu, sinon refus.
+- **A0** : recalculable, il peut être publié par `save_exclusive(durable=True)` (qui prend un `dict`, ne trie pas les clés et crée les
+  parents : E3-B construit le `dict` trié récursivement et crée `exposure/` par `os.mkdir` sans parents) sans E3-C ; un fichier tronqué au
+  nom attendu impose un nouveau `created_at` (nouveau nom), jamais une suppression. Les garanties obtenues sous Windows ne sont pas
+  celles de POSIX exigées par le mode `REAL` (qui reste désactivé et non qualifié).
+- Ce qui ne dépend pas d'E3-C : intervalles, scan, interprétation des sources, assemblage, comptabilité, publication et relecture de
+  l'A0, **lecture et vérification** des chaînes, de la lignée et de la continuité, brouillon de report. Ce qui en dépend : la
+  **publication** des déclarations et des attestations.
+
+#### 23.29.5 — Provenance des compteurs de la comptabilité
+
+Chacun des six compteurs de `trial_accounting` porte une provenance consignée dans le A0 (hors `inventory_id` et hors
+`inventory_content_digest`, mais couverte par `inventory_content_hash`, donc vérifiée sur le A0 **persisté**) :
+- `OBSERVED` : la source autoritative a été lue intégralement sur le périmètre scanné ;
+- `PARTIAL` : la source a été lue mais au moins un élément était illisible ou non résolu ; la valeur est **incertaine dans un sens
+  propre au compteur** (minorant d'un comptage de traces ; majorant pour `abandoned_reservations`, où un `ClosingRecord` introuvable
+  compte comme abandonnée) ;
+- `NOT_OBSERVED` : la source autoritative n'a pas été fournie ou n'existe pas encore (vue d'ingestion, d'engagements nuls,
+  `ClosingRecord`) ; la valeur `0` est un **espace réservé**, jamais un zéro vérifié.
+Un compteur `PARTIAL` ou `NOT_OBSERVED` n'est jamais présenté comme exact. La comparaison des valeurs par `inventory_content_digest` est
+inchangée. La provenance fait partie du contenu persisté du A0 et de `inventory_content_hash` ; elle n'entre dans aucune formule d'E3-A
+(`inventory_id`, `inventory_content_digest`, digests, classification). Elle n'est pas purement informative : en `REAL` elle
+conditionne l'admission (ci-dessous), en `SYNTHETIC` elle est informative. Une source obligatoire n'est jamais assimilée à
+un zéro vérifié : une racine d'audit configurée ou une vue du registre indisponible refuse l'inventaire ou le déclare incomplet
+(`complete` faux, 23.11 étape 1, 23.28) ; une source de **comptabilité** indisponible donne `NOT_OBSERVED`, sans effet sur `complete`,
+sur `inventory_id` ni sur la classe. Cible provisoire en mode `REAL` (question Q-5) : l'admission est refusée (E3-J) si un des six compteurs n'est pas `OBSERVED` ; la règle pour une campagne à
+réservation abandonnée sera précisée avec E3-J (`REAL` est désactivé). En mode `SYNTHETIC`, la provenance est affichée et non
+bloquante. La comptabilité reste non décisionnelle pour la classe (23.27.5).
+
+#### 23.29.6 — Double passe de listage
+
+Le listage strict d'une racine d'audit (23.11 étape 1) procède en deux passes : liste, lecture et hachage des fichiers reconnus comme
+sources, relistage, puis comparaison des noms, des `(st_ino, st_dev, size, mtime_ns)` et des hashs des fichiers lus. Les fichiers que
+la table de sources classe **inertes** ne sont comparés que par leur nom. Le nombre d'essais avant refus est une valeur opérationnelle,
+ajoutée par la présente clause à la liste des décisions opérationnelles de 23.24 ; en `SYNTHETIC`, un essai unique suffit et aucune
+absence de valeur ne bloque. La double passe **détecte** un changement observable entre les deux passes ; elle **ne garantit pas** : un instantané atomique
+de la racine, l'absence de modification après la seconde passe, la détection d'une modification restaurée à l'identique entre les
+deux passes, ni celle d'une édition masquée par une résolution grossière de `mtime` (FAT, exFAT, partages réseau). Le contrôle
+compensatoire est le recalcul de l'A0 par E3-J avant l'admission et à l'étape 13 de 23.17 ; il répète le même scan et atténue le risque
+sans le démontrer. Une racine instable après les essais autorisés refuse.
+
+#### 23.29.7 — Compatibilité et non-rétroactivité
+
+L'API, les identités et les formules d'E3-A, d'E1 et d'E2 sont inchangées ; la lignée n'est qu'une couche de persistance et de
+vérification d'E3-B qui fournit à E3-A un `DeclarationSet` ordinaire. E3-A seul n'impose ni le report cumulatif ni la monotonie du
+`t_sel` entre chaînes : la sûreté repose sur le chargeur de lignée d'E3-B, et E3-J ne reçoit un `DeclarationSet` que de lui. Les
+décisions de 23.27 et 23.28 restent en vigueur. Les questions Q-0 (note de renvoi sur « refuse » de 23.11 étape 1), Q-2 (validations
+walk-forward, Monte-Carlo, stabilité), Q-3 (agrégation observé et déclaré dans le `ClosingRecord`), Q-4 (critère de source prouvée
+exclusive) et Q-5 (règle `REAL` « tous les compteurs `OBSERVED` » : E3-J la vérifie sur le A0 persisté **et** sur le A0 recalculé,
+la provenance étant hors digest ; cas des réservations abandonnées) restent **ouvertes** et ne bloquent pas ce contrat.
+
+#### 23.29.8 — Obligations de test d'E3-B (contrat)
+
+Fixtures synthétiques isolées, sans donnée réelle ni `FINAL_HOLDOUT` : (1) premier inventaire, première déclaration ; (2) plusieurs
+déclarations sur un même inventaire ; (3) nouvel inventaire sans déclaration antérieure (aucune classification) ; (4) nouvel inventaire
+avec exposition déclarée antérieure (report cumulatif : RETROSPECTIVE_EXPOSED si établie ; omission du report refusée par E3-B alors
+qu'E3-A l'accepterait) ; (5) `t_sel` précédemment repoussé (abaissement refusé par E3-B) ; (6) même `inventory_id`, comptabilité
+modifiée (chaîne partagée, attestation périmée) ; (7) chaîne ancienne absente ou illisible (refus) ; (8) deux chaînes concurrentes,
+copies, deuxième racine, retour à un ancien inventaire (refus) ; (9) attestations successives sans écrasement (lecture des slots
+par E3-B) ; côté E3-J, une attestation postérieure à l'`ADMISSION` est sans effet ; (10) arrêt pendant la création d'une déclaration : répertoire vide ou orphelin ignoré,
+slot complet ou absent. Tests complémentaires : refus de plus de 9 999 reports ; renumérotation `declared:0001:<pos4>` acceptée par E3-A ;
+report d'une exposition `UNRESOLVED` et conservation de la multiplicité ; répertoire contenant une attestation sans déclaration ; lien
+`prev_declaration_content_hash` rompu dans une chaîne non terminale ; absence de repli sur une attestation antérieure ; point fixe
+d'octets ; anciens chemins refusés ; provenance des compteurs (jamais un zéro vérifié) ; double passe (modification détectée entre deux
+passes). Un test vérifie qu'aucune API d'E3-B ne remet un `DeclarationSet` hors du chargeur de lignée ; côté E3-J (23.27.7), un test
+vérifie que ce chargeur est la seule source de `DeclarationSet`.
+
 ## Conséquences
 
 - **État réel initial** : `AF-V-07` = **DESIGN ACCEPTED / READY FOR IMPLEMENTATION** (2026-09-29,
@@ -3151,3 +3383,10 @@ raison, F1 à F6 `MET`, aucun refus, réservation propre absorbée.
   `inventory_content_digest`, péremption de l'attestation précisée. **E3-A = design verrouillé sous réserve de la revue
   de cet addendum, NON IMPLÉMENTÉ.** Le mode `REAL` reste **désactivé et non qualifié**. Aucun accès `FINAL_HOLDOUT`
   nouveau, aucun Claim réel. `AF-V-07` = IN PROGRESS, `GATE V` NON PASSÉE, aucun Champion qualifié.
+- **Mise à jour (2026-10-13, additive, ne remplace rien de ce qui précède)** : **E3-A est implémenté, testé et publié** (commit
+  `7f30d0752465b755e8c08460e8ffb4ac13ff1d47`) ; la mention « E3-A = design verrouillé … NON IMPLÉMENTÉ » ci-dessus décrit l'état à sa
+  date. L'**addendum E3-B** (23.29, avec notes de renvoi dans 23.10, 23.11, 23.13 et 23.24) résout Q-1 : déclarations et attestations par
+  `inventory_id`, lignée de chaînes avec report cumulatif des expositions et du `t_sel`, provenance des compteurs, garanties de la
+  double passe. **E3-B = design documenté, NON IMPLÉMENTÉ** ; E3-A, E1 et E2 sont inchangés. Le mode `REAL` reste **désactivé et non
+  qualifié**. Aucun accès `FINAL_HOLDOUT` nouveau, aucun Claim réel. `AF-V-07` = IN PROGRESS, `GATE V` NON PASSÉE, aucun Champion
+  qualifié.

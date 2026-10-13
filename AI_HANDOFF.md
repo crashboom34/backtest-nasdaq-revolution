@@ -3013,3 +3013,187 @@ de `ChronologyFacts` ; E3-J reclassifiera, comparera les identités et ne tirera
 **Prochaine étape** : revue de publication de ce lot (push uniquement sur autorisation explicite). La mission E3-B
 (construction et lecture stricte de l'inventaire, persistance du A0 et des déclarations) ne démarre qu'**après publication
 d'E3-A**.
+
+## 44. `AF-V-07` — E3-A PUBLIÉ ; conception E3-B en revue (2026-10-13) — fait foi sur les §42, §43 et §43.1
+
+Cette section **prévaut** sur les états périmés des §42, §43 et §43.1, qui sont conservés comme historique.
+
+**Checkpoint publié vérifié** : `origin/master` = `7f30d0752465b755e8c08460e8ffb4ac13ff1d47` (`master` local identique à la date de
+la vérification ; « feat(gate-v):
+implement pure E3-A exposure classification »), parent unique `72febdecdc7a73fa6c5194b8c1c05d77ec077391` (« docs(gate-v):
+align E3-A classification contract and handoff »). Trois fichiers, +4 170 lignes, aucune suppression ; vérifié aussi par
+l'API GitHub.
+
+**Statut E3-A : IMPLEMENTED + TESTED + PUBLISHED.** Mesure rapportée : **4 114 PASS, 5 SKIP, 0 FAIL**, dont **345 tests dédiés
+E3-A** (`.venv/Scripts/python.exe -B -m pytest -q -p no:cacheprovider -rs`, Windows 10, Python 3.13.7, 582 s).
+
+**Dates réellement démontrées (correction des §43 et §43.1)** : les mentions « 2026-10-14 » des §43 et §43.1 (titre, « mesure »)
+n'étaient **pas démontrées** et sont **erronées**. Preuves : empreintes des fichiers figées le 2026-10-13 à 20:01:19 +0200 ;
+sortie de la campagne complète datée du 2026-10-13 à 20:12:28 +0200 ; commit E3-A daté du 2026-10-13 à 20:15:59 +0200 ; commit
+précédent `72febde` le 2026-10-13 à 16:49:11 +0200 ; commit `25f395f` le 2026-10-12 à 18:34:09 +0200. La mesure 4 114/5/0
+date donc du **2026-10-13** (fin de campagne 20:12:28 +0200) ; l'heure de début (environ 20:02:46) est déduite de la durée de
+582 s, non mesurée.
+
+**Limites POSIX non démontrées sous Windows (5 tests ignorés, aucune qualification de `REAL`)** :
+`tests/test_atomic_json_store_durable.py:270` (`fsync` de répertoire) ; `tests/test_gate_v_final_holdout_claim_acquisition.py:837`,
+`:873`, `:945` (liens symboliques, privilège Windows requis) ; `:878` (FIFO).
+
+**Décisions D7 et D8 d'E3-A** : choix d'implémentation **compatibles** avec l'ADR, retenus pour E3-A (`declared_trial_counts`
+optionnel ; libellés `missing:RESERVATION`, `missing:ADMISSION`, `missing:FINAL_HOLDOUT_CLAIM`, `missing:CONSUMPTION`).
+Ce ne sont **pas** des règles normatives supplémentaires de l'ADR 0025 et l'ADR n'a pas été modifiée par ces choix (elle l'est ensuite
+par l'addendum 23.29, voir le §45).
+
+**Statut courant (état à la date du §44, PÉRIMÉ : voir le §45)** : **E3-B DESIGN REVIEW DONE — DESIGN NOT LOCKED (ADR CLARIFICATION REQUIRED, voir §44.1) ; E3-B NOT
+IMPLEMENTED** (aucun code, aucun test, aucune écriture hors ce fichier). `AF-V-07` = IN PROGRESS. `REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE. Aucun Champion qualifié.
+`FINAL_HOLDOUT` non accédé, aucun Claim réel.
+
+**Précautions inchangées** : trois modifications indexées préexistantes (`AGENTS.md`, ADR 0016, `docs/agents/skills-usage.md`,
+empreinte du diff indexé `8b78a333b37710b5987d1e535c8487e797984df193dc80362efd946ed9670e6f`) et le fichier non suivi
+`=1.12.0` ne font pas partie de cette série ; `app_corrupted_backup.py` n'est jamais modifié.
+
+### 44.1 E3-B — conception terminée : DESIGN NOT LOCKED (une clarification ADR requise) ; NON IMPLÉMENTÉ — Q-1 résolue ensuite, voir le §45
+
+**État exact à la date du §44.1 (2026-10-13, périmé sur l'ADR : voir le §45)** : conception et revues uniquement ; aucun code ni test
+E3-B, ADR alors inchangée, aucun commit. Le brouillon de
+conception détaillé n'existait que dans le scratchpad de session ; **ce paragraphe en est la trace durable**. Trois revues
+indépendantes (extraction normative de l'ADR, sécurité des fichiers/Windows, contrats scientifiques), puis une revue de
+fermeture du design v2 : aucun BLOCKER restant hors Q-1 ; les corrections ci-dessous sont **intégrées au design** mais ne
+sont pas du code testé.
+
+**Périmètre E3-B (23.27.7)** : primitive publique de recouvrement, listers/scanners stricts, construction des `ExposureFinding` et de
+`ExposureInventory` (réutilise E3-A, aucune classification dupliquée), compteurs `TrialAccounting`, persistance et lecture stricte
+du A0, persistance et lecture stricte des déclarations. Hors périmètre : admissions et registre (E3-C/D), engagement et preuves de
+temps (E3-E), ingestion de `S_H` (E3-F), événement canonique et lister strict d'événements additif de `dataset_split.py` (E3-G),
+orchestration et décisions humaines (E3-J). E3-B n'ouvre aucune donnée `S_H`, n'appelle ni E2 ni le moteur, ne produit aucune permission.
+
+**Architecture proposée (monolithe modulaire, noms plats)** : `gate_v_exposure_scan.py` (E/S strictes : racines, noms, lecteur JSON),
+`gate_v_exposure_sources.py` (primitive d'intervalles + interprètes de sources + index des plans de split),
+`gate_v_exposure_inventory.py` (assemblage + comptabilité), `gate_v_exposure_store.py` (persistance/relecture A0 puis déclarations).
+Graphe : store → inventory → sources → scan ; tous vers E3-A ; sources vers le parseur strict de Claim d'E1 ; jamais E2, moteur,
+`dataset_split` ni lecteur tolérant. Sous-lots TDD : **B1** intervalles ; **B2** scan strict ; **B3** interprètes de sources ;
+**B4** assemblage et comptabilité ; **B5** persistance/relecture A0 ; **B6** déclarations (bloqué par Q-1 et par la publication
+par lien d'E3-C). B1 à B5 deviennent TDD-prêts après approbation explicite du design (errata v2.1 inclus).
+
+**Contrats retenus (choix de conception compatibles, à approuver ; aucun ne modifie l'ADR)**
+- *Refus vs finding* : un échec de STRUCTURE (racine absente ou vide, évasion de racine, lien ou jonction, nom non portable, nom
+  réservé Windows, sous-répertoire illisible, plafond atteint, listage instable, racines imbriquées) REFUSE sans produire d'A0 ;
+  un échec de SOURCE dans une racine saine (JSON illisible, schéma inconnu, fenêtre ou fuseau indéterminable, plan introuvable,
+  `*.tmp` hors `exposure/`, répertoire ou fichier inconnu) devient un finding `UNRESOLVED` (donc `UNDETERMINED`). Jamais d'inventaire
+  « complet et frais » silencieux ; absence de trace n'est pas preuve d'absence.
+- *Sources* : table ancrée sur un `<campaign_dir>` identifié (son `plan.json` porte `campaign_id` égal au nom du dossier) ou sur une
+  structure connue ; trois classes (exposant, informatif, inerte) ; **aucun joker** : `datasets/**` et `exposure/**` n'énumèrent que
+  des noms connus ; tout fichier hors table est seulement `lstat`é puis finding `UNKNOWN_SOURCE_TYPE` ; tout répertoire inconnu est un
+  finding non descendu ; un dossier d'ancrage sans fichier-ancre lisible (`job_*` sans `config_used.json`) est `UNRESOLVED`. Les
+  données de marché (`raw/ig_prices_raw.json`, `*.csv`) ne sont jamais ouvertes.
+- *Identité* : `source_id = <slug>:<label de racine>/<chemin POSIX relatif>` (copies = ids distincts) ; `content_hash` = SHA-256 des
+  octets bruts dès que le fichier est lu ; `scanned_roots` = labels portables (chemins résolus consignés dans l'A0 mais hors
+  `inventory_id` et hors digests).
+- *Fenêtres* : demi-ouvertes UTC ; sources d'exécution legacy (inclusives par défaut dans le moteur, vérifié dans `optimizer.py` et
+  `engine.py`) converties en `[start, end+1µs)`, d'où des fenêtres jointives qui se recoupent pour ces sources (conservateur) ; Claim,
+  plan, registre et job ISO-« T » restent exacts ; date civile ou chaîne naïve = `TIMEZONE_UNKNOWN` (Paris implicite non supposé) ;
+  sur le corpus actuel presque tous les jobs seront `UNRESOLVED` (33 des 43 sans bornes). Plans indexés par
+  `(split_plan_id, fingerprint)`, fenêtres de toutes les sources disponibles tenues de concorder, `ValidationRun` non OOS inventoriés
+  si leur fenêtre recoupe `W` ou finit après `ws`.
+- *A0* : `<campaign_dir>/exposure/inventory_<inventory_content_hash>.json` (chemin normatif 23.13), hash sur JSON compact canonique
+  de toutes les autres clés (`created_at` inclus), fichier en `indent=2`, relecture stricte avec recalcul des identités E3-A et
+  point fixe d'octets ; publication par `save_exclusive(durable=True)` (profil simulé sous Windows) via une fonction privée, sans
+  répertoire créé récursivement ; `created_at` injecté ; plusieurs A0 coexistent ; un fichier tronqué au nom attendu impose un nouveau
+  `created_at`, jamais de suppression.
+- *Registre* : vue injectée par E3-D (porte `registry_id` et la tête de chaîne) ; absente = erreur d'appel ; illisible = finding
+  `REGISTRY_UNREADABLE` et `complete=False`.
+- *Comptabilité* : six compteurs ; `campaigns` = campagnes distinctes de la chaîne (campagne courante exclue de l'A0) ;
+  `abandoned_reservations` = sans `ClosingRecord` terminal (introuvable = abandonnée) ; ingestion échouée et engagements nuls fournis
+  par des vues, provenance `OBSERVED` / `PARTIAL` / `NOT_OBSERVED` hors digest ; nombres déclarés jamais fusionnés par E3-B.
+
+**Questions normatives**
+- **Q-1 [N] BLOQUANTE (B6 uniquement)** : E3-A refuse toute déclaration référençant un autre `inventory_id` et exige une chaîne
+  `seq` 1..n, alors que le chemin normatif `exposure/declaration_<seq>.json` est unique par campagne ; quand l'`inventory_id` change
+  la nouvelle chaîne n'a aucun emplacement valide. Recommandation : amender ADR 23.13 en
+  `exposure/<inventory_id>/declaration_<seq4>.json` (E3-A inchangé ; assouplir `DeclarationSet` rejeté car il modifie l'API publiée
+  et contredit 23.27.6 ; une chaîne par campagne rejetée car une `RESERVATION` n'est jamais libérée). Même défaut pour
+  `exposure/attestation.json` face aux « attestations successives » (à traiter avec E3-E).
+- Q-0 [R] : note de renvoi sur 23.11 étape 1 (« refuse » signifie aucune classe `FRESH`). Q-2 : fenêtres des `ValidationRun`
+  walk-forward, Monte-Carlo et stabilité. Q-3 : agrégation observé + déclaré dans le `ClosingRecord`. Q-4 : critère « source
+  prouvée exclusive » des exécutions (E3-G). Ces quatre ne bloquent pas B1 à B5.
+
+**Risques résiduels** : les racines d'audit sont choisies par l'appelant (rien ne les lie à une configuration de root absente à
+HEAD) : E3-J et l'attestation devront les épingler ; le listage Windows n'est ni trié ni atomique (détection par double passe, pas
+de snapshot) ; durabilité de répertoire non démontrable sous Windows ; symlinks non testés sans privilège (jonctions détectées) ;
+un `*.tmp` orphelin du corpus réel rendra l'inventaire courant `UNDETERMINED` tant qu'il n'est pas traité ; événements étendus
+23.13 classés `INVALID_SCHEMA` tant qu'E3-G n'a pas défini leur schéma.
+
+**Prochaine étape** : décision de l'utilisateur sur Q-1 (et sur les choix compatibles ci-dessus). Si elle est positive : approuver le
+design et ouvrir la TDD de B1 à B5 (B6 après l'amendement ADR et la publication par lien d'E3-C). Aucune TDD avant validation.
+
+## 45. `AF-V-07` — Q-1 résolue par l'addendum ADR 23.29 ; E3-B DESIGN LOCKED sous réserve de publication documentaire (2026-10-13) — prévaut sur le §44.1 pour Q-1
+
+**Checkpoint publié** : `origin/master` = `7f30d0752465b755e8c08460e8ffb4ac13ff1d47` (E3-A, parent
+`72febdecdc7a73fa6c5194b8c1c05d77ec077391`). Les corrections de dates du §44 restent valables (tout est du 2026-10-13). **L'addendum
+23.29 et les §44 à §45 ne sont PAS publiés.** Ils sont, selon l'état du dépôt, soit encore des modifications locales non commitées de
+`docs/adr/0025-gate-v-validation-policy-v1.md` (addendum 23.29, six notes de renvoi dans 23.10, 23.11 (trois), 23.13 et 23.24, une entrée dans `Conséquences` ; les lignes
+« supprimées » du diff sont des lignes d'origine allongées d'une note) et de ce fichier, soit un commit LOCAL « docs(gate-v): lock E3-B
+exposure inventory and declaration lineage design » : vérifier par `git log origin/master..HEAD` (aucun SHA n'est inscrit ici). Dans
+les deux cas : aucun push, aucun code, aucun test E3-B. **Approbation de l'utilisateur (2026-10-13)** : le principe architectural de
+Q-1 et les choix présentés dans le rapport de conception sont approuvés, sous réserve de la revue finale de 23.29.
+
+**Statuts (à ne pas confondre)**
+| Objet | DOCUMENTED | DESIGN LOCKED | IMPLEMENTED | TESTED | PUBLISHED |
+|---|---|---|---|---|---|
+| E3-A | oui | oui | **oui** | **oui** (345 dédiés ; 4 114 PASS, 5 SKIP, 0 FAIL, 2026-10-13) | **oui** (`7f30d07`) |
+| Addendum ADR 23.29 | **oui (local)** | — | — | — | **non** |
+| E3-B (B1 à B5) | oui (§44.1, §45) | **sous réserve de publication documentaire** | **non** | non | non |
+| E3-B B6 (déclarations) | oui | **sous réserve** ; la publication dépend d'E3-C | **non** | non | non |
+B1 à B5 sont **candidats à une prochaine mission TDD, après publication de l'addendum et autorisation explicite** ; la lecture et la
+vérification de B6 ne dépendent pas d'E3-C, sa publication en dépend.
+`REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE. Aucun Champion qualifié. `FINAL_HOLDOUT` non accédé, aucun Claim réel.
+
+**Q-1 résolue (documentairement)** : déclarations et attestations par répertoire d'inventaire
+`exposure/<inventory_id>/declaration_<seq4>.json` et `exposure/<inventory_id>/attestation_<seq4>.json` ; E3-A inchangé
+(`DeclarationSet` reçoit la seule chaîne terminale). **Continuité** : lignée linéaire de chaînes reliées par `carried_from` dans la
+première déclaration, avec report cumulatif explicite des expositions *déclarées* (renumérotées `declared:0001:<pos4>`), `t_sel` jamais
+diminué (E3-A seul ne l'impose pas : la sûreté repose sur le chargeur de lignée d'E3-B), bifurcation, retour à un ancien inventaire,
+chaîne absente ou illisible = refus ; `declaration_lineage_digest` épinglé par l'attestation. Aucune rétractation dans cette version.
+Plusieurs A0 de même `inventory_id` partagent la chaîne. Attestations en slots denses jamais écrasés ; après l'`ADMISSION` seule
+l'attestation épinglée par hash compte.
+
+**Trois clarifications fermées** : (A) provenance des compteurs `OBSERVED` / `PARTIAL` / `NOT_OBSERVED` (jamais un zéro vérifié ;
+règle `REAL` « tous `OBSERVED` » renvoyée à E3-J, Q-5) ; (B) la double passe de listage détecte un changement observable entre deux
+passes, sans snapshot atomique ni garantie après la seconde passe ; (C) l'A0 peut être publié par `save_exclusive(durable=True)` sans
+E3-C, la **publication** des déclarations et attestations dépend de la primitive par lien d'E3-C (motif d'orphelin
+`.exposure.tmp.<32hex>`), la lecture et la vérification n'en dépendent pas.
+
+**Réserves du « DESIGN LOCKED »** : l'amendement a été relu par un relecteur indépendant (premier passage : 0 BLOCKER, 3 MAJOR, 9 MINOR,
+corrigés ; fermeture : 0 BLOCKER, 0 MAJOR, 7 retouches rédactionnelles), puis par un second relecteur indépendant sans contexte
+antérieur, sur le texte final : 0 BLOCKER, 2 MAJOR (conflit avec la clause « attestation remplacée » de 23.10 ; portée de `complete` face
+à la provenance) et 10 MINOR, tous corrigés dans les deux fichiers ; relecture limitée des passages modifiés : 0 BLOCKER, 0 MAJOR, puis
+6 retouches de comptage et de formulation appliquées sans nouvelle relecture. L'errata v2.1 de la conception (§44.1) n'a pas eu de relecture indépendante distincte de
+ces passes. Le verrouillage reste soumis à la **publication documentaire** (push sur autorisation explicite).
+
+**Classification des choix du §44.1 et du §45** (aucune formule, aucun hash ni aucune autorité existants n'est modifié)
+- *Conforme directement à une règle existante* : chemin du A0 `exposure/inventory_<hash>.json` et son hash couvrant le contenu intégral
+  avec `created_at` (23.13, 23.27.3) ; fenêtres demi-ouvertes UTC ; `scanned_roots` statiques ; comptabilité hors `inventory_id`.
+- *Choix d'implémentation compatible, approuvé* : refus de structure contre finding de source (concilie 23.11 étape 1 et 23.3) ; table de
+  sources ancrée sans joker ; `source_id` = slug + label + chemin POSIX relatif ; `content_hash` = SHA-256 des octets bruts ; `[start,
+  end+1µs)` pour les exécutions legacy inclusives ; date naïve = `TIMEZONE_UNKNOWN` ; plans indexés par `(id, fingerprint)` ; registre
+  injecté ; labels de racines portables.
+- *Nouvelle règle normative explicitement exposée dans 23.29 et approuvée (nouvelles identités ou contraintes, aucune formule existante
+  modifiée)* : chemins par `inventory_id` et numérotation `seq4` dense plafonnée à 9 999 ; plusieurs A0 de même `inventory_id`
+  partageant une chaîne ; `declaration_content_hash` (SHA-256 du JSON canonique de l'enveloppe sans ce champ, `created_at` inclus),
+  `declaration_lineage_digest`, `carried_from` ; lignée et report cumulatif récurrent (refus au-delà de 9 999 reports) ; interdiction de
+  toute rétractation ; chargeur de lignée seule source de `DeclarationSet` ; sérialiseur unique (`sort_keys`, `indent=2`, LF, UTF-8,
+  sans flottant) et orphelin `.exposure.tmp.<32hex>` imposés à la primitive d'E3-C ; publication des déclarations et attestations sans
+  repli `O_EXCL` et indisponible avant E3-C ; attestation « remplacée » = fichier épinglé absent ou différent ; provenance des
+  compteurs ; double passe de listage et son nombre d'essais (23.24).
+- *Questions NON tranchées (aucune approbation implicite)* : Q-0, Q-2, Q-3, Q-4, Q-5 (règle `REAL` « tous les compteurs `OBSERVED` »).
+
+**Dépendances** : E3-C (publication par lien, sérialisation éventuelle de la lignée) ; E3-D (vue du registre, `closing_lookup`) ;
+E3-E (schéma d'attestation, engagement, preuves de temps) ; E3-G (lister strict d'événements étendus, critère de source prouvée
+exclusive) ; E3-J (chargeur de lignée seule source de `DeclarationSet`, règle `REAL` des compteurs, reprise après `ADMISSION`).
+
+**Contrôles scientifiques restants** : matrice TDD de 23.29.8 et du §44.1 (RED/GREEN) ; relecture indépendante du code ; test
+d'équivalence de la primitive d'intervalles avec la formule privée d'E3-A ; test d'équivalence de la discrimination V1/V2 sur octets
+déjà lus ; réplique synthétique de la disposition réelle de `results/`. Questions ouvertes non bloquantes : Q-0 (note de renvoi sur
+« refuse » de 23.11 étape 1), Q-2, Q-3, Q-4, Q-5.
+
+**Prochaine étape unique** : revue de publication du commit documentaire local (push uniquement sur autorisation explicite). Rien
+d'autre n'est autorisé avant : ni TDD E3-B (B1 à B5 ne démarrent qu'après publication et autorisation), ni push implicite.
