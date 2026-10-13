@@ -2837,3 +2837,69 @@ campagne réelle produits par cette mission.**
 INTEGRATED. `Slice D` = SPEC LOCKED, NOT IMPLEMENTED (implémentation uniquement après validation
 explicite de l'utilisateur de la Décision 21). `AF-V-07` overall = IN PROGRESS. `AF-V-08` = DONE.
 `GATE V` NON PASSÉE. `FINAL_HOLDOUT` NON ACCÉDÉ.
+
+## 42. `AF-V-07` — D1–D6, E1 et E2 intégrées ; Décisions 22 et 23 publiées ; addendum E3-A dans un lot documentaire local, non publié (2026-10-13)
+
+**Dernier checkpoint publié vérifié (source de vérité pour ce qui est dans `origin/master`)** : `origin/master` =
+`25f395f5bb3ed0d9dd3266de617a12e2598ce301` (commit documentaire de la Décision 23, 956 insertions dans l'ADR 0025),
+parent `9c2bf7ef5ccf692e9d89db7b0ca61038bbd962e4` (E2). Le lot documentaire local décrit plus bas se place **au-dessus**
+de ce commit et n'est pas poussé : vérifier l'état réel par `git log origin/master..HEAD` et `git status`, le SHA de ce
+lot n'étant volontairement pas inscrit ici. Les §39 à §41 restent l'historique ; cette section couvre la période
+2026-10-06 → 2026-10-13, que le handoff n'avait pas encore consignée.
+
+**Intégré dans `master`** :
+- **Slices D1–D6** (`GateVCampaignManifestV2`, discrimination V1/V2, précondition D5, etc.) : `49ce253` (D1),
+  `bbb8aea` (D2), `57878c8` (D3), `2eeade4` (D4), `79941df` (D5), `86b6473` (D6).
+- **E1** (`gate_v_final_holdout_claim.py`, cœur pur du `FinalHoldoutAccessClaim`, 14 champs) : commit
+  `707ec51b7edc52e5b5d8c4b040d9454f83b27e45`.
+- **E2** (`gate_v_final_holdout_claim_acquisition.py` et `atomic_json_store.save_exclusive(durable=True)`, acquisition
+  exclusive durable du Claim) : commit `9c2bf7ef5ccf692e9d89db7b0ca61038bbd962e4`. Tests rapportés lors de la revue
+  finale d'E2 : 3772 réussis, 2 ignorés (non rejoués depuis).
+- **Décision 22** (ADR 0025) : cœur pur du Claim et acquisition ; l'exclusivité est **par campagne** et ne prouve pas la
+  fraîcheur du `FINAL_HOLDOUT`.
+- **Décision 23** (ADR 0025, commit `25f395f`) : contrat normatif d'E3 — modes `SYNTHETIC`/`REAL`, engagement
+  prospectif ancré avant la fenêtre, deux snapshots (S0 de recherche, S_H scellé), preuves de temps, registre mono-hôte
+  Linux (`RESERVATION`, `ADMISSION`, `CONSUMPTION`, `REBIND`), `ReadIntent`, lecture unique, `ClosingRecord`.
+
+**Constats structurants à garder en tête** : la fenêtre `FINAL_HOLDOUT` du plan V2 courant est `RETROSPECTIVE_EXPOSED`
+(même snapshot et même fenêtre que l'accès documenté d'AF-V-01) ; aucune fenêtre n'est éligible tant qu'un engagement
+n'est pas ancré avant `ws` ; le Manifest V2 ne porte que des identifiants ; les coûts d'exécution ne figurent pas dans
+le chaînage V2 ; `results/` est gitignoré ; la provenance de S0 se limite à des noms de fichier.
+
+**Lot documentaire LOCAL, NON PUBLIÉ** (un seul commit local au-dessus de `25f395f`, message « docs(gate-v): align E3-A
+classification contract and handoff », limité à `docs/adr/0025-gate-v-validation-policy-v1.md` et `AI_HANDOFF.md` ; si
+`git log origin/master..HEAD` est vide, ce lot n'a pas été commité ou a été publié, à vérifier) :
+- **Addendum E3-A** (ADR 0025, 23.27 et 23.28, avec notes de renvoi dans 23.3, 23.6, 23.10, 23.11, 23.17 et 23.26, et une
+  entrée additive dans `Conséquences`). Il aligne la Décision 23 sur le design E3-A : campagne courante par `campaign_id`
+  et étage vérifié (suppression de l'exclusion par dossier), comptabilité des essais hors de `inventory_id` mais dans
+  `inventory_content_digest`, attestation épinglant `inventory_content_hash`, péremption précisée, contrat de référence de
+  la classification (11 énumérations, 11 dataclasses, 16 fonctions, 32 codes de raison) et obligations de test.
+- Cette section du handoff.
+- **Ce lot n'est pas publié (aucun push) et n'est pas testé** : il est documentaire, aucun code E3-A n'existe. Il a été
+  relu par des relecteurs indépendants avant le commit local ; une revue de publication reste à faire avant tout push.
+  **Ce lot n'autorise pas le TDD d'E3-A.**
+
+**Statut** : **E3-A = DESIGN LOCKED** (addendum 23.27/23.28 relu, en attente de revue de publication) ; **E3-A = NOT IMPLEMENTED**. `E3` =
+documenté, non implémenté. `REAL` = DISABLED, NOT QUALIFIED (aucune qualification d'infrastructure, d'autorité de temps
+ni de fournisseur n'est affirmée ; douze portes de qualification non remplies). `AF-V-07` = IN PROGRESS. `AF-V-08` =
+DONE. `GATE V` = NON PASSÉE. Aucun Champion qualifié. `FINAL_HOLDOUT` = NON ACCÉDÉ par `AF-V-07`, aucun Claim réel.
+
+**Risques résiduels** : amendements normatifs de l'addendum à approuver (A1 ensemble pertinent et fraîcheur ;
+A2 péremption et nouvelles campagnes ; A2 bis contrôles préalables à l'`ADMISSION` ; A3 campagne courante par
+`campaign_id` et étage vérifié ; A4 identités d'inventaire et attestation ; A5 règles des enregistrements propres ;
+A6 comptabilité des essais ; ces étiquettes désignent les amendements de la mission E3-A, décrits en 23.27.1 à 23.27.5) ;
+noms et ordre des champs des dataclasses d'E3-A à faire approuver avant le premier test TDD (23.28) ;
+tranche non attribuée en 23.26 pour la persistance des déclarations, de l'attestation et de l'autorisation (proposition :
+déclarations en E3-B, modèles d'attestation et d'autorisation en E3-E) ; coût de disponibilité (une nouvelle campagne
+tierce ou une clôture périme une attestation avant l'admission) ; REAL non qualifié ; connaissance de marché humaine,
+travaux non enregistrés et accès hors E3 restent hors du modèle.
+
+**Prochaine étape** : revue de publication de ce lot documentaire (push uniquement sur autorisation explicite de
+l'utilisateur), puis, après autorisation séparée, mission **TDD d'E3-A** (module pur `gate_v_final_holdout_protocol.py`, ordre : instants et énumérations, finding, inventaire,
+déclarations, classification, F1–F6, niveau, refus d'admission, identités, pureté).
+
+**Précautions d'environnement** : trois modifications **indexées préexistantes** ne sont pas de cette série et ne
+doivent pas être mélangées à un commit documentaire (`AGENTS.md`, `docs/adr/0016-spec-kit-and-skill-orchestration-policy.md`,
+`docs/agents/skills-usage.md`) ; le fichier non suivi `=1.12.0` est également préexistant. Utiliser
+`git commit --only -- <chemin>` pour isoler un commit. Un hook « Fact-Forcing Gate » exige de présenter des faits avant la
+première commande Bash ou la première écriture sur un fichier de la session.

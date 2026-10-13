@@ -1855,7 +1855,8 @@ avec OOS, Claims, enregistrements `CONSUMPTION` du registre, `ReadIntent`, trava
 `RESERVATION` et `ADMISSION` sans `CONSUMPTION` ne sont **pas** des expositions (aucune donnée n'a été lue) : elles
 interviennent dans le test de recouvrement de 23.10, pas dans `E`. Un plan de split partageant la fenêtre ne compte
 comme exposition que s'il a servi (événement, `ValidationRun`, job) ou s'il est porté par une `CONSUMPTION` d'une
-autre campagne ; un plan jamais utilisé est inventorié mais n'est pas une exposition.
+autre campagne ; un plan jamais utilisé est inventorié mais n'est pas une exposition. *(Complété par 23.27.1 et
+23.27.2 : exception des enregistrements attendus de la campagne courante à son étage.)*
 `t_sel` est l'instant de la dernière décision de sélection ou de modification de stratégie informée par des données.
 **Il est déclaré par l'humain** à l'engagement (23.4), puis éventuellement repoussé à une date plus tardive par
 une déclaration ultérieure (23.11) : le `t_sel` effectif est le **maximum** entre celui de l'engagement et ceux des
@@ -2005,7 +2006,8 @@ n'est jamais attribué à `S0` seul. Il en va de même du champ `dataset_snapsho
   dépôt** ; la validité du certificat est contrôlée à `genTime` ; la révocation n'est vérifiable qu'en ligne et son
   absence de vérification donne `REVOCATION_UNKNOWN`. La borne est `genTime + exactitude`. Un `nonce` évite le rejeu.
 - OpenTimestamps : seule une attestation de bloc confirmée compte ; une attestation en attente est insuffisante.
-- Condition : `borne + marge ≤ ws`. La marge est une décision opérationnelle ouverte (23.24).
+- Condition : `borne + marge ≤ ws`. La marge est une décision opérationnelle ouverte (23.24). *(Précisé par 23.27 et
+  23.28 : une marge absente ou ≤ 0 n'est jamais vérifiée, F4 `UNVERIFIED` — ou `NOT_MET` si la borne seule dépasse `ws`.)*
 - **Fail-closed** : outil de vérification indisponible, chaîne absente, autorité hors liste, empreinte différente,
   `genTime` illisible ou postérieur, ou preuve en attente : état `TIME_PROOF_UNVERIFIABLE`, l'engagement n'est pas
   ancré, aucune campagne prospective n'existe, `REAL` est refusé. Aucune autorité de temps ni outil de vérification
@@ -2231,7 +2233,8 @@ les réservations et admissions d'autres campagnes qui recoupent `W`. Pour une c
 cet ensemble est vide. `static_sources_digest` = SHA-256 de la liste canonique triée de l'ensemble pertinent
 (identifiant canonique et `content_hash` de chaque élément) : c'est donc une constante tant qu'aucune exposition ni
 aucun rival n'apparaît, et un ajout sans rapport avec `W` ne la modifie pas. `projection de recouvrement` = hash de la
-liste des réservations et admissions d'autres campagnes qui recoupent `W` (ou illisibles).
+liste des réservations et admissions d'autres campagnes qui recoupent `W` (ou illisibles). *(La phrase « Pour une
+campagne `FRESH_UNEXPOSED_DECLARED`, cet ensemble est vide » est remplacée par 23.27.1.)*
 
 **Granularité globale.** Aucun artefact ne porte d'instrument vérifié (le plan, la pré-enregistration, le
 `ResearchRun` et le Claim n'ont pas de champ instrument ; seul `dataset_snapshot_id` existe). L'exclusivité porte donc
@@ -2251,7 +2254,8 @@ admission d'un autre `campaign_id` ; une fenêtre illisible bloque tout.
      est réutilisée par relecture sans publication ; une admission différente donne un refus) ; la `ReservationTimeProof` vise
      cette réservation avec `borne + marge ≤ ws` ; préfixe de chaîne épinglé présent ; projection de recouvrement et
      `static_sources_digest` identiques à ceux de l'attestation ; attestation valide (classification recalculée
-     égale), autorisation valide, déclarations inchangées ;
+     égale), autorisation valide, déclarations inchangées. *(Complété par 23.27.4 : sept contrôles préalables,
+     dont `inventory_id` et `inventory_content_digest`, répétés après tout conflit de slot.)* ;
    - `CONSUMPTION` : une `ADMISSION` durable de la même campagne existe ; aucune `CONSUMPTION` de ce `campaign_id`
      n'existe ; `claim_content_hash` égal à celui du Claim relu par E2.
    - `REBIND` : cérémonie humaine (23.9) ; le test de recouvrement ne s'applique pas (pas de fenêtre) ; la tête
@@ -2264,7 +2268,9 @@ admission d'un autre `campaign_id` ; une fenêtre illisible bloque tout.
    (la projection de recouvrement n'a pas changé), la tentative suivante vise le nouveau slot ; sinon, pour une
    `ADMISSION`, l'attestation est périmée (arrêt, nouvelle attestation et nouvelle autorisation humaines) et, pour une
    `RESERVATION`, l'engagement est nul. Le nombre de tentatives par appel est borné (valeur : décision opérationnelle,
-   23.24) ; au-delà : arrêt `REGISTRY_CONTENTION`, rien n'est publié.
+   23.24) ; au-delà : arrêt `REGISTRY_CONTENTION`, rien n'est publié. *(Complété par 23.27.4 : pour une `ADMISSION`,
+les sept contrôles préalables sont répétés après tout conflit de slot et doivent être inchangés pour toute nouvelle
+tentative.)*
 6. `fsync` du répertoire. Seul son succès donne `PublishedDurable`.
 6 bis. **Témoin de tête** (`REAL`) : après chaque `RESERVATION`, `ADMISSION`, `CONSUMPTION` et `REBIND`, la tête
    publiée est couverte par une preuve de temps (23.6) et copiée hors de l'hôte. Pour une `RESERVATION`, la
@@ -2279,7 +2285,7 @@ admission d'un autre `campaign_id` ; une fenêtre illisible bloque tout.
    (engagement nul), `ADMITTED_STALE` pour une admission (état **terminal pour E3**, sans transition sortante ; seule
    une décision humaine peut la déclarer nulle). Un changement détecté à l'étape 13 de 23.17, après le Claim, donne
    `EXECUTION_VOID_EXPOSURE_CHANGED` (terminal, sans lecture). Un changement de l'ensemble pertinent est une
-   information d'exposition nouvelle.
+   information d'exposition nouvelle. *(La comptabilité des essais n'est jamais comparée à cette étape, 23.27.3.)*
 
 **E3 ne crée jamais le Claim si l'admission n'est pas `PublishedDurable`** selon le contrat du volume cible. Sous
 Windows, le `fsync` d'un répertoire n'est pas disponible : la durabilité du lien n'est pas démontrable et `REAL` y est
@@ -2305,7 +2311,8 @@ publiée ; une re-publication ou une suppression ne l'est pas.
 change ; une réservation ou une admission d'une autre campagne dont la fenêtre recoupe (ou est illisible) apparaît ;
 le préfixe épinglé n'est plus un préfixe de la chaîne ; la tête des déclarations change ; la version de la
 classification change. Une réservation ou une admission **sans recouvrement** qui avance la tête ne périme **pas**
-l'attestation.
+l'attestation. *(Dernière phrase remplacée par 23.27.4 : la comptabilité et les expositions étrangères, dont une
+`CONSUMPTION` non recoupante, périment l'attestation.)*
 
 **Argument de sérialisation.** `os.link` réussit pour exactement un appelant par slot. Invariant : si le slot `k`
 existe, les slots `0..k-1` existent (un écrivain ne tente le slot `n+1` qu'après avoir lu `0..n`, et les slots ne
@@ -2326,7 +2333,9 @@ atteint le `ReadIntent`, y compris pour une copie du dossier de campagne.
 réutilise si l'identité sémantique est inchangée. Un enregistrement relu après un crash est d'abord re-confirmé
 durable par un `fsync` explicite du répertoire (permis pour une `RESERVATION` ou une `ADMISSION` relue, jamais pour
 une `CONSUMPTION`). Si l'attestation a été remplacée, refus : l'admission reste et
-réserve la fenêtre. Réutiliser une admission n'ouvre aucun accès ; seul le Claim d'E2 ouvre le droit.
+réserve la fenêtre. Réutiliser une admission n'ouvre aucun accès ; seul le Claim d'E2 ouvre le droit. *(Précisé par
+23.27.3 : la reprise ne rejoue jamais la comptabilité ; « Même `campaign_id`, deux tentatives » ci-dessus est inchangé
+et compatible avec 23.27.2 et 23.27.4.)*
 
 ### 23.11 — Inventaire, déclarations, classification, attestation, autorisation
 
@@ -2344,7 +2353,10 @@ Séquence non circulaire. Chaque artefact est créé en exclusif et durable ; `_
    `ADMISSION` attendus (par exemple une `CONSUMPTION`, ou une seconde réservation) n'est **jamais** ignoré : c'est
    une condition d'arrêt. Un `campaign_dir_locator` introuvable ne bloque pas le test de recouvrement (la fenêtre est
    portée par l'enregistrement du registre lui-même) ; il rend la campagne « abandonnée » pour la comptabilité ; un
-   répertoire d'audit **configuré** manquant, lui, refuse.
+   répertoire d'audit **configuré** manquant, lui, refuse. *(L'exclusion « par dossier de la campagne courante » est
+remplacée par 23.27.2 : absorption par `campaign_id` et par étage vérifié, doublons et enregistrements inattendus en
+échec fermé. Les « campagnes référencées par la chaîne du registre » ne sont pas des racines d'audit configurées :
+ce sont des sources dérivées, exclues de `scanned_roots` (23.27.3).)*
 2. **Déclarations D1..Dn** : nominatives, versionnées, en slots denses, chacune liée à l'inventaire et à la précédente.
    Elles ne peuvent que durcir (une déclaration d'exposition passe la classe vers `RETROSPECTIVE_EXPOSED` ou
    `UNDETERMINED`), jamais assouplir une classe automatique. Une déclaration peut aussi repousser `t_sel` à une date
@@ -2356,11 +2368,14 @@ Séquence non circulaire. Chaque artefact est créé en exclusif et durable ; `_
    dans l'attestation.
 4. **Attestation T** : nominative, liée à C, à A0, à la tête des déclarations, à l'engagement, à l'attachment, à la
    projection de recouvrement et au préfixe de chaîne (`seq`, `content_hash`). Elle est périmée dès que l'un de ces
-   éléments change. **Elle n'autorise rien.**
+   éléments change. **Elle n'autorise rien.** *(Complété par 23.27.3 : elle épingle `inventory_content_hash`, qui couvre la
+comptabilité des essais, et `inventory_id`.)*
 5. **Autorisation d'acquisition** : décision humaine **distincte**, nominative, liée à T, à l'engagement, au `claim_id`
    (calculable depuis le plan), à la fenêtre, au mode, au SHA du code, au rapport de qualification, à la projection et
    au préfixe de chaîne. Seule elle déclenche l'admission.
-6. **Vérification avant admission** : A0, D\* et C sont recalculés et doivent égaler T ; sinon refus.
+6. **Vérification avant admission** : A0, D\* et C sont recalculés et doivent égaler T ; sinon refus. *(Complété par
+   23.27.3 : `inventory_id`, `static_sources_digest`, projection et `inventory_content_digest` doivent aussi égaler ceux
+   du A0 persisté attesté ; une comptabilité modifiée refuse, `ACCOUNTING_CHANGED`.)*
 
 **Comptabilité des essais (reprise de 22.2-6).** L'inventaire et le `ClosingRecord` enregistrent : le nombre de
 `ResearchRun`, de stratégies et de campagnes évalués (toutes les `RESERVATION`, `ADMISSION` et `CONSUMPTION` de la
@@ -2369,6 +2384,7 @@ nombre de réservations **abandonnées** (sans `ClosingRecord` terminal), de ten
 d'engagements nuls. Une campagne dont le `ClosingRecord` est introuvable (localisation périmée, dossier déplacé) est
 comptée comme abandonnée (conservateur). C'est une comptabilité de
 multiple testing : aucune correction statistique n'est calculée ni aucun seuil fixé (hors périmètre, Human Gate).
+*(Portée des compteurs, absence de double comptage et rôle du `ClosingRecord` remplacés par 23.27.5.)*
 
 Trois décisions humaines distinctes : (1) attestation des expositions historiques ; (2) autorisation explicite d'une
 acquisition irréversible ; (3) Human Gate de qualification scientifique d'un éventuel Champion (hors E3). L'identité
@@ -2546,7 +2562,7 @@ D5 ; 8. inventaire, déclarations, classification, attestation valide ; 9. autor
 non-retour 1 : le droit de la campagne est consommé** ; 12 bis. **`CONSUMPTION`** durable dans le registre (23.10),
 verrou d'exclusivité par `campaign_id` : sans elle, aucune étape suivante ; 13. recontrôle : autorité du registre,
 sentinelle, verrou (22.10), admission propre et chaîne dense, **attestation, tête des déclarations, autorisation et
-`static_sources_digest` revérifiés** ; 14. **`ReadIntent`** durable — **point de non-retour 2 : lecture possiblement commencée, fenêtre traitée comme
+`static_sources_digest` revérifiés** (sans jamais comparer la comptabilité des essais, 23.27.3) ; 14. **`ReadIntent`** durable — **point de non-retour 2 : lecture possiblement commencée, fenêtre traitée comme
 exposée** ; 14 bis. second recontrôle de la sentinelle et du verrou **immédiatement avant l'ouverture de `S_H`**
 (22.10) : en cas d'échec, aucune lecture n'a lieu et le `ReadIntent` existant est traité comme exposé (conservateur) ;
 15. lecture unique, contrôles, `DataReceipt` ; 16. `run_oos_validation` via l'adaptateur — **point de non-retour 3 :
@@ -2712,7 +2728,356 @@ E3-A modèles purs et classification ; E3-B intervalles et inventaire strict ; E
 E3-D registre et admissions ; E3-E engagement, preuves de temps, attachment et nullité ; E3-F ingesteur et provenance ;
 E3-G événement canonique, `ValidationRun` exclusive, identifiant OOS ; E3-H chargeur par octets ; E3-I adaptateur
 moteur ; E3-J orchestrateur et mode `SYNTHETIC` ; E3-K diagnostic en lecture seule ; E3-L miroir Manifest (optionnel) ;
-E3-Q qualification (cible). Chaque tranche : RED, GREEN, revue, suite existante verte.
+E3-Q qualification (cible). Chaque tranche : RED, GREEN, revue, suite existante verte. *(Périmètres précisés par
+23.27.7.)*
+
+### 23.27 — Addendum E3-A (2026-10-13) : alignement normatif de 23.3, 23.10 et 23.11
+
+**Statut.** Cet addendum est un amendement **normatif** à la Décision 23. Il aligne le texte sur le design E3-A
+(modèles purs et classification d'exposition), verrouillé sous réserve de revue de l'addendum. **E3-A reste NON
+IMPLÉMENTÉ**, le mode `REAL` reste désactivé et non qualifié, `GATE V` reste non passée. Aucune identité ni aucun
+contrat d'E1 ou d'E2, aucune formule des Décisions 13 et 22, n'est modifié.
+
+**Hiérarchie.** En cas de divergence entre 23.27 et une clause listée ci-dessous, **23.27 prévaut**. Les clauses
+d'origine ne sont pas réécrites (traçabilité) : une note de renvoi les signale. **[R]** = clarification rédactionnelle,
+**[N]** = changement réellement normatif.
+
+| Clause d'origine | Traitement | Nature |
+|---|---|---|
+| 23.3, définition de `E` | complétée (exception des enregistrements attendus de la campagne courante) | [R] |
+| 23.10, « Définitions », phrase « Pour une campagne `FRESH_UNEXPOSED_DECLARED`, cet ensemble est vide » | remplacée par 23.27.1 | [R] + [N] |
+| 23.10, étape 2 (`ADMISSION`) et étape 5 (nouvelle tentative après conflit de slot) | complétées par 23.27.4 | [N] |
+| 23.10, étape 8 | précisée : la comptabilité n'y est jamais comparée | [R] |
+| 23.10, « Instant de péremption », dernière phrase | remplacée par 23.27.4 | [N] |
+| 23.11, étape 1, exclusion « par dossier de la campagne courante » | remplacée par 23.27.2 | [N] |
+| 23.11, étape 1, « racines d'audit configurées … campagnes référencées par la chaîne du registre » | précisée par 23.27.3 (`scanned_roots` = racines statiques seulement) | [N] |
+| 23.11, étapes 4 et 6 | complétées par 23.27.3 | [R] + [N] |
+| 23.11, « Comptabilité des essais » | remplacée par 23.27.5 | [N] |
+| 23.6, marge d'ancrage | précisée par 23.28 : une marge ≤ 0 est `UNVERIFIED` (F4) | [N] |
+| 23.10, « Crash avant le Claim » | précisé par 23.27.3 : la reprise ne rejoue jamais la comptabilité | [N] |
+| 23.17, étape 13 | complétée par 23.27.3 (comparaison d'`inventory_id`, jamais de la comptabilité) | [N] |
+| 23.26, découpage | précisé par 23.27.7 | [R] |
+
+#### 23.27.1 — Ensemble pertinent et fraîcheur (A1)
+
+- Une classification `FRESH_UNEXPOSED_DECLARED` **n'implique pas** l'absence de réservations ou d'admissions rivales.
+- *Ensemble pertinent* : les sources de l'inventaire dont le verdict de recouvrement n'est pas `NO_OVERLAP` (donc les
+  recoupantes, les inconnues et les non résolues). Pour une campagne `FRESH_UNEXPOSED_DECLARED`, il ne contient **aucune
+  source exposante ni inconnue** ; il peut contenir des `RESERVATION` ou `ADMISSION` d'**autres** campagnes qui
+  recoupent `W`.
+- Une réservation ou une admission rivale recoupante **n'est pas une exposition scientifique** (aucune donnée n'a été
+  lue) : elle n'altère pas la classe, mais elle **interdit l'admission** (refus `OVERLAPPING_REGISTRATION`). L'autorité
+  d'exclusivité reste le registre (23.10, E3-D) ; le refus d'E3-A en est le reflet informatif.
+- Les plans de split **jamais utilisés** sont informatifs : ils ne sont pas des findings de l'inventaire, n'entrent ni
+  dans `inventory_id`, ni dans les digests, ni dans l'ensemble pertinent ; E3-B les consigne dans une liste informative
+  du A0 persisté. Un plan qui a servi est une exposition par ses événements, `ValidationRun` ou jobs.
+- Les enregistrements attendus de la campagne courante, selon son étage (23.27.2), n'en font pas partie.
+
+#### 23.27.2 — Campagne courante, étage et enregistrements propres (A3, A5)
+
+- **L'exclusion par chemin de dossier est supprimée** : une copie ou une restauration du dossier de campagne conserve
+  son `campaign_id`. L'inventaire liste **tous** les enregistrements portant le `campaign_id` courant, où qu'ils soient.
+  `campaign_id` est requis (chaîne non vide) pour tout enregistrement `RESOLVED` de type `RESERVATION`, `ADMISSION`,
+  Claim, `CONSUMPTION` ou `ReadIntent`.
+- **Étage** `OwnRecordStage` et enregistrements propres **attendus** :
+
+| Étage | Enregistrements attendus de la campagne courante |
+|---|---|
+| `NO_OWN_RECORDS` | aucun |
+| `RESERVED` | `RESERVATION` |
+| `ADMITTED` | + `ADMISSION` |
+| `CLAIMED` | + Claim |
+| `CONSUMED` | + `CONSUMPTION` |
+
+- **Absorption.** Lors de la partition des enregistrements propres (`partition_own_records`, avant la classification),
+  un enregistrement propre attendu est **absorbé** (exclu de `E`, de F1 et F2, du test de rival, des digests et de
+  `inventory_id`) uniquement s'il est **unique pour son type** (tous statuts confondus : un second enregistrement du
+  type, même `UNRESOLVED`, empêche toute absorption), `RESOLVED`,
+  porte le `campaign_id` courant et, pour `RESERVATION`, `ADMISSION`, Claim et `CONSUMPTION`, une fenêtre **égale à
+  `W`**. L'absorption ne vérifie que la forme : l'identité des enregistrements (hash, chaîne) reste à E3-D et E3-J.
+  Le Claim E1 ne porte aucune fenêtre propre : la fenêtre du finding `FINAL_HOLDOUT_CLAIM` est celle de la fenêtre
+  `FINAL_HOLDOUT` du plan désigné par `split_plan_id` du Claim, fournie par l'appelant (E3-B) ; si elle est introuvable,
+  le finding est `UNRESOLVED` (cause `WINDOW_UNKNOWN`) et la classe est `UNDETERMINED`, jamais `FRESH` (sous réserve
+  de R1 : une exposition établie par ailleurs l'emporte).
+- **Échec fermé.** Un enregistrement propre non absorbé (doublon, fenêtre différente, type inattendu) ou un
+  enregistrement attendu absent (noté `missing:<TYPE>`) n'est **jamais** masqué : s'il est exposant (`CONSUMPTION`,
+  Claim, `ReadIntent`), c'est une **exposition établie** (`RETROSPECTIVE_EXPOSED`, par échec fermé et quel que soit
+  son verdict de recouvrement : un exposant propre non absorbé et `RESOLVED` est traité comme `OVERLAPS`, cas
+  particulier de R1 amendant 23.28) ; un exposant propre `UNRESOLVED` (par exemple un Claim de fenêtre `WINDOW_UNKNOWN`)
+  suit R2 et donne `UNDETERMINED` si aucune exposition établie n'existe par ailleurs ; s'il est non exposant
+  (`RESERVATION`, `ADMISSION`) ou absent, c'est une anomalie qui donne `UNDETERMINED` (code
+  `OWN_REGISTRATION_ANOMALY`, jamais traité comme rival). Un Claim dupliqué par copie de dossier donne donc
+  `RETROSPECTIVE_EXPOSED`. Une exposition étrangère n'est jamais masquée. Les identifiants d'anomalie propre sont les
+  ids des enregistrements propres **non absorbés et non exposants** (les exposants non absorbés figurent dans les
+  identifiants d'exposition établie ou non résolus), plus `missing:<TYPE>` pour chaque type attendu dont il n'existe
+  **aucun** enregistrement (un type présent en doublon n'est jamais « manquant »). Codes de raison : un exposant propre
+  établi donne `EXPOSURE_ESTABLISHED_INVENTORY` (F1 `NOT_MET`) ; un exposant propre `UNRESOLVED` donne
+  `UNRESOLVED_SOURCE` (F1 `UNVERIFIED`) ; `OWN_REGISTRATION_ANOMALY` (et son jumeau F1) est réservé aux enregistrements
+  propres **non exposants** non absorbés ou manquants. Les autres types exposants portant le `campaign_id` courant
+  (`HOLDOUT_ACCESS_EVENT`, `VALIDATION_RUN_OOS`, `JOB_EXECUTION`, `V1_CAMPAIGN_OOS`) ne sont jamais absorbés : ce sont
+  des expositions ordinaires.
+- **Identité d'un finding.** L'identifiant d'un finding inclut son localisateur (ou son occurrence ; pour un
+  enregistrement du registre, son `seq` ou son hash, jamais le `campaign_dir_locator`, hors identité) : deux copies de
+  contenu identique, y compris sous deux dossiers, restent **deux findings distincts** et ne sont jamais fusionnées ou
+  dédupliquées. Un identifiant de finding dupliqué dans un inventaire lève `ValueError` (échec fermé). Un test E3-B
+  « deux copies d'un même Claim » est obligatoire.
+- **Étage vérifié.** L'étage n'est **jamais une simple affirmation de l'appelant**, dans aucun mode (`SYNTHETIC` comme
+  `REAL`) : E3-D et E3-J le dérivent des artefacts persistés (chaîne du registre, Claim, `ReadIntent`) et le refusent
+  s'il est incompatible avec eux (test E3-J obligatoire de cette dérivation). E3-A, module pur, reçoit l'étage et le vérifie contre l'inventaire (comptes exacts, échec fermé) : un étage trop
+  bas ou trop haut produit une anomalie ou une exposition, jamais une classe `FRESH`.
+- **Aucune autorité d'admission.** La classification pure d'E3-A **n'est jamais une autorité** : un tuple de refus
+  vide ne vaut pas autorisation. Une classification calculée à l'étage `CLAIMED` ou `CONSUMED` ne peut en aucun cas
+  servir à publier ou republier une `ADMISSION`, ni à acquérir un nouveau Claim. L'unicité par campagne (23.10) et E2
+  restent les seules autorités ; après une `CONSUMPTION`, aucun second accès n'est possible. Aux étages
+  `ADMITTED` à `CONSUMED`, la classification ne sert qu'à l'audit et aux revérifications de 23.27.3.
+
+#### 23.27.3 — Identités de l'inventaire et attestation (A4)
+
+Trois identités distinctes, aucune ne remplace l'autre :
+- `inventory_id` : identité **scientifique** de classification, stable ; SHA-256 canonique de la version, de la
+  fenêtre `W`, de `complete`, de `scanned_roots` et des findings **non absorbés**. Elle n'inclut ni `trial_accounting`, ni
+  l'étage, ni horodatage, ni les plans informatifs. `scanned_roots` ne contient que les **racines d'audit statiques**
+  du fichier de configuration de root (triées, dédupliquées) ; les dossiers de campagnes découverts par la chaîne du
+  registre sont des sources **dérivées** lues, jamais des racines : ils n'entrent dans `inventory_id` que par les
+  findings qu'ils portent. Une `RESERVATION` étrangère non recoupante, même avec un nouveau
+  `campaign_dir_locator`, ne modifie donc pas `inventory_id`.
+- `inventory_content_digest` : SHA-256 canonique de `{inventory_id, trial_accounting}` (sans horloge) ; il intègre les
+  compteurs.
+- `inventory_content_hash` : hash du contenu **intégral persisté** du A0 (E3-B), `created_at` inclus. Le A0 persisté
+  contient `inventory_id`, `inventory_content_digest`, `trial_accounting`, le contexte propre
+  (`campaign_id` courant et étage) et `created_at`.
+
+L'**attestation** épingle obligatoirement `inventory_content_hash` (donc le contenu complet) **et** `inventory_id`.
+**Avant l'admission** (étapes 8 à 11 de 23.17), E3-J recharge le A0 persisté (son `content_hash` doit égaler celui
+attesté), recalcule un A0′ à neuf et exige l'égalité de `inventory_id`, de `static_sources_digest`, de la projection de
+recouvrement **et** de `inventory_content_digest`. Une modification des compteurs de `trial_accounting` après
+l'attestation invalide donc l'attestation (refus `ACCOUNTING_CHANGED`), **même si la classification scientifique est
+inchangée**.
+
+**Après le Claim et la `CONSUMPTION`**, le contrôle de l'étape 13 de 23.17
+compare `inventory_id`, `static_sources_digest` et la projection (en plus des revérifications de 23.17 sur la tête
+des déclarations et l'autorisation) ; il **ne compare jamais la comptabilité**. Un compteur d'une autre campagne ne peut
+jamais annuler une exécution après un droit consommé. Une exposition étrangère nouvelle (par exemple une `CONSUMPTION`
+étrangère non recoupante) modifie `inventory_id` et peut en revanche annuler l'exécution : c'est un changement
+scientifique, accepté (23.17 étape 13, inchangé).
+
+**Reprise après crash entre l'`ADMISSION` durable et le Claim** (23.10, « Crash avant le Claim » : « rejoue les
+vérifications » s'entend sans la comptabilité) : la comptabilité n'est ni recalculée ni comparée ; seuls
+`inventory_id`, `static_sources_digest` et la projection sont revérifiés (la `RESERVATION` n'a pas d'`inventory_id` ;
+l'étape 8 de la publication ne compare que `static_sources_digest` et la projection). Dans 23.10 et 23.17,
+« attestation valide » ou « non périmée » après l'`ADMISSION` durable s'entend **hors comptabilité**. `ACCOUNTING_CHANGED` n'existe donc qu'**avant la publication de l'`ADMISSION`** (contrôles 1 à 7 de
+23.27.4) ; une fois l'`ADMISSION` durable, aucun compteur ne peut brûler la fenêtre. La comptabilité finale est
+recalculée par E3-B pour le `ClosingRecord` (23.27.5).
+
+#### 23.27.4 — Péremption de l'attestation et publication de l'`ADMISSION` (A2, A2 bis)
+
+**Remplace la dernière phrase de « Instant de péremption de l'inventaire » (23.10).** L'attestation est périmée dès que :
+une source non registre change ; une réservation ou une admission d'une autre campagne dont la fenêtre recoupe (ou est
+illisible) apparaît ; une **exposition d'une autre campagne, dont une `CONSUMPTION`, apparaît dans `E` même sans
+recouvrement** avec `W` (elle modifie `inventory_id`) ; la **comptabilité des essais change**, y compris par la
+création d'une `RESERVATION` d'une campagne nouvellement comptée (elle modifie `campaigns` sans changer la classe
+scientifique) ou la clôture d'une autre campagne ; le préfixe épinglé n'est plus un préfixe de la chaîne ; la tête des
+déclarations change ; la version de la classification change. Une `ADMISSION` ou un `REBIND` d'une campagne **déjà
+comptée** est neutre (hors recouvrement avec `W`). Une `CONSUMPTION` étrangère **n'est pas neutre**.
+
+**Contrôles préalables à la publication d'une `ADMISSION`** (étape 2 de 23.10, **répétés après tout conflit de slot**) :
+1. `inventory_id` ;
+2. `inventory_content_digest` ;
+3. `static_sources_digest` ;
+4. la projection de recouvrement ;
+5. les déclarations (tête inchangée) et l'attestation (classification recalculée égale) ;
+6. l'autorisation ;
+7. le préfixe de chaîne épinglé.
+
+La péremption par changement de comptabilité ne vaut que **jusqu'à la publication de l'`ADMISSION`** (23.27.3) ; les
+autres causes de la liste restent valables ensuite dans la mesure où 23.17 les revérifie.
+
+**Une modification concurrente détectée avant la publication n'est jamais ignorée** : l'attestation est périmée, arrêt,
+nouvelle attestation et nouvelle autorisation humaines. Il n'existe aucune nouvelle tentative automatique qui poursuit
+sur une attestation périmée : après un conflit de slot (23.10, étape 5), une nouvelle tentative n'est permise que si
+les sept contrôles sont **inchangés**. La `RESERVATION` n'a pas d'attestation : ses contrôles (23.10) sont inchangés.
+
+#### 23.27.5 — Comptabilité des essais (A6)
+
+- Les compteurs portent sur des **campagnes distinctes**, sans double compter les trois types d'enregistrement d'une
+  même campagne : `campaigns` = nombre de `campaign_id` distincts parmi les `RESERVATION`, `ADMISSION` et
+  `CONSUMPTION` de la chaîne ; `abandoned_reservations` = parmi eux, ceux sans `ClosingRecord` terminal (introuvable ⇒
+  abandonnée, conservateur) ; `research_runs` et `strategies` sont comptés sur ces campagnes, sur les campagnes V1
+  avec OOS et sur les nombres déclarés (23.11 d'origine, inchangé) ; `failed_ingestion_attempts` et
+  `void_commitments` sont comptés **sans** restriction aux campagnes de la chaîne (précision : 23.11 d'origine ne les
+  restreignait pas), y compris les tentatives et engagements nuls antérieurs à toute `RESERVATION`.
+- La comptabilité du **A0 avant admission exclut la campagne courante**. Le **`ClosingRecord` conserve la comptabilité
+  finale incluant cette campagne** (`campaigns` augmenté de un, à état par ailleurs inchangé).
+- **Responsabilités.** E3-A : modèle pur `TrialAccounting`, calcul de `inventory_content_digest`. E3-B : calcul des
+  compteurs, persistance du A0, relecture stricte. E3-J : revérification avant l'admission (23.27.3), jamais après le
+  Claim.
+- Comptabilité **non décisionnelle pour la classe** (elle périme toutefois l'attestation avant l'admission, 23.27.3) :
+  elle n'entre ni dans la classe ni dans `inventory_id`, aucune correction de
+  multiple testing et aucun seuil ne sont introduits. Le calcul de `abandoned_reservations` n'est pas atomique avec la
+  publication (un `ClosingRecord` est hors registre) : ce risque est accepté. Coût de disponibilité accepté : une
+  nouvelle campagne d'un tiers ou une clôture périme une attestation avant l'admission.
+
+#### 23.27.6 — Contrat d'identité entre étages
+
+En l'absence d'élément **étranger** nouveau, `inventory_id`, `static_sources_digest`, la projection de recouvrement,
+`input_digest` et `classification_id` sont **identiques** aux étages `RESERVED`, `ADMITTED`, `CLAIMED` et `CONSUMED`.
+Seul le champ d'audit `absorbed_own_record_ids` diffère, et il est exclu de `classification_id`. Exception : un
+enregistrement propre non absorbable (`UNRESOLVED`, doublon, fenêtre ≠ `W`) est un finding non absorbé ; il entre dans
+`inventory_id`, qui peut alors différer d'un étage à l'autre (échec fermé, détecté comme changement d'exposition à
+l'étape 13 de 23.17). Sont exclus de toute
+identité sémantique : l'étage, les enregistrements absorbés, `trial_accounting` (présent seulement dans
+`inventory_content_digest`), les plans informatifs et tout horodatage ; le contenu d'audit horodaté
+(`inventory_content_hash`) est distinct. Les déclarations référencent l'`inventory_id` calculé sur les findings non
+absorbés ; une déclaration qui référence un autre `inventory_id` est refusée. Si l'une de ces stabilités se révélait
+impossible, ce serait un BLOCKER à signaler ; aucun nouveau contrat ne doit être improvisé.
+
+#### 23.27.7 — Périmètres des slices précisés
+
+- **E3-A** : calcul **pur** (types, invariants, classification, identités, `t_sel` effectif, refus de classification) ;
+  bibliothèque standard seulement ; aucune E/S, horloge, moteur, E1/E2.
+- **E3-B** : construction et lecture stricte de l'inventaire, persistance du A0 et de ses hashs, calcul de la
+  comptabilité, persistance des déclarations, primitive publique de recouvrement d'intervalles.
+- **E3-C/D** : stockage durable, registre, admissions.
+- **E3-E** : engagement, preuves de temps, modèles d'attestation et d'autorisation.
+- **E3-J** : vérification des étages réels (dérivation depuis les artefacts persistés), reclassification, admission.
+  E3-J refuse de traiter une classification d'étage `ADMITTED` ou supérieur comme une autorisation de publier une
+  `ADMISSION` ou d'acquérir un Claim (test E3-J obligatoire) ; E3-A ne l'impose pas, étant pur.
+Aucune nouvelle abstraction générale n'est introduite.
+
+### 23.28 — Contrat de référence de la classification E3-A (spécifié, non implémenté)
+
+Module prévu `gate_v_final_holdout_protocol.py`, tests `tests/test_gate_v_final_holdout_protocol.py`. Dépendances :
+bibliothèque standard seulement. Conventions d'E1 : `type(x) is str` strict, `ValueError` pour une valeur invalide,
+`TypeError` pour une erreur d'appel, `_canonical_json` dupliqué (Décision 20.3). Instants : chaîne UTC à fraction fixe de
+six chiffres (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), comparaisons sur `datetime` parsé.
+
+**Classes et niveaux.** Trois classes (`FRESH_UNEXPOSED_DECLARED`, `RETROSPECTIVE_EXPOSED`, `UNDETERMINED`) et trois
+niveaux (`PROSPECTIVE_ANCHORED`, `UNSEEN_HISTORICAL`, `NOT_APPLICABLE`).
+- **Précédence** : R1 une exposition établie (exposante, `RESOLVED`, `OVERLAPS`, inventaire ou déclarée, après
+  absorption ; plus tout exposant propre `RESOLVED` non absorbé, 23.27.2) donne `RETROSPECTIVE_EXPOSED` ; R2 sinon, un finding non résolu, un inventaire incomplet ou une anomalie
+  propre donne `UNDETERMINED` ; R3 sinon `FRESH_UNEXPOSED_DECLARED`. L'exposition établie l'emporte sur toute source
+  `UNDETERMINED`.
+- **Au moins une déclaration** est exigée pour classifier (`ValueError` sinon) : la classe n'existe qu'après l'étape 2 de
+  23.11. Les déclarations ne peuvent que durcir (la sévérité `FRESH` < `UNDETERMINED` < `RETROSPECTIVE_EXPOSED` ne
+  baisse jamais quand on en ajoute), et `t_sel` effectif = maximum, jamais avancé dans le passé.
+- **Niveau** : `RETROSPECTIVE_EXPOSED` donne `NOT_APPLICABLE` ; six conditions `MET` donnent `PROSPECTIVE_ANCHORED` ;
+  sinon `UNSEEN_HISTORICAL` (y compris pour `UNDETERMINED`, lecture littérale de 23.3).
+- **Éligibilité distincte** : `admission_refusals` renvoie, dans l'ordre, un refus de classe (`CLASS_RETROSPECTIVE_EXPOSED`
+  ou `CLASS_UNDETERMINED`), sinon `LEVEL_NOT_PROSPECTIVE_ANCHORED`, puis éventuellement `OVERLAPPING_REGISTRATION`. Un
+  tuple vide n'est jamais une autorisation.
+
+**Conditions F1 à F6** (tri-état `MET`/`NOT_MET`/`UNVERIFIED` ; statut = sévérité maximale, `NOT_MET` > `UNVERIFIED` >
+`MET` ; une violation connue prime sur une donnée manquante ; toutes les raisons applicables sont cumulées) :
+
+| Condition | `NOT_MET` | `UNVERIFIED` |
+|---|---|---|
+| F1 | exposition établie | source non résolue, inventaire incomplet ou anomalie propre |
+| F2 | fin d'une exposante > `ws`, `t_sel` effectif > `ws` ou > `t_anchor` | exposante non résolue, `t_sel` absent, ancrage inconnu |
+| F3 | `max(time)` de S0 ≥ `ws` | `max(time)` absent |
+| F4 | réservation non durable ; preuve invalide ; preuve valide d'une autre réservation ; borne > `ws` ou borne + marge > `ws` | réservation inconnue ; preuve absente ou non vérifiable ; marge absente ou ≤ 0 |
+| F5 | ingestion ≤ `we` ; plage ≠ engagée | ingestion ou plage inconnue |
+| F6 | `hash_linked` faux | — |
+
+`t_anchor` n'est la borne de la preuve que si elle est `VALID` et vise sa propre réservation. `ws` = max accepté en F2.
+
+**Types (décompte).**
+- **11 énumérations** : `ExposureClass`, `ChronologyLevel`, `OverlapVerdict`, `SourceStatus`, `SourceKind` (12 valeurs : 8
+  exposantes `HOLDOUT_ACCESS_EVENT`, `VALIDATION_RUN_OOS`, `JOB_EXECUTION`, `V1_CAMPAIGN_OOS`, `FINAL_HOLDOUT_CLAIM`,
+  `CONSUMPTION`, `READ_INTENT`, `DECLARED_UNRECORDED_WORK` ; 2 non exposantes `REGISTRY_RESERVATION`,
+  `REGISTRY_ADMISSION` ; 2 de capacité inconnue `UNKNOWN_SOURCE`, `REGISTRY_UNREADABLE`, jamais `RESOLVED`),
+  `UnresolvedCause` (7), `ConditionStatus`, `TimeProofStatus`, `ReasonCode` (**32** : 7 de niveau classe dont
+  `OVERLAPPING_REGISTRATION` et `OWN_REGISTRATION_ANOMALY`, et 25 codes F1 à F6), `AdmissionRefusal` (**4**),
+  `OwnRecordStage` (5).
+- **11 dataclasses immuables** : `ExposureFinding` (10 champs), `TrialAccounting` (6), `ExposureInventory` (7),
+  `ExposureDeclaration` (8), `DeclarationSet` (2), `TimeProofFact` (3), `ChronologyFacts` (7), `OwnCampaignContext` (2),
+  `ClassificationInput` (4), `FConditionResult` (3), `ExposureClassificationResult` (16).
+- **16 fonctions publiques** : `normalize_utc_instant` ; `build_exposure_finding`, `build_exposure_inventory`,
+  `build_exposure_declaration`, `build_chronology_facts` ; `partition_own_records` ; `compute_exposure_inventory_id`,
+  `compute_inventory_content_digest`, `compute_declaration_id`, `compute_classification_input_digest`,
+  `compute_static_sources_digest`, `compute_overlap_projection_hash`, `compute_effective_t_sel` ; `classify_exposure`,
+  `admission_refusals`, `classification_result_to_record`.
+- **Interface publique.** Les noms et l'ordre des champs des dataclasses (autres que `TrialAccounting`, nommé
+  ci-dessous) constituent l'interface publique proposée à l'approbation de l'utilisateur **avant** le premier test TDD
+  d'E3-A ; ils ne sont pas figés par la présente ADR, qui fixe les décomptes, les valeurs d'énumérations nommées
+  ci-dessous et les comportements. Valeurs : `OverlapVerdict` `OVERLAPS`, `NO_OVERLAP`, `UNKNOWN` ; `SourceStatus`
+  `RESOLVED`, `UNRESOLVED` ; `ConditionStatus` `MET`, `NOT_MET`, `UNVERIFIED` ; `TimeProofStatus` `VALID`, `INVALID`,
+  `UNVERIFIABLE`, `ABSENT` ; `OwnRecordStage` `NO_OWN_RECORDS`, `RESERVED`, `ADMITTED`, `CLAIMED`, `CONSUMED`.
+- **Valeurs nommées.** `UnresolvedCause` : `UNREADABLE`, `INVALID_SCHEMA`, `UNKNOWN_SCHEMA_VERSION`,
+  `WINDOW_UNKNOWN`, `TIMEZONE_UNKNOWN`, `PLAN_UNRESOLVED`, `UNKNOWN_SOURCE_TYPE`. `TrialAccounting` :
+  `research_runs`, `strategies`, `campaigns`, `abandoned_reservations`, `failed_ingestion_attempts`,
+  `void_commitments`. `ReasonCode` de niveau classe (7) : `EXPOSURE_ESTABLISHED_INVENTORY`,
+  `EXPOSURE_ESTABLISHED_DECLARED`, `UNRESOLVED_SOURCE`, `INVENTORY_INCOMPLETE`, `T_SEL_LOWERING_IGNORED`,
+  `OVERLAPPING_REGISTRATION`, `OWN_REGISTRATION_ANOMALY`. `ReasonCode` des conditions (25) : F1 (4)
+  `F1_EXPOSURE_ESTABLISHED`, `F1_SOURCES_UNRESOLVED`, `F1_INVENTORY_INCOMPLETE`, `F1_OWN_ANOMALY` ; F2 (6)
+  `F2_EXPOSURE_WINDOW_UNKNOWN`, `F2_T_SEL_MISSING`, `F2_ANCHOR_UNKNOWN`, `F2_EXPOSURE_AFTER_WS`, `F2_T_SEL_AFTER_WS`,
+  `F2_T_SEL_AFTER_ANCHOR` ; F3 (2) `F3_S0_MAX_TIME_MISSING`, `F3_S0_NOT_BEFORE_WINDOW` ; F4 (9)
+  `F4_RESERVATION_UNKNOWN`, `F4_RESERVATION_NOT_DURABLE`, `F4_PROOF_ABSENT`, `F4_PROOF_UNVERIFIABLE`,
+  `F4_PROOF_INVALID`, `F4_PROOF_NOT_OWN_RESERVATION`, `F4_MARGIN_MISSING`, `F4_MARGIN_NOT_POSITIVE`,
+  `F4_ANCHORED_TOO_LATE` ; F5 (3) `F5_INGESTION_MISSING`, `F5_INGESTED_BEFORE_WINDOW_END`, `F5_RANGE_MISMATCH` ; F6 (1)
+  `F6_HASH_LINK_BROKEN`. Le tri des raisons suit l'ordre de déclaration de cette énumération.
+
+**Invariants clés.** `RESOLVED` exige un recouvrement connu, une fenêtre complète (début < fin) et un `content_hash`
+hexadécimal de 64 caractères (sauf `DECLARED_UNRECORDED_WORK`, où il vaut `None`) ; `UNRESOLVED` exige `UNKNOWN` et une
+cause ; la validité du verdict de recouvrement est contrôlée par une formule privée (`a.start < b.end ∧ b.start <
+a.end`) pour les findings de l'inventaire **et** les expositions déclarées ; les `RESERVATION` et `ADMISSION`
+`RESOLVED` d'autres campagnes doivent recouper `W` (les autres ne sont pas listées : elles ne figurent que dans
+`trial_accounting`) ; `DECLARED_UNRECORDED_WORK` est interdit dans l'inventaire ; les préfixes `declared:` (ids
+déclarés, `declared:<seq sur 4 chiffres>:<position sur 4 chiffres>`) et `missing:` sont réservés ; le `snapshot_id` est
+informatif et n'est jamais lu par la décision ; les déclarations forment une chaîne dense de `declaration_id` sans
+horloge et référencent l'`inventory_id` courant ; la marge d'ancrage est un fait fourni (jamais un défaut).
+
+**Identités** (SHA-256 du JSON canonique, sans horodatage) : `inventory_id` (23.27.3) ; `inventory_content_digest` ;
+`compute_declaration_id` (version, `seq`, déclarant, `inventory_id`, `prev_declaration_id`, `t_sel` déclaré,
+expositions déclarées complètes, comptes déclarés) ; `input_digest` (version des règles, `inventory_id`,
+`campaign_id` courant, déclarations complètes, `hash_linked`, chronologie complète ; **sans** étage ni enregistrements
+absorbés) ; `classification_id` (version des règles, `input_digest`, classe, niveau, `t_sel` effectif, seqs ignorés,
+identifiants établis, non résolus, chevauchants et d'anomalies propres, conditions, raisons ; **sans**
+`absorbed_own_record_ids`). `static_sources_digest` et la projection de recouvrement portent sur les findings non
+absorbés. Liste canonique vide : SHA-256 de `[]` = `4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945`.
+
+**Obligations de test E3-A** (synthétiques ; les constantes ne sont jamais des valeurs de policy). Scénario de base
+B0 : `W = [2026-11-02T00:00:00.000000Z, 2026-12-01T00:00:00.000000Z)` (`ws` = 2026-11-02, `we` = 2026-12-01), campagne
+courante `campaign_a` à l'étage `RESERVED` avec sa propre réservation de fenêtre `W`, inventaire complet sans autre
+finding, une déclaration sans exposition, chronologie entièrement valide : `t_sel` effectif = 2026-10-20, `t_anchor` =
+2026-10-25 (preuve `VALID` de sa propre réservation durable), marge = 1 jour (borne + marge = 2026-10-26 ≤ `ws`),
+`max(time)` de S0 = 2026-05-19T12:48:00.000000Z, ingestion de S_H = 2026-12-02, plage engagée, `hash_linked` vrai.
+Sortie B0 : `FRESH_UNEXPOSED_DECLARED`, `PROSPECTIVE_ANCHORED`, aucune
+raison, F1 à F6 `MET`, aucun refus, réservation propre absorbée.
+
+| Variation de B0 | Sortie attendue |
+|---|---|
+| exposition `OVERLAPS` établie (inventaire ou déclarée) | `RETROSPECTIVE_EXPOSED`, `NOT_APPLICABLE`, F1 `NOT_MET` |
+| exposition établie + source non résolue | `RETROSPECTIVE_EXPOSED` (l'exposition l'emporte) |
+| source non résolue seule ; inventaire incomplet | `UNDETERMINED`, `UNSEEN_HISTORICAL`, F1 `UNVERIFIED` |
+| inventaire sans déclaration | `ValueError` à la construction de `ClassificationInput` |
+| `complete = True` sans `scanned_roots` | `ValueError` |
+| réservation d'une autre campagne recoupant `W` (entrée de test directe : une chaîne saine n'en contient jamais, invariant de 23.10) | `FRESH`, `PROSPECTIVE_ANCHORED`, raison et refus `OVERLAPPING_REGISTRATION` |
+| réservation ou admission étrangère non recoupante listée | `ValueError` (non listable) |
+| sa propre réservation à l'étage `RESERVED` | absorbée : sortie B0, aucun refus |
+| deux réservations propres (ids des deux en anomalie, pas de `missing:`) ; réservation propre absente (`missing:RESERVATION`) ; admission propre à l'étage `RESERVED` (id en anomalie) | `UNDETERMINED`, `OWN_REGISTRATION_ANOMALY`, F1 `UNVERIFIED` |
+| `CONSUMPTION` propre à l'étage `RESERVED` ; seconde `CONSUMPTION` propre à l'étage `CONSUMED` ; Claim propre dupliqué | `RETROSPECTIVE_EXPOSED` |
+| Claim propre attendu (étage `CLAIMED`) mais `UNRESOLVED` (`WINDOW_UNKNOWN`), sans autre exposition | `UNDETERMINED`, raison `UNRESOLVED_SOURCE`, F1 `UNVERIFIED` (pas d'`OWN_REGISTRATION_ANOMALY`) |
+| même cas avec une exposition étrangère établie | `RETROSPECTIVE_EXPOSED` |
+| deux findings de même identifiant dans un inventaire | `ValueError` |
+| étage `CONSUMED` avec les quatre enregistrements propres | sortie B0 ; F2 `MET` ; mêmes `inventory_id`, digests, projection, `input_digest` et `classification_id` qu'à l'étage `RESERVED` ; seul `absorbed_own_record_ids` diffère |
+| étage reçu trop bas (enregistrement propre non attendu présent) : exposant (Claim, `CONSUMPTION`, `ReadIntent`) ; non exposant (`ADMISSION`) | `RETROSPECTIVE_EXPOSED` ; `UNDETERMINED` (`OWN_REGISTRATION_ANOMALY`) |
+| étage reçu trop haut (enregistrement attendu absent) | `UNDETERMINED`, `OWN_REGISTRATION_ANOMALY`, id `missing:<TYPE>` |
+| réservation propre de fenêtre ≠ `W` | anomalie, `UNDETERMINED` |
+| `campaign_id` absent sur un enregistrement `RESOLVED` des cinq types ; `campaign_id` courant vide ; id d'inventaire préfixé `missing:` ou `declared:` | `ValueError` |
+| `t_sel` effectif repoussé jusqu'à `t_anchor` inclus ; repoussé après `t_anchor` mais ≤ `ws` ; repoussé après `ws` ; abaissé par une déclaration ultérieure ; absent à l'engagement | F2 `MET` ; F2 `NOT_MET` (`F2_T_SEL_AFTER_ANCHOR`) ; F2 `NOT_MET` (`F2_T_SEL_AFTER_WS` et `F2_T_SEL_AFTER_ANCHOR`) ; effectif inchangé, `seq` ignoré listé, raison `T_SEL_LOWERING_IGNORED` ; F2 `UNVERIFIED` |
+| preuve de temps valide, absente, invalide, non vérifiable, d'une autre réservation | F4 `MET` ; `UNVERIFIED` ; `NOT_MET` ; `UNVERIFIED` ; `NOT_MET` |
+| borne + marge = `ws` ; > `ws` ; marge absente ; marge nulle ; borne > `ws` sans marge | F4 `MET` ; `NOT_MET` ; `UNVERIFIED` ; `UNVERIFIED` ; `NOT_MET` |
+| `max(time)` de S0 absent, = `ws`, juste avant `ws` | F3 `UNVERIFIED`, `NOT_MET`, `MET` |
+| ingestion = `we`, > `we`, plage fausse, absente | F5 `NOT_MET`, `MET`, `NOT_MET`, `UNVERIFIED` |
+| `hash_linked` faux | F6 `NOT_MET`, niveau `UNSEEN_HISTORICAL` |
+| même exposition sous deux `snapshot_id` | même classe, `inventory_id` différent |
+| verdict de recouvrement contredisant les fenêtres | `ValueError` |
+| chacun des six compteurs de `trial_accounting` modifié | `inventory_content_digest` change ; `inventory_id`, classe et `classification_id` inchangés |
+| `CONSUMPTION` étrangère non recoupante listée | `inventory_id` change (attestation périmée), classe inchangée |
+| code de classe `UNRESOLVED_SOURCE`, `INVENTORY_INCOMPLETE`, `OWN_REGISTRATION_ANOMALY` | présent si et seulement si le code F1 jumeau est présent |
+| déterminisme, immuabilité, ordre des findings permuté via le builder | mêmes sorties et mêmes identités |
+| pureté (test AST), vecteurs de hash littéraux calculés hors du code testé | imports ⊆ bibliothèque standard ; aucune E/S, horloge ni accès marché |
+| propriété de monotonie : `D ⊆ D'` | sévérité de classe non décroissante, `t_sel` effectif non décroissant |
 
 ## Conséquences
 
@@ -2780,3 +3145,9 @@ E3-Q qualification (cible). Chaque tranche : RED, GREEN, revue, suite existante 
     **désactivé et non qualifié** ; aucune qualification d'infrastructure n'est affirmée.
   - Aucun accès `FINAL_HOLDOUT` nouveau, aucun Claim réel. `AF-V-07` = IN PROGRESS, `GATE V` NON PASSÉE, aucun
     Champion qualifié.
+- **Mise à jour (2026-10-13, additive, ne remplace rien de ce qui précède)** : l'**addendum E3-A** (23.27 et 23.28,
+  avec notes de renvoi dans 23.3, 23.6, 23.10, 23.11, 23.17 et 23.26) aligne la Décision 23 sur le design E3-A :
+  expositions propres par `campaign_id` et par étage vérifié, comptabilité des essais hors de `inventory_id` mais dans
+  `inventory_content_digest`, péremption de l'attestation précisée. **E3-A = design verrouillé sous réserve de la revue
+  de cet addendum, NON IMPLÉMENTÉ.** Le mode `REAL` reste **désactivé et non qualifié**. Aucun accès `FINAL_HOLDOUT`
+  nouveau, aucun Claim réel. `AF-V-07` = IN PROGRESS, `GATE V` NON PASSÉE, aucun Champion qualifié.
