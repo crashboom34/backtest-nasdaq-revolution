@@ -3125,7 +3125,7 @@ un `*.tmp` orphelin du corpus réel rendra l'inventaire courant `UNDETERMINED` t
 **Prochaine étape** : décision de l'utilisateur sur Q-1 (et sur les choix compatibles ci-dessus). Si elle est positive : approuver le
 design et ouvrir la TDD de B1 à B5 (B6 après l'amendement ADR et la publication par lien d'E3-C). Aucune TDD avant validation.
 
-## 45. `AF-V-07` — Q-1 résolue par l'addendum ADR 23.29 ; E3-B DESIGN LOCKED sous réserve de publication documentaire (2026-10-13) — prévaut sur le §44.1 pour Q-1
+## 45. `AF-V-07` — Q-1 résolue par l'addendum ADR 23.29 ; E3-B DESIGN LOCKED sous réserve de publication documentaire (2026-10-13) — prévaut sur le §44.1 pour Q-1 (état avant publication, périmé sur la publication : voir le §46)
 
 **Checkpoint publié** : `origin/master` = `7f30d0752465b755e8c08460e8ffb4ac13ff1d47` (E3-A, parent
 `72febdecdc7a73fa6c5194b8c1c05d77ec077391`). Les corrections de dates du §44 restent valables (tout est du 2026-10-13). **L'addendum
@@ -3197,3 +3197,83 @@ déjà lus ; réplique synthétique de la disposition réelle de `results/`. Que
 
 **Prochaine étape unique** : revue de publication du commit documentaire local (push uniquement sur autorisation explicite). Rien
 d'autre n'est autorisé avant : ni TDD E3-B (B1 à B5 ne démarrent qu'après publication et autorisation), ni push implicite.
+
+## 46. `AF-V-07` — E3-A publié ; addendum ADR 23.29 PUBLIÉ ; E3-B1 IMPLÉMENTÉ + TESTÉ LOCALEMENT, NON PUBLIÉ (2026-10-14) — fait foi sur le §45
+
+Cette section **prévaut sur le §45**, dont les mentions « NON publié », « commit LOCAL » et « prochaine étape unique : revue de
+publication » décrivent l'état **antérieur au push** et sont **périmées** (le §45 reste l'historique).
+
+**Publication démontrée** : commit `3b7dd07b255514bd61245160fa27ac0eb4b877ff` (« docs(gate-v): lock E3-B exposure inventory and
+declaration lineage design », daté du 2026-10-13 23:59:40 +0200), parent unique `7f30d0752465b755e8c08460e8ffb4ac13ff1d47`, poussé
+sur `master` (événement GitHub `PushEvent` du **2026-10-14 à 06:00:06 UTC**) ; l'API GitHub donne deux fichiers, 429 ajouts et
+6 suppressions. Le commit précédent `7f30d07` (E3-A) a été poussé le 2026-10-13 à 18:54:56 UTC.
+
+**Statuts au début de la mission B1** : E3-A = IMPLEMENTED + TESTED + PUBLISHED (4 114 PASS, 5 SKIP, 0 FAIL mesurés le 2026-10-13).
+Addendum 23.29 = DOCUMENTED + PUBLISHED. E3-B = DESIGN LOCKED + DOCUMENTED + PUBLISHED, **NOT IMPLEMENTED** au début de la mission.
+`REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE. Aucun Champion qualifié. `FINAL_HOLDOUT` non accédé, aucun Claim réel.
+`AF-V-07` = IN PROGRESS.
+
+**Mission B1 (autorisation de l'utilisateur, 2026-10-14)** : implémentation LOCALE en TDD de **B1 seulement** (primitive
+d'intervalles UTC demi-ouverts : module `gate_v_exposure_sources.py` et `tests/test_gate_v_exposure_sources.py`), sans commit ni push ;
+une mission ultérieure a autorisé une revue finale et au plus un commit LOCAL (jamais de push).
+B2 à B6 : NOT IMPLEMENTED.
+
+**Résultat de la mission B1 (mesuré le 2026-10-14, sur la version définitive des octets)** — `gate_v_exposure_sources.py` (nouveau) et
+`tests/test_gate_v_exposure_sources.py` (nouveau) : **E3-B1 = IMPLEMENTED + TESTED LOCALLY**. Statut de publication : voir la dernière
+phrase de ce paragraphe (le commit local éventuel est **non publié** ; son SHA n'est volontairement pas consigné ici).
+- **API publique (5 fonctions pures, aucune classe, aucun état global, pas de `__all__`)** : `normalize_window(start_utc, end_utc) ->
+  tuple[str, str]` ; `windows_overlap(a_start, a_end, b_start, b_end) -> bool` ; `overlap_verdict(a_start, a_end, b_start, b_end) ->
+  OverlapVerdict` (`OVERLAPS` ou `NO_OVERLAP`, jamais `UNKNOWN` : toute entrée invalide lève) ; `inclusive_end_to_exclusive(end_inclusive)
+  -> str` (`+1µs`, `ValueError` à `9999-12-31T23:59:59.999999Z`) ; `inclusive_window_to_half_open(start_utc, end_inclusive_utc) ->
+  tuple[str, str]` (exige `start <= end_inclusive`). Les noms viennent du design E3-B (§44), l'ADR ne les nomme pas.
+- **Contrat** : fenêtres `[start, end)`, formule `a.start < b.end ET b.start < a.end` sur datetimes parsés ; instants normalisés par le
+  `normalize_utc_instant` PUBLIC d'E3-A ; le module n'importe que `datetime`, `__future__`, `normalize_utc_instant` et `OverlapVerdict`
+  (aucun symbole privé d'E3-A, test AST) ; `TypeError` pour tout non-`str` (bool, sous-classe de `str` comprises) avec priorité sur
+  toute `ValueError`, quel que soit l'ordre des arguments ; la conversion inclusive n'est jamais automatique (jointives = pas de
+  recouvrement) ; les sorties de plage via offset (`0001-01-01T00:00:00+00:01`, `9999-12-31T23:59:59-00:01`) lèvent `ValueError`, jamais
+  `OverflowError` ; B1 ne détecte aucune source legacy (B3) et n'émet jamais FRESH ni « exposé ».
+- **Campagne finale (2026-10-14, octets ci-dessous)** : tests B1 **142 PASS** ; E3-A + B1 : 487 PASS ; **suite complète : 4 256 PASS, 5 SKIP,
+  0 FAIL** (4 114 + 142), 733 s. Les 5 SKIP sont les limitations Windows déjà connues (fsync de répertoire POSIX, liens symboliques
+  sans privilège, FIFO POSIX) ; aucun SKIP n'a été converti en PASS. SHA-256 des fichiers testés : `gate_v_exposure_sources.py`
+  `2c39af57cbddc5d45f873347ace781fd470a84413afb760fb7d8a7c8c7928197` ; `tests/test_gate_v_exposure_sources.py`
+  `c709ee7722253234dcf69bd747627120615eed7f32a6098ef728efc53d22c821`.
+- **Différentiel E3-A/B1** : 30 000 fenêtres valides à graine fixe (verdicts équilibrés : 19 514 recoupements, 10 486 non-recoupements) sans
+  aucun écart avec `_windows_overlap` d'E3-A ; le sous-agent indépendant a obtenu 0 écart sur 35 000 fenêtres avec décalages
+  jusqu'à ±23:59. Le différentiel du fichier de tests (4 × 400 fenêtres au format `Z`) est plus petit ; les décalages sont couverts par
+  des tests d'invariance séparés. Il n'utilise que des fenêtres valides.
+- **Contrôle de mutation** (copies hors dépôt) : 18 mutants du jeu de la mission, 18 tués ; le sous-agent final a appliqué 26 mutants
+  distincts : 25 tués, 1 survivant (`isinstance` à la place de `type(...) is`), tué ensuite par un test ajouté.
+- **Revues indépendantes** : deux revues en lecture seule, **zéro BLOCKER, zéro MAJOR** dans les deux cas. Revue finale : trois MINOR de
+  qualité de tests (priorité de type non testée avec une sous-classe de `str` ; paramètre mort dans un test ; commentaire
+  contradictoire), tous corrigés (RED prouvé par le mutant, puis test ajouté). INFO non traités : pas de `__all__` (non exigé),
+  double validation de type dans `windows_overlap` (redondante, inoffensive), `=1.12.0` à ne pas commiter.
+- **Risques résiduels** : B1 ne détecte aucune source legacy inclusive (B3) ; le comportement fail-closed aux bornes `0001`/`9999` est
+  volontaire et testé, mais B3 devra décider quoi faire d'une source dont la fin inclusive est à `9999-12-31T23:59:59.999999Z` (la
+  traiter comme `UNRESOLVED`, jamais tronquer) ; le module expose les noms importés (`OverlapVerdict`, etc.) faute de `__all__` ; les
+  noms B1 ne figurent que dans le design (§44), pas dans l'ADR (précision ADR [R] possible avec B3).
+- **Statut de publication** : E3-B1 est implémenté et testé localement ; il n'est **pas publié**. B2 à B6 : NOT IMPLEMENTED.
+  `REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE. Aucun champion qualifié.
+
+**Dépendances inchangées** : B6 (publication des déclarations et attestations) dépend de la primitive par lien d'E3-C ; la lecture et la
+vérification de B6 n'en dépendent pas. Questions ouvertes non tranchées : Q-0, Q-2, Q-3, Q-4, Q-5.
+
+**Sept observations MINOR de la revue de publication (non corrigées : la mission de publication interdisait toute modification)**
+1. 23.29.5 dit « en `REAL` elle conditionne l'admission », plus affirmatif que la « cible provisoire (Q-5) » → précision ADR [R] avec
+   Q-5 (E3-J).
+2. Le §45 cite « les choix présentés dans le rapport de conception » → le §44.1 en est la trace durable ; aucune action.
+3. Le report cumulatif ne dit pas si la première déclaration d'une chaîne peut contenir des expositions **en plus** (⊇ ou égalité), ni
+   l'ordre canonique des reports et l'affectation de `<pos4>` ; les anciens identifiants ne sont pas conservés (traçabilité d'audit) →
+   précision ADR [R] avant **B6**.
+4. L'enveloppe persistée n'est pas entièrement énumérée (nom de la clé de version, projection des expositions imbriquées) ;
+   `_declaration_record` est privé à E3-A, donc E3-B devra en dupliquer la projection avec un test d'égalité avec
+   `compute_declaration_id` → **B6**.
+5. Rien n'impose que la publication d'une déclaration vise l'`inventory_id` courant, et « un A0 existe avant la première déclaration »
+   n'est vérifiable que par existence → **B5/B6**.
+6. Après l'`ADMISSION`, seul « le changement de chaîne terminale » est cité alors qu'ajouter une déclaration à la même chaîne
+   terminale change le sommet et annule l'exécution à l'étape 13 de 23.17 (implicite) → test **E3-J** et précision ADR [R].
+7. Le retour à un ancien `inventory_id` rend la campagne définitivement inutilisable (échec fermé, explicite) sans être qualifié
+   « coût de disponibilité accepté » → précision ADR [R], comme en 23.27.5.
+
+**Précautions inchangées** : trois modifications indexées préexistantes (`AGENTS.md`, ADR 0016, `docs/agents/skills-usage.md`, empreinte
+du diff indexé `8b78a333b37710b5987d1e535c8487e797984df193dc80362efd946ed9670e6f`) et le fichier non suivi `=1.12.0` ne font pas partie
+de cette série ; `app_corrupted_backup.py` n'est jamais modifié.
