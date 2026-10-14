@@ -3277,3 +3277,109 @@ vérification de B6 n'en dépendent pas. Questions ouvertes non tranchées : Q-0
 **Précautions inchangées** : trois modifications indexées préexistantes (`AGENTS.md`, ADR 0016, `docs/agents/skills-usage.md`, empreinte
 du diff indexé `8b78a333b37710b5987d1e535c8487e797984df193dc80362efd946ed9670e6f`) et le fichier non suivi `=1.12.0` ne font pas partie
 de cette série ; `app_corrupted_backup.py` n'est jamais modifié.
+
+## 47. `AF-V-07` — E3-B1 PUBLIÉ ; E3-B2 (scanner strict) IMPLÉMENTÉ + TESTÉ LOCALEMENT, NON PUBLIÉ (2026-10-14) — fait foi sur le §46 pour les statuts actuels
+
+Cette section **prévaut sur le §46** : ses mentions « non publié » pour E3-B1 sont **périmées** (le §46 reste l'historique).
+
+**Statuts au démarrage de la mission B2** :
+- E3-A = IMPLEMENTED + TESTED + PUBLISHED.
+- **E3-B1 = IMPLEMENTED + TESTED + PUBLISHED** : commit `74a2a1aad5e7a3e2b831cad57874d5648f082a7b` (parent `3b7dd07b255514bd61245160fa27ac0eb4b877ff`),
+  poussé en fast-forward sur `master`, 3 fichiers, +788/−1 ; GitHub confirme `master` = ce SHA. Mesure historique avant B2 : **4 256 PASS,
+  5 SKIP, 0 FAIL** (dont 142 tests B1) ; ce chiffre est une mesure d'avant B2, il sera remesuré.
+- **E3-B2 = LOCAL TDD IN PROGRESS au démarrage de la mission**, puis **IMPLEMENTED + TESTED LOCALLY, NON COMMITÉ, NON PUBLIÉ** (module
+  `gate_v_exposure_scan.py`, tests `tests/test_gate_v_exposure_scan.py`) : voir « Résultat de la mission B2 » ci-dessous.
+- E3-B3 à B6 = NOT IMPLEMENTED. `REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE. Aucun champion qualifié. `AF-V-07` = IN PROGRESS.
+- Les sept observations MINOR de la revue de l'ADR 23.29 (§46) restent suivies dans leurs tranches. Questions ouvertes : Q-0, Q-2, Q-3, Q-4, Q-5.
+
+**Périmètre de B2 (autorisation de l'utilisateur, 2026-10-14, local, ni commit ni push)** : parcours d'**audit** de racines fournies, contrôle
+de structure, lecture JSON stricte des artefacts autorisés par une table fermée fournie par l'appelant (B3), empreintes SHA-256 des octets
+bruts lus, métadonnées, double passe de listage (ADR 23.29.6). B2 n'interprète aucun événement, n'établit aucune fenêtre, ne construit aucun
+`ExposureFinding`, ne classe rien (FRESH, RETROSPECTIVE, UNDETERMINED), ne persiste aucun A0, ne lit aucune donnée de marché, n'utilise pas le
+registre. Distinction typée : une **défaillance de STRUCTURE** refuse le scan (exception) ; une **anomalie de SOURCE** dans une structure saine
+est une observation non résolue transmise à B3/B4, jamais une absence silencieuse.
+
+**Résultat de la mission B2 et de la revue finale (mesuré le 2026-10-14 sur la version définitive des octets)**
+- **Octets validés (SHA-256)** : `gate_v_exposure_scan.py` (1 010 lignes) `61113648e6d257ec8442c8d4d3d61988d5e3b42b0284d0e387c63506e5d3c237` ;
+  `tests/test_gate_v_exposure_scan.py` (2 039 lignes) `a6c7a46cfd4f762ad789b47cf216f6f3e0de473b81574299c5b055e06b9e2630`. Ils sont
+  identiques avant et après la campagne de régression finale.
+- **API publique (18 noms, aucun framework, aucun état global)** : `scan_audit_roots(roots, rules, limits, *, hooks=None) -> ExposureScan` ;
+  `parse_strict_json(raw, *, max_bytes, max_depth)` ; `AuditRoot(label, path, may_be_empty=False)` ; `SegmentPattern(regex)` ;
+  `SourceRule(segments, entry_class, expected_json=None, tag=None)` ; `ScanLimits` (9 plafonds, par mot-clé, aucune valeur par défaut ;
+  `max_name_length` ≤ 128) ; `ScanHooks(after_first_pass, after_file_read)` (outil de test) ; `ExposureScan(roots, observations, attempts_used,
+  bytes_read, rules_digest, hooks_used, limits)` ; `ScannedRoot(label, path, st_dev, st_ino, may_be_empty)` ; `ScanObservation` (13 champs dont
+  `content_hash`, `content_bytes`, `anomaly`, `rule_tag`, et la PROPRIÉTÉ `value`) ; enums `EntryClass`, `EntryKind`, `JsonKind`,
+  `SourceAnomaly` (14 membres), `StructuralFailure` (16 membres) ; exceptions `ExposureScanRefusal` (STRUCTURE, `.failure`) et `StrictJsonError`
+  (`.anomaly`) ; constante `EXPOSURE_TEMP_ORPHAN_PATTERN`.
+- **Contrats** : table fermée fournie par l'appelant (B3), profondeur fixe, segments littéraux ou `SegmentPattern`, jamais de `**`. Classes
+  `EXPOSING_JSON` et `INFORMATIVE_JSON` (lues strictement), `INERT_FILE`, `TEMP_ORPHAN_FILE` et `INERT_DIRECTORY` (jamais ouverts ni descendus),
+  `STRUCTURAL_DIRECTORY` (descendu). Une règle `TEMP_ORPHAN_FILE` doit se terminer par exactement `SegmentPattern(EXPOSURE_TEMP_ORPHAN_PATTERN)` ;
+  **aucun nom temporaire n'est jamais classé par une autre règle** (il reste `UNKNOWN_TEMP_FILE` ou `UNKNOWN_DIRECTORY`, jamais ouvert). Entrée hors
+  table : `UNKNOWN_FILE`, `UNKNOWN_DIRECTORY` ou `UNKNOWN_TEMP_FILE`. Défaillance de **STRUCTURE** = `ExposureScanRefusal` (racine absente, vide,
+  illisible, imbriquée ou en alias, lien, jonction, point d'analyse, fichier spécial, nom non portable ou réservé Windows, collision de casse,
+  plafond, table ambiguë, instabilité), jamais de résultat partiel. Anomalie de **SOURCE** = observation typée avec `content_hash` = SHA-256 des octets
+  bruts lus (`None` si non lu en entier). Double passe conforme à 23.29.6 (noms, `(st_ino, st_dev, size, mtime_ns)` et hash des fichiers lus ; inertes,
+  inconnus, orphelins et répertoires par le nom ; essais bornés ; contrôle d'identité et `octets lus == taille observée` avant et après chaque
+  lecture ; aucune promesse d'instantané atomique). B2 ne produit ni classification, ni `ExposureFinding`, ni A0.
+- **Intégrité de la preuve** : `ScanObservation` est immuable et conserve les octets exacts d'un JSON accepté (`content_bytes`) ; sa construction refuse
+  des octets qui contredisent `content_hash`, une taille qui contredit les octets, et tout état incohérent que le scan ne peut pas produire (entrée
+  hors table sans `UNKNOWN_*`, `KIND_MISMATCH` sans écart de nature, fichier de classe lue « propre » sans analyse, etc.). `value` n'est pas un champ :
+  c'est une copie fraîche relue par le lecteur strict à chaque accès, avec recalcul du hash ; la muter n'altère rien. `ExposureScan` épingle
+  `rules_digest` (SHA-256 canonique de la table, indépendant de l'ordre), `limits` et, par racine, `may_be_empty` ; `hooks_used` signale tout scan
+  accompagné de `ScanHooks` (aucune autorité de production : E3-J doit le refuser).
+- **Tests** : **503 PASS, 4 SKIP** (dédiés B2). E3-A + B1 + B2 : 990 PASS, 4 SKIP. **Suite complète : 4 759 PASS, 9 SKIP, 0 FAIL** (4 256 + 503),
+  804 s. Les 9 SKIP sont les 5 limitations Windows déjà connues et 4 nouvelles : 2 liens symboliques sans privilège, 1 FIFO POSIX, 1 test
+  `O_NONBLOCK` (constante absente sous Windows). Aucun SKIP n'a été converti en PASS. Les jonctions NTFS (racine, entrée, alias de racines) sont
+  réellement testées ; les liens symboliques, le FIFO et `O_NONBLOCK` ne le sont qu'au niveau unitaire ou pas du tout sous Windows.
+- **Contrôle de mutation** (copies hors dépôt) : **135 mutants, 134 tués**. Seul survivant : `nonblock_removed` (retrait de `O_NONBLOCK`), non
+  démontrable sous Windows. Les trois survivants de la mission précédente sont résolus : `read_loop_short` n'était PAS équivalent (le flux peut
+  dépasser la taille déclarée) et est tué par un test dédié ; `guard_early_cap_removed` était redondant et le code a été simplifié ;
+  `guard_backreference_zero_refused` est tué par un test (`\0` accepté).
+- **Revue finale (mission d'audit)** : deux axes indépendants (sécurité du système de fichiers ; validité scientifique et intégrité de la preuve),
+  puis relectures ciblées de chaque jeu de corrections. **Aucun BLOCKER ni MAJOR ne subsiste.** Défauts démontrés puis corrigés en TDD (RED constaté
+  avant chaque correctif) : `value` mutable (une valeur interprétée pouvait diverger du `content_hash`) ; règle `TEMP_ORPHAN_FILE` détournable pour
+  masquer un Claim ; nom temporaire masquable par une règle inerte ou lue ; scan avec hooks indiscernable d'un scan normal ; `ExposureScan` qui ne
+  pinnait ni la table ni les limites ; motifs de largeur nulle (`(?:\b){10000000}x` : 1,8 s par appariement indépendamment du nom) et répétitions
+  fixes énormes ; coût cubique à 3 éléments variables (0,63 s par appariement à n = 128, contre 0,024 s à 2 : plafond ramené à 2, soit O(n³)) ;
+  `max_name_length` sans plafond (désormais ≤ 128) ; lecture dont le flux dépasse la taille déclarée (désormais instabilité) ; `O_NONBLOCK` ajouté
+  pour qu'un FIFO substitué ne bloque jamais le scan sous POSIX.
+- **Borne de coût des motifs (démontrée, pas seulement fuzzée)** : un motif accepté n'a ni rétroréférence, ni assertion ou groupe de largeur nulle, ni
+  `{0}`, ni `{n}` > 128, ni groupe répété à contenu variable, et au plus 2 éléments variables (`+ * ?`, `{n,m}`, `|`) ; chaque itération consomme au
+  moins un caractère, donc au plus (n+1)² chemins de retour arrière × O(n) = O(n³) avec n ≤ 128. Pire cas construit mesuré : 0,024 s ; fuzz de
+  120 000 motifs (6 000 acceptés) : pire 0,8 ms. Les patterns à 3 éléments variables ou plus (par exemple `a*a*a*b`) sont refusés ; un motif
+  réaliste qui en exige davantage doit être éclaté en plusieurs règles.
+- **Audit de `INERT_DIRECTORY` et `INERT_FILE`** : un sous-arbre sous `INERT_DIRECTORY` n'est jamais énuméré (un motif trop large cache tout, y compris
+  des événements ou des Claims) ; B2 ne peut pas juger la largeur d'un motif. Garanties de B2 : l'entrée inerte est observée avec sa classe, son
+  `rule_tag` et l'empreinte `rules_digest` de la table appliquée ; un nom temporaire n'est jamais masqué. **PRÉCONDITIONS pour B3, B4 et E3-J
+  (à tester par B3)** : (1) la table doit être close : pour chaque règle `INERT_*`, un test énumère les noms attendus et vérifie qu'aucun nom
+  inconnu ou hostile n'est apparié ; `INERT_DIRECTORY` n'est admis que pour un sous-arbre déclaré par l'ADR comme ne pouvant contenir ni source
+  exposante ni nom inconnu, sinon `STRUCTURAL_DIRECTORY` plus `INERT_FILE` enfants énumérés ; (2) `INERT_DIRECTORY` et `UNKNOWN_DIRECTORY` sont
+  des sous-arbres NON énumérés : une observation sans anomalie ne prouve ni l'absence de source ni la complétude d'une racine, et une racine
+  vide ou entièrement inerte ne doit jamais donner « complet » ; (3) est non résolue toute observation avec `anomaly` non nulle ; seul un contenu
+  `value_parsed` est interprétable, à partir de `content_bytes`/`value` uniquement ; (4) une entrée requise absente n'est pas observée : B3 vérifie
+  lui-même sa présence ; (5) B3 et B5 épinglent `rules_digest`, `limits` et `may_be_empty` ; E3-J refuse `hooks_used` et recalcule le scan ;
+  (6) B3 n'accepte jamais une observation fournie par un appelant : seules celles que `scan_audit_roots` retourne font foi.
+- **Protection contre un verdict faussement FRESH** : B2 ne produit aucun verdict ; une anomalie, une entrée inconnue, un sous-arbre non énuméré ou un
+  scan instable ne se transforment jamais en absence de source ; le refus structurel ne rend aucun résultat. La classification reste à E3-A et à la
+  couche B3/B4 sous les préconditions ci-dessus.
+- **Risques résiduels et limites assumées** : (1) TOCTOU : pas d'équivalent de `O_NOFOLLOW` sous Windows ; un attaquant ayant le droit d'écriture sur la
+  racine peut, par un échange de répertoire intermédiaire rejoué à chaque passe, faire lire un fichier hors racine (protection contre l'accident, pas
+  contre un adversaire local, comme le dit §44.1) ; (2) les ancêtres d'une racine configurée sont une configuration de confiance (une racine isolée
+  sous une jonction est acceptée ; deux racines liées par un alias sont refusées par `realpath`) ; (3) liens durs non contrôlés (`st_nlink`) et flux
+  alternatifs NTFS ni listés ni hachés ; (4) un entier de plus de 4 300 chiffres est refusé comme `INVALID_JSON` (limite de l'interpréteur) ;
+  (5) résolution grossière de `mtime` (FAT, exFAT, réseau) non détectable ; modification restaurée à l'identique entre les passes ou après la seconde
+  passe non détectée ; (6) exceptions des `ScanHooks` propagées (usage de test) ; (7) risque ACCEPTÉ : des `ScanObservation` incohérentes restent
+  constructibles à la main avec `dataclasses.replace` et des types bruts (par exemple `str` à la place d'un enum) ; le scan n'en produit jamais, et la
+  précondition (6) ci-dessus l'interdit en aval ; (8) `ExposureScan` ne vérifie pas que les `root_label` des observations appartiennent à `roots` ;
+  (9) `bytes_read` ne compte que la première passe ; (10) placeholders de stockage en nuage (point d'analyse) refusés (prudence, pouvant bloquer en
+  exploitation) ; (11) non démontré sur cette machine : liens symboliques, FIFO, `O_NONBLOCK`, `O_NOFOLLOW`, POSIX, partages réseau.
+- **Notes pour B3 et B4** : B3 relie observation et règle par `rule_tag` ; B4 ne met dans aucun digest les champs `size`, `mtime_ns`, `st_ino`, `st_dev`
+  des répertoires, inertes et inconnus, ni `attempts_used` ; un répertoire de campagne dérivé situé sous une racine statique provoque `ROOT_OVERLAP`
+  s'il est aussi passé comme `AuditRoot` ; un nom non portable dans un répertoire descendu refuse tout le scan ; l'ADR ne précise ni la casse
+  hexadécimale de l'orphelin ni le nom du `.tmp` de publication de l'A0 (à trancher en B3 et B5).
+- **Statut** : E3-B2 est IMPLEMENTED + TESTED LOCALLY et n'est **pas publié** (un commit local n'est pas une publication ; son SHA n'est pas consigné
+  ici). E3-B3 à B6 : NOT IMPLEMENTED. `REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE. Aucun champion qualifié.
+
+**Précautions** : trois modifications indexées préexistantes (`AGENTS.md`, ADR 0016, `docs/agents/skills-usage.md`, empreinte du diff indexé
+`8b78a333b37710b5987d1e535c8487e797984df193dc80362efd946ed9670e6f`) et le fichier non suivi `=1.12.0` ne font pas partie de cette série ;
+`app_corrupted_backup.py` n'est jamais modifié.
