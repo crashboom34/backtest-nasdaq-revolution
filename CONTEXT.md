@@ -444,3 +444,31 @@ lors d'une prochaine session `/domain-modeling` — non détaillé ici pour évi
 définition non confirmée par une discussion avec l'utilisateur.
 Statut : **À confirmer** (existence du vocabulaire confirmée dans le code ; définition précise
 et frontières du concept à valider avec l'utilisateur).
+
+### Exposition du holdout (Gate V, ADR 0025)
+
+*Termes issus de l'addendum 23.30 de l'ADR 0025 (Q-6, Q-7, Q-8), intégré le 2026-10-17 ; voir `docs/adr/0025-gate-v-validation-policy-v1.md` §23.30.*
+
+**Fenêtre d'exécution** :
+Intervalle configuré où une stratégie peut ouvrir, gérer ou fermer des positions.
+_À ne pas confondre avec_ : la fenêtre accessible au calcul (warm-up et données chargées compris) ; ni avec l'**Exécution**, qui
+désigne le remplissage d'un ordre.
+Statut : **À confirmer** (règle validée par l'ADR 0025 §23.30 ; terme à confirmer comme vocabulaire du projet).
+
+**Fenêtre accessible au calcul** :
+Intervalle contenant toutes les données qu'un calcul pouvait lire, warm-up compris ; connu seulement par des bornes prouvées.
+_À ne pas confondre avec_ : la fenêtre d'exécution, ni avec le warm-up requis par une stratégie.
+Statut : **À confirmer** (règle validée par l'ADR 0025 §23.30 ; terme à confirmer comme vocabulaire du projet).
+
+**Exposition à W** :
+Fait que des données de la fenêtre `FINAL_HOLDOUT` d'un plan de split (notée `W` dans l'ADR 0025) étaient accessibles à un calcul, ou ont
+été déclarées consultées. Elle est établie, son absence est établie, ou son absence est non établie.
+_À ne pas confondre avec_ : la condition chronologique F2, qui décide de l'admission sans corriger la classe ; ni « absence non établie »
+avec « absence d'exposition ».
+Statut : **À confirmer** (règle validée par l'ADR 0025 §23.30 ; terme à confirmer comme vocabulaire du projet).
+
+**Identité d'un plan de split** :
+Couple identifiant du plan (`DatasetSplitPlan.split_plan_id`) + empreinte recalculée sur son contenu. Deux plans de même identifiant et
+d'empreintes différentes sont des plans différents.
+_À ne pas confondre avec_ : l'identifiant seul, non unique ; ni l'identifiant d'un snapshot ; ni le **Split train/test** de l'optimiseur.
+Statut : **À confirmer** (règle validée par l'ADR 0025 §23.30 ; terme à confirmer comme vocabulaire du projet).

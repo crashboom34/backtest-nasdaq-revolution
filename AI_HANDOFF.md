@@ -3383,3 +3383,426 @@ est une observation non résolue transmise à B3/B4, jamais une absence silencie
 **Précautions** : trois modifications indexées préexistantes (`AGENTS.md`, ADR 0016, `docs/agents/skills-usage.md`, empreinte du diff indexé
 `8b78a333b37710b5987d1e535c8487e797984df193dc80362efd946ed9670e6f`) et le fichier non suivi `=1.12.0` ne font pas partie de cette série ;
 `app_corrupted_backup.py` n'est jamais modifié.
+
+> **Note d'extrait (commit E3-B3).** Ce commit ne reprend du handoff que les §51 à §51.4 (E3-B3 et clôture normative de l'addendum 23.30). La numérotation est conservée ; les §48 à §50 (M0/M1, PARAM-1, CAT-1) et la matrice `docs/roadmap/V2_V3_V4_COMMON_PROGRAM.md` relèvent de travaux locaux non publiés, absents de ce commit. Les mesures citées ci-dessous qui mentionnent CAT-1, PARAM-1 ou la suite complète ont été prises sur le poste de travail contenant ces fichiers locaux. Les mentions « non commité » décrivent l'état à la rédaction : un document ne peut pas citer le commit qui l'introduit. Le « Périmètre proposé » du §51.4 est la proposition ; le commit réalisé en retient la partie B3 (handoff réduit aux §51 à §51.4, matrice commune exclue).
+
+## 51. `AF-V-07` — E3-B3 (interprètes de sources) IMPLÉMENTÉ + TESTÉ LOCALEMENT, NON COMMITÉ, NON PUBLIÉ  (2026-10-16) — fait foi sur le §47 pour E3-B3
+
+**État vérifié au démarrage (2026-10-16)** : `HEAD` = `origin/master` local = distant (`git ls-remote`) = `91b406ebafd3fb996a8d527c38f6b2235cccdbff`,
+branche `master`. Index : les 3 fichiers préexistants de l'utilisateur seulement (aucun `git add` par cette mission). E3-B1 publié, E3-B2 local
+non publié (§47), E3-B4 à B6 : NOT IMPLEMENTED. `REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE. Aucun champion qualifié.
+
+**Préconditions B3 (§47) — source normative constatée** : `AI_HANDOFF.md` §47 l. 3353-3361 et docstring de `gate_v_exposure_scan.ExposureScan`.
+Aucune n'était manquante : elles sont **à tester par B3** et le sont (voir ci-dessous). Q-2 (fenêtres WF/MC/PS) reste ouverte et n'est pas tranchée.
+
+**Livré** — `gate_v_exposure_interpreters.py` (nouveau) et `tests/test_gate_v_exposure_interpreters.py` (nouveau). Module frère de B1 et non
+extension de `gate_v_exposure_sources.py` : les tests AST publiés de B1 y interdisent tout nouvel import et tout état global (écart de
+placement par rapport au §44.1, responsabilité inchangée). Imports : B2, B1, E3-A, E1 seulement (test AST : ni `dataset_split`, ni E2, ni moteur).
+- API : `interpret_audit_roots(roots: tuple[LayoutRoot], limits, *, holdout_window_start_utc, holdout_window_end_utc, hooks=None)
+  -> SourceInterpretation` ; `source_rules(layout)` ; `RootLayout` (`RESULTS`, `CAMPAIGN_DIR`, `SPLIT_PLAN_DIR`) ; `LayoutRoot` ;
+  `InterpretedScan` ; `PlanIndexEntry` ; `IncompleteReason`. `SourceInterpretation` : `findings` (`ExposureFinding` d'E3-A, triés),
+  `plans` (informatifs), `scans` épinglés, `complete` + `incomplete_reasons` (invariant vérifié à la construction), propriété `hooks_used`.
+- B3 possède ses tables fermées et appelle lui-même `scan_audit_roots` : aucune observation n'est reçue d'un appelant (n° 6) ; chaque scan
+  épingle `rules_digest`, `limits`, `may_be_empty`, `hooks_used` (n° 5). Labels et chemins contrôlés entre dispositions (B2 ne le fait qu'à
+  l'intérieur d'un appel) : imbriquées → `ROOT_OVERLAP`, labels en double → `DUPLICATE_ROOT_LABEL`, lecteurs différents → disjoints.
+- Tables : `RESULTS` fermée sur la disposition réelle constatée (`job_*` et ses 14 fichiers inertes, `dataset_splits/<id>/split_plan.json` +
+  `holdout_access/*.json`, `validations/<id>/validation_run.json` + `research_run.json`, `experiments/*.json`, `datasets/<id>/{raw,normalized}/…`
+  jamais ouverts) ; `CAMPAIGN_DIR` = `plan.json` (ancre : `campaign_id` = nom du dossier) + `final_holdout_access_claim.json` ;
+  `SPLIT_PLAN_DIR` = `split_plan.json` + `holdout_access/` (« répertoires d'événements des plans », 23.11). `INERT_FILE` = noms littéraux
+  énumérés et testés contre des noms hostiles ; aucune règle `INERT_DIRECTORY` (n° 1).
+- Rattachement par `rule_tag` : toute anomalie de B2 → finding `UNRESOLVED` du type de la règle (ou `UNKNOWN_SOURCE`), cause typée,
+  table exhaustive (n° 3) ; entrée hors table → `UNKNOWN_SOURCE`/`UNKNOWN_SOURCE_TYPE` ; ancre absente (`config_used.json`,
+  `split_plan.json`, `validation_run.json`, `plan.json`) → raison `MISSING_REQUIRED` + finding `UNRESOLVED` (`INVALID_SCHEMA`) pour une
+  source exposante (n° 4) ; racine vide ou inerte → `ROOT_WITHOUT_SOURCE`, jamais complète (n° 2). Contenus lus uniquement via `value`.
+- Interprètes : Claim (parseur strict E1 ; fenêtre FINAL_HOLDOUT du plan `(split_plan_id, split_plan_fingerprint)`, introuvable →
+  `WINDOW_UNKNOWN`, 23.27.2 ; deux copies = deux findings, test obligatoire) ; événement legacy (plan par identifiant, copies concordantes et
+  même snapshot, sinon `PLAN_UNRESOLVED` ; champ additionnel → `INVALID_SCHEMA` jusqu'à E3-G) ; job (`opt_start_date`/`opt_end_date` :
+  nulles → `WINDOW_UNKNOWN`, date civile ou naïve → `TIMEZONE_UNKNOWN`, sinon `[start, end+1µs)`, fin à `9999-12-31T23:59:59.999999Z` →
+  `WINDOW_UNKNOWN` sans troncature) ; `ValidationRun` `oos` legacy inclusive `[start, end+1µs)`, WF/MC/PS → `WINDOW_UNKNOWN` (Q-2),
+  type inconnu → `UNKNOWN_SCHEMA_VERSION`, clé inconnue → `INVALID_SCHEMA`. Plans : informatifs, indexés, empreinte = formule de
+  `dataset_split_plan_fingerprint` (égalité testée) ; plan illisible ou invalide → `INFORMATIVE_UNRESOLVED`, jamais un finding (23.27.1).
+
+**Vérification (mesurée le 2026-10-16)** :
+- `pytest tests/test_gate_v_exposure_interpreters.py` : **68 passed**. RED constaté avant chaque tranche (module absent, stub, attribut
+  absent, `ValueError: Paths don't have the same drive`).
+- Régression Gate V + CAT-1 + PARAM-1 (`test_gate_v_exposure_{interpreters,scan,sources}`, `test_gate_v_final_holdout_{protocol,claim,
+  claim_acquisition}`, `test_knowledge_catalog`, `test_parameter_space`, `test_exploration_campaign`) : **1 442 passed, 8 skipped** (avant les
+  correctifs de revue ; liens symboliques, FIFO et `O_NONBLOCK` non démontrables sous Windows, déjà connus).
+- Suite complète (`pytest -q`, 2026-10-16, 706 s, après tous les correctifs) : **5 007 passed, 9 skipped, 1 failed** (code 1) (poste de travail, tests locaux non publiés compris) ; seul échec `tests/test_autopilot_hooks.py::test_hook_blocks_a_force_push` (antériorité démontrée ci-dessous). La suite N'EST PAS verte.
+- Mutation (copie hors dépôt, restauration vérifiée par SHA-256) : 22 mutants, 20 tués, 2 survivants = trous de tests (zone `train` invalide,
+  plan illisible) comblés ; après correctifs de revue : **25/25 tués**.
+- `/code-review` deux axes (sous-agents) : 0 BLOCKER. Corrigés : `commonpath` non typé entre lecteurs Windows (démontré), invariant
+  `complete`/raisons, disposition `SPLIT_PLAN_DIR` manquante (23.11), codes de raison en enum, comparaison sur datetimes, calcul en double.
+- SHA-256 : `gate_v_exposure_interpreters.py` `abb1e6233f34211e4de56cd9b41cdb922f5e88408271ecf93b90ebf5c2ee98ae` ; tests
+  `168b5ff5bd0d0cce925cf85825200659a2d4cbd0a24e56888874232116d7e78e`.
+
+**`test_hook_blocks_a_force_push` — antériorité DÉMONTRÉE** : extrait propre de `91b406e` (`git archive`, dossier isolé, aucun changement de
+branche ni d'index), même interpréteur `.venv` (Python 3.13.7, encodage local `cp1252`) : **1 failed, 5 passed**, même assertion
+(« BLOQUÃ‰ »). Cause : `subprocess.run(text=True)` décode la sortie UTF-8 du hook avec l'encodage local ; avec `PYTHONUTF8=1` (diagnostic
+seulement) : 6 passed. Le §47 rapportait 0 échec le 2026-10-14 : l'échec dépend de l'environnement d'exécution. Ni le test ni le hook ne sont
+modifiés ; aucun vrai push.
+
+**Limites et décisions à valider (aucune règle normative modifiée)** — *les deux premiers points sont remplacés par le §51.1* :
+- Choix conservateurs à confirmer [R] : jobs à bornes ISO aware convertis `+1µs` (le §44.1 dit « job ISO-T restent exacts » tout en classant
+  les exécutions legacy comme inclusives) ; Claim résolu par `(split_plan_id, fingerprint)` (§44.1), plus strict que 23.27.2 (« plan désigné
+  par `split_plan_id` ») ; ancre absente → cause `INVALID_SCHEMA` ; ancre de campagne défaillante = incomplétude, le Claim reste `RESOLVED`
+  (une exposition n'est jamais masquée).
+- `ValidationRun` non OOS émises en `VALIDATION_RUN_OOS` (E3-A n'a pas de type non OOS ; en ajouter un modifierait E3-A publié).
+- Non interprétés, donc INCONNUS (`UNDETERMINED`) : tout dossier de campagne réel au-delà de `plan.json` + Claim (manifeste, engagement,
+  validations, walk-forward, `exposure/`) ; `V1_CAMPAIGN_OOS`, `READ_INTENT`, `CONSUMPTION`, registre (E3-D), déclarations (B6). Le sous-arbre
+  `exposure/` dépend des noms de B5 (`.tmp` de l'A0 à trancher en B5 ; casse de l'orphelin fixée en minuscules par la constante de B2).
+- Non tranché : concordance croisée des fenêtres (évidence OOS ↔ plan, `validation_run_id` d'un événement ↔ run) ; résolution des jobs
+  sans bornes par `data_manifest.json` (couverture du snapshot, pas période exécutée).
+- `complete` est un FAIT de B3 ; B4 l'assemble sans l'élargir. Sur le corpus réel, 33 jobs sur 43 restent `WINDOW_UNKNOWN` et le `*.tmp`
+  d'un job rend l'inventaire `UNDETERMINED`.
+
+**Statut** : E3-B3 = **IMPLEMENTED + TESTED LOCALLY**, non commité, non publié. B4 à B6 : NOT IMPLEMENTED ; B6 garde sa dépendance à E3-C.
+`REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE. Aucun champion qualifié. Aucun accès `FINAL_HOLDOUT`.
+
+**Prochaine tranche unique** : **E3-B4** (assemblage de l'`ExposureInventory` depuis `SourceInterpretation` + `TrialAccounting` et provenance
+des compteurs, 23.27.5/23.29.5), après revue et publication éventuelle de B2 et B3 sur autorisation explicite. *(Remplacée par le §51.1.)*
+
+### 51.1 E3-B3 — réconciliation contractuelle (2026-10-16) : IMPLÉMENTÉ + REVU + TESTÉ LOCALEMENT, NON COMMITÉ, NON PUBLIÉ — remplace les deux premiers points « Limites » du §51
+
+**État Git vérifié** : `HEAD` = `origin/master` = `91b406e` (B2 publié) ; index inchangé (3 fichiers préexistants de l'utilisateur) ;
+`gate_v_exposure_interpreters.py` (SHA-256 `664f4d12…aedc89`) et `tests/test_gate_v_exposure_interpreters.py` (`0b1d5c56…e0e38c6c`) non
+suivis. CAT-1 n'est ni refait ni dupliqué ; aucun fichier `gate_v_*` publié, E3-A, B1, B2 ni l'ADR n'est modifié.
+
+**1. Bornes ISO des jobs — contrat retenu : `[start, end)` EXACT, sans `+1µs`.**
+- Clause : §44.1 « sources d'exécution legacy (inclusives par défaut dans le moteur …) converties en `[start, end+1µs)` … Claim, plan,
+  registre et job ISO-« T » restent exacts ». Il n'y a pas de contradiction : le job ISO-T n'est pas une source inclusive.
+- Preuve dans le code : `optimizer.resolve_execution_window` garde `time_paris >= opt_start_date` et, pour une `opt_end_date` contenant « T »,
+  `time_paris < ts_end` (borne EXCLUSIVE exacte, AF-V-02 Slice 2). La forme civile `YYYY-MM-DD` reste inclusive jusqu'à 23:59:59 Paris
+  implicite, donc `TIMEZONE_UNKNOWN`. `normalize_utc_instant` exige un « T » littéral : toute borne aware acceptée suit la branche exclusive.
+  `max_rows` ne fait que raccourcir la fenêtre réelle.
+- Le `+1µs` reste réservé aux sources qui passent par le défaut inclusif du moteur (`ValidationRun` OOS legacy : `validation_oos.py` appelle
+  `run_backtest_fn` sans `end_boundary`).
+- Tests de frontière ajoutés :
+  - fin = `ws`, puis `ws + 1µs` ;
+  - `ws` exprimé en `+02:00` ;
+  - début = `we`, puis `we − 1µs` ;
+  - borne maximale exacte ;
+  - fenêtre vide `[t, t)` → `INVALID_SCHEMA` ;
+  - bornes mixtes civil/ISO-T → `TIMEZONE_UNKNOWN`.
+
+  Le cas « fin inclusive maximale jamais tronquée » est déplacé sur l'OOS.
+
+**2. Rattachement des Claims — règle retenue : plan d'identifiant ET d'empreinte égaux à ceux du Claim.**
+
+Textes applicables, par ordre d'autorité :
+1. ADR 0025 23.27.2 (normatif, publié) : « la fenêtre du finding `FINAL_HOLDOUT_CLAIM` est celle de la fenêtre `FINAL_HOLDOUT` du plan
+   désigné par `split_plan_id` du Claim, fournie par l'appelant (E3-B) ; si elle est introuvable … `WINDOW_UNKNOWN` ».
+2. ADR 0025 Décision 22 / E1 : le Claim épingle `split_plan_fingerprint`, couvert par `claim_id`. Le contrôle d'exposition est « lié à …
+   `split_plan_id` et `split_plan_fingerprint` » (exigence 2 de la section « Contrôle d'exposition du holdout »).
+3. Design §44.1, verrouillé au §45 et compatible avec l'ADR sans la modifier : « Plans indexés par `(split_plan_id, fingerprint)` ».
+4. Le code.
+
+Lecture retenue :
+- `split_plan_id` est choisi par l'appelant (`dataset_split`), donc non unique entre copies. Le plan « désigné » par un Claim est celui
+  qu'il épingle par identifiant + empreinte. Une copie de même identifiant mais d'empreinte différente n'est pas ce plan, et ne compte comme
+  exposition que si elle a servi (23.3).
+- Les événements legacy ne portent pas d'empreinte : pour eux, toutes les copies de même identifiant doivent concorder, sinon
+  `PLAN_UNRESOLVED`. Cette asymétrie est voulue.
+- Test de caractérisation ajouté : `test_claim_is_bound_to_its_fingerprinted_plan_not_to_a_same_id_copy`.
+- Contradiction résiduelle : la lettre de 23.27.2 ne cite que `split_plan_id`. Le choix à trancher est **Q-5 [R]** : ajouter une note de renvoi
+  à 23.27.2 (« désigné par `split_plan_id` et `split_plan_fingerprint` »), ou exiger, plus strictement, que toutes les copies de même
+  identifiant concordent aussi pour le Claim. L'ADR n'est pas modifiée.
+
+**3. Validations non OOS — jamais présentées comme OOS.**
+- Seul `validation_type == "oos"` établi par le contenu donne `VALIDATION_RUN_OOS`. Tous les autres cas donnent `UNKNOWN_SOURCE` : c'est le
+  mécanisme de « capacité inconnue » d'E3-A, `UNRESOLVED`, jamais `RESOLVED`.
+  - Walk-forward, Monte-Carlo, stabilité → `WINDOW_UNKNOWN` (Q-2).
+  - Type inconnu → `UNKNOWN_SCHEMA_VERSION`.
+  - Type absent → `INVALID_SCHEMA`.
+  - `validation_run.json` illisible ou ancre absente → `UNKNOWN_SOURCE`, car la nature n'est pas établie.
+- E3-A les traite comme une `VALIDATION_RUN_OOS` non résolue : `unresolved_ids`, F1 `UNVERIFIED`, F2 via `capability_unknown`. Le résultat est
+  `UNDETERMINED`, jamais `FRESH`.
+- Leur nature réelle est consignée dans `SourceInterpretation.non_oos_validations` (`NonOosValidationRun(source_id, validation_type,
+  content_hash)`, informatif, champ obligatoire). B4 ne doit l'utiliser ni pour la comptabilité ni pour l'absorption.
+- Limite du modèle publié : E3-A n'a aucun `SourceKind` pour ces exécutions. Il n'y a ni nouveau type ni modification d'E3-A.
+
+**Revue `/code-review`** (deux sous-agents, axes Standards et Spec) : aucune violation de standard documenté.
+- Corrigé :
+  - idiome `try/except ValueError` du module ;
+  - `_EXPOSING_KINDS` renommé `_FALLBACK_KINDS`, car il contient le type de repli quand le contenu n'est pas interprété ;
+  - valeur par défaut silencieuse `()` retirée de `non_oos_validations` ;
+  - un seul appel à `_validation_type` ;
+  - docstring précisant que le job ISO-T n'est pas une source legacy inclusive.
+- Non corrigé (jugements mineurs) : duplication de forme entre les deux convertisseurs de fenêtre, imports `E402` déjà présents.
+
+**Vérification**
+- B3 : 82 passed (68 + 14).
+- Mutation ciblée sur copie hors dépôt : 10/10 tués, deux fois (avant et après les correctifs de revue).
+- Gate V + CAT-1 + PARAM-1 (`tests/test_gate_v_*.py`, catalogue, `parameter_space`, `exploration_campaign`) : **3 355 passed, 8 skipped**, avant les
+  correctifs de revue, qui ne touchent que B3, relancé ensuite.
+- ruff et pyflakes absents du `.venv` (non installés) ; aucun secret dans les fichiers modifiés.
+- Suite complète NON relancée : seul B3 change, et B3 n'a aucun importeur hors de ses tests. Le dernier résultat reste celui du §51 :
+  5 007 passed, 9 skipped, **1 failed**. L'échec résiduel `test_hook_blocks_a_force_push` (encodage `cp1252`) a une antériorité démontrée au §51 ;
+  il n'est ni réinvestigué ni masqué.
+
+**Point normatif ouvert découvert par la revue Spec — Q-6 [N], antérieur à cette tranche** :
+- La fenêtre d'un job ou d'un OOS est sa fenêtre d'EXÉCUTION. Or le moteur et l'optimiseur laissent l'historique antérieur à `start` visible
+  pour `prepare()` (23.15, `context_df`), et 23.3 définit `E` comme l'union des fenêtres de « toute exécution ou lecture ».
+- Démontré : un job `[2026-04-01, 2026-06-01)` avec `W = [2026-01-01, 2026-04-01)` est `RESOLVED`/`NO_OVERLAP`, alors que son warmup a pu lire W.
+- Conséquence : la classe peut sortir `FRESH_UNEXPOSED_DECLARED`. L'admission reste impossible, car F2 est `NOT_MET` (fin > `ws`). Il n'y a donc
+  aucun faux accès, mais il y a une classe fausse.
+- Choix à trancher : (a) fenêtre de LECTURE `[début des données inconnu, end)`, ce qui impose de rendre `UNRESOLVED` tout job se terminant
+  après `ws` tant que le début du contexte est inconnu ; (b) borne de début sentinelle ; (c) accepter l'écart en le documentant (classe
+  déclarative, F2 bloquant). Aucune règle n'est inventée : le comportement est inchangé.
+
+**Points normatifs encore ouverts** :
+- Q-2 : fenêtres WF/MC/PS.
+- Q-5 [R] : lettre de 23.27.2.
+- Q-6 [N] : lectures de contexte avant `start`.
+- Concordance croisée OOS ↔ plan et `validation_run_id` d'un événement ↔ run, non tranchée.
+- Q-3 et Q-4 inchangés.
+- Conséquence assumée de Q-2 : un seul `ValidationRun` WF/MC/PS dans une racine rend `FRESH` inatteignable.
+
+**Statut** : E3-B3 = **IMPLEMENTED + REVIEWED + TESTED LOCALLY** ; **NON COMMITÉ, NON PUBLIÉ**. B2 est publié (`91b406e`). B4 n'est pas démarré.
+`REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE. Aucun accès `FINAL_HOLDOUT`.
+**Prochaine tranche unique** : décision de l'utilisateur sur Q-6 (et Q-5), puis revue et publication de B3 sur autorisation explicite ; E3-B4 ensuite.
+
+### 51.2 Clôture normative de Q-6 et Q-7 : PROPOSITION PRÊTE POUR DÉCISION, non intégrée (2026-10-16) — INTÉGRÉE depuis : voir le §51.4
+
+**Erratum de numérotation.** Le §51.1 a nommé « Q-5 » la question du rattachement des Claims ; ce numéro désignait déjà la règle `REAL`
+« tous les compteurs `OBSERVED` » (§46-§47, 23.29.5). Le rattachement devient **Q-7** ; Q-5 garde son sens d'origine. Le texte du §51.1
+n'est pas réécrit.
+
+**Livrable** (fichier remplacé depuis par `docs/adr/0025-addendum-23.30-decision-record.md` ; texte d'autorité : ADR 0025 §23.30, voir le §51.4) : `docs/adr/0025-addendum-23.30-PROPOSED.md`, version 2 après la revue
+`/code-review` (axes Standards et Spec). Il est **non normatif** : ni l'ADR 0025, ni `CONTEXT.md`, ni aucun code, contrat ou moteur n'est
+modifié.
+- Q-6 : quatre notions séparées (fenêtre d'exécution, fenêtre accessible au calcul, exposition à `W`, F2) et **principe d'asymétrie des
+  preuves** :
+  - une preuve qui établit une exposition est toujours recevable ;
+  - une preuve qui l'exclut doit être liée au run et couvrir toutes les données chargées, durée de barre comprise. Aujourd'hui seul
+    `DataReceipt.engine_input` remplit ces conditions.
+- Conséquence : le `data_manifest.json` d'un job (écrit en fin de job, sans lien au run) ne peut qu'établir une exposition. Aucun job
+  historique ne peut être `NO_OVERLAP`.
+- Q-7 : identité d'un plan = identifiant + empreinte recalculée (précision [R] de 23.27.2). Deux contrôles [N] optionnels et une
+  variante stricte restent à trancher.
+- Le livrable contient aussi le diff documentaire proposé (23.30, deux notes de renvoi, glossaire « À confirmer »), les règles de
+  compatibilité (E3-A inchangé, constante `EXPOSURE_INVENTORY_SEMANTICS_VERSION` comprise ; B3 → v2 non publié ; compteurs B4
+  inchangés) et une table de 23 cas.
+
+**Revue** : la v1 a été corrigée sur les points suivants.
+- Constat principal : le manifeste n'est pas lié au run, et c'était un chemin vers un faux `FRESH`.
+- Durée de barre ignorée.
+- Fait inexact : `git_commit` est relevé en fin de job.
+- Cas manquants : job après `W` sans manifeste ; `X ∩ W ≠ ∅` sans barre dans `W`.
+- Statut de glossaire.
+- Hiérarchie [R]/[N].
+- Collision Q-5.
+
+**Statut** :
+- E3-B3 = IMPLEMENTED + REVIEWED + TESTED LOCALLY, non commité, non publié. B4 non démarré.
+- Q-6 et Q-7 = PROPOSÉES, en attente de décision.
+- `REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE.
+
+**Prochaine tranche unique** : décision de l'utilisateur sur la proposition (§7 du livrable), puis intégration ADR + glossaire, puis TDD
+de B3 v2, avant toute publication de B3. *(Remplacée par le §51.3.)*
+
+### 51.3 Q-6 et Q-7 approuvées ; B3 v2 IMPLÉMENTÉ + REVU + TESTÉ LOCALEMENT ; intégration à l'ADR suspendue par Q-8 (2026-10-16/17) — suspension levée au §51.4
+
+**Décisions de l'utilisateur** (2026-10-16, citées dans le journal `docs/adr/0025-addendum-23.30-decision-record.md` §2) :
+- Q-6 : asymétrie des preuves ; un manifeste historique non lié au run n'exclut rien ; une preuve positive ne neutralise aucune anomalie ;
+  une exclusion exige une preuve liée au run, durée des barres comprise ; `DataReceipt` non assimilé d'office.
+- Q-7 : identité = `split_plan_id` + empreinte recalculée ; ni snapshot physique, ni identifiant = nom de répertoire, ni concordance des
+  plans partageant seulement un identifiant imposés.
+
+**Relecture avant intégration** : la v3, puis la v4, ont été relues par `/code-review` (axes Standards et Spec). Corrigés :
+- le renvoi vers `DataReceipt` : son contenu est défini en 23.5, non en 23.13 ;
+- l'analyse de `DataReceipt.engine_input`, qui ne porte ni la première heure chargée de `S0`, ni la dernière de `S_H`, ni la durée des
+  barres : il n'est pas une preuve d'exclusion en l'état ;
+- l'attribution du manifeste (P2), vérifiée par l'`instrument` du manifeste ;
+- le vocabulaire : « établie » (23.28 R1) plutôt que « démontrée » ;
+- la table de hiérarchie : uniquement des clauses de l'ADR ;
+- le statut de glossaire, « À confirmer ».
+
+**Contradiction normative nouvelle : Q-8 [N]** (traitée au §51.4). Sans preuve d'exclusion, toute source d'exécution
+dont le recouvrement avec `W` n'est pas établi est `UNRESOLVED` et entre dans l'ensemble pertinent de 23.27.1.
+- Aucune `RESERVATION` n'est publiable tant qu'une racine d'audit contient un tel job (23.10 exige un ensemble pertinent vide).
+- Tout nouveau job créé pendant une campagne change `static_sources_digest`, donc refus terminal.
+- Mesuré sur E3-A publié, avec un inventaire synthétique : ajouter un job sans rapport avec `W` change `static_sources_digest` et
+  `inventory_id`, et l'ensemble pertinent passe de 1 à 2 sources.
+- Ce n'est pas un faux FRESH. E3-A est inchangé ; seule la phrase de 23.10 « un ajout sans rapport avec `W` ne la modifie pas » devient
+  vraie uniquement pour une absence de recouvrement établie.
+- Options (a) fail-closed, recommandée, (b) preuve d'exclusion future pour les nouveaux jobs, (c) modifier E3-A : à trancher par
+  l'utilisateur. **L'ADR 0025 n'est pas modifiée tant que Q-8 n'est pas tranchée.**
+
+**Intégré** : seuls les quatre termes de glossaire, au statut « À confirmer », ajoutés à la fin de `CONTEXT.md`. Vos modifications
+préexistantes (42 lignes) et les fins de ligne CRLF sont intactes. Erratum de numérotation : le rattachement des Claims est **Q-7** ;
+Q-5 reste la règle `REAL` « tous les compteurs `OBSERVED` ».
+
+**B3 v2** (`gate_v_exposure_interpreters.py`, `B3_SEMANTICS_VERSION = "gate_v_exposure_interpreters_v2"`, aucun fichier publié modifié)
+- Fenêtre d'exécution `X` : un job ISO-T aware vaut `[opt_start_date, opt_end_date)`. `X` ÉTABLIT une exposition (P1) mais n'en exclut
+  aucune ; le `+1µs` reste réservé à la validation OOS legacy.
+- P2 : `data_manifest.json` passe d'`INERT_FILE` à `INFORMATIVE_JSON` strict (18 clés, types exacts).
+  - Attribution : `instrument` égal au nom de base du `data_file`, séparateurs `\\` et `/`, lecteur relatif `C:fichier` compris.
+  - Couverture : `[period_start, period_end + 1µs)`.
+  - Les trois champs nuls ensemble forment le chemin legacy, sans anomalie ; une nullité mixte, un `content_hash` mal formé, des bornes
+    naïves ou inversées, une fin non représentable ou un manifeste non attribuable sont une anomalie de la preuve, donc inventaire
+    incomplet.
+- Aucun `NO_OVERLAP` pour une source d'exécution : établie (`OVERLAPS`) ou `UNRESOLVED`, absence non établie.
+- Schéma invalide (bornes inversées, y compris civiles ou naïves) : `UNRESOLVED`, jamais neutralisé par une preuve.
+- Relevé informatif `SourceInterpretation.exposure_evidence` (`ExposureEvidence`, `EvidenceStatus`). Il couvre les étapes 2 à 4 ; ni
+  finding, ni compteur, ni `inventory_id`. `ABSENCE_ESTABLISHED` n'est jamais produit. `non_oos_validations` est conservé.
+- Q-7 : désignation d'un plan par un Claim = identifiant + empreinte recalculée. Un plan valide du même identifiant lu sans empreinte
+  correspondante est une incohérence explicite (finding `WINDOW_UNKNOWN` et raison `PLAN_FINGERPRINT_MISMATCH`). Un événement legacy
+  désigne les plans valides de son identifiant et de son propre `dataset_snapshot_id` ; des fenêtres divergentes donnent
+  `PLAN_UNRESOLVED`. Le nom de répertoire n'a pas valeur d'identité.
+- Contrat interne uniforme : tous les interprètes rendent un `_Outcome` ; `_Context` ne porte plus de sortie mutable ;
+  `ExposureEvidence` valide ses faits.
+
+**Compatibilité vérifiée** : E3-A inchangé (aucun fichier `gate_v_*` publié modifié) ; `compute_exposure_inventory_id` couvre statut,
+verdict, fenêtres et cause de chaque finding, donc les verdicts de B3 v2 se reflètent dans `inventory_id` ; `ExposureInventory` ne porte
+aucune version des règles d'E3-B, que B5 persistera hors `inventory_id` ; les compteurs de B4 (23.27.5) ne dépendent pas des fenêtres.
+B4 ne doit pas utiliser `non_oos_validations` ni `exposure_evidence` pour compter. Le blocage à exposer est Q-8, ci-dessus : aucun contrat
+publié n'a été modifié.
+
+**Mesures réelles**
+- TDD : RED démontré pour chaque tranche (rendu `RESOLVED` par la v1, attribut absent, comportements Q-7 absents, nullité mixte,
+  bornes civiles inversées, lecteur relatif), puis GREEN.
+- Tests B3 : **129 passed** (82 avant cette tranche).
+- Mutation ciblée sur copie hors dépôt : **18 mutants sur 18 tués** (14 sur 14 à la première passe, avant les correctifs de revue).
+- Régressions `tests/test_gate_v_*.py`, catalogue, `parameter_space`, `exploration_campaign` : **3 402 passed, 8 skipped, code 0**, sur
+  le code définitif.
+- Mesure sur le corpus réel `results/` (métadonnées seules, fenêtre `W` synthétique, aucune donnée de marché ouverte) : 43 jobs ;
+  **42 `UNRESOLVED` (absence non établie) et 1 `OVERLAPS` par couverture chargée** ; aucun `NO_OVERLAP` d'exécution ; inventaire incomplet
+  (1 raison `UNKNOWN_ENTRY`, le `*.tmp` déjà connu).
+- `ruff` et `pyflakes` absents du `.venv` (non installés) ; aucun secret dans les fichiers modifiés.
+- Suite complète NON relancée (seul B3 change, sans importeur hors de ses tests). Dernier résultat connu : 5 007 passed, 9 skipped,
+  **1 failed** (§51) ; l'échec résiduel `test_hook_blocks_a_force_push` (encodage `cp1252`, antériorité démontrée au §51) n'est pas
+  réinvestigué.
+
+**Revue finale `/code-review` de B3 v2** (deux sous-agents). Corrigés : nullité mixte du manifeste, `content_hash` mal formé, bornes
+civiles inversées neutralisées par P2, lecteur relatif, retours mixtes des interprètes, `_Context` muté, `ExposureEvidence` non
+validé, doublon de test, nom de test trompeur. Obligations de test 4, 12, 13 et 14 ajoutées. Limites consignées (addendum §4) :
+- B3 ne contrôle pas l'identifiant portable ni la chronologie des zones d'un plan (écart hérité, `dataset_split` interdit par la
+  liste blanche d'imports) ;
+- un `data_file` fait d'espaces n'est pas attribuable (conservateur).
+
+**Questions restant ouvertes** : Q-8 [N] (tranchée au §51.4) ; Q-0, Q-2 (fenêtres WF/MC/PS), Q-3, Q-4, Q-5 (règle `REAL`
+« tous `OBSERVED` ») ; amendement de 23.5 pour une preuve d'exclusion par `DataReceipt` ; preuve d'exclusion liée au run pour les futurs
+jobs ; concordance croisée OOS ↔ plan et événement ↔ validation ; fuseau de la colonne `time` hors `S0` ; F3 et la durée de la dernière
+barre.
+
+**Statut** : B3 v2 = **IMPLÉMENTÉ + REVU + TESTÉ LOCALEMENT**, **non commité, non publié**. B2 est publié (`91b406e`). B4 non démarré. À la date
+du §51.3, l'ADR 0025 et E3-A étaient inchangés (l'ADR est intégrée au §51.4). `REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE.
+**Prochaine tranche unique** : décision de l'utilisateur sur Q-8 ; ensuite intégration de l'addendum 23.30 à l'ADR 0025 (texte validé du
+fichier de proposition), puis revue et publication de B3 sur autorisation explicite ; E3-B4 ensuite. *(Remplacée par le §51.4.)*
+
+### 51.4 Q-8 option (a) approuvée ; addendum 23.30 INTÉGRÉ à l'ADR 0025 ; B3 v2 CLOS (2026-10-17) — fait foi sur les §51.1 à §51.3
+
+**Autorisation** (2026-10-17) : « J'approuve Q-8 option (a). L'option (b) reste une évolution future distincte ; aucune modification d'E3-A
+n'est autorisée dans cette tranche. » Intégration normative et dossier de validation de B3 v2 ; aucun commit ni push.
+
+**État Git vérifié** : `HEAD` = `origin/master` = `91b406e` (B2 publié), divergence 0/0 ; index = vos 3 fichiers préexistants (`AGENTS.md`,
+ADR 0016, `docs/agents/skills-usage.md`, 303 insertions) ; `git diff` vide sur `gate_v_final_holdout_protocol.py`, `gate_v_exposure_scan.py`,
+`gate_v_exposure_sources.py`, `gate_v_final_holdout_claim.py`, `dataset_split.py`, `validation_run.py`, `job_store.py`, `optimizer.py`,
+`engine.py` : E3-A, B1, B2 et les moteurs sont inchangés.
+
+**Intégration dans l'ADR 0025** (fichier suivi, `git diff` : 302+ lignes ajoutées, 4 lignes prolongées, aucun texte normatif supprimé,
+vérifié par comparaison des lignes) :
+- section **23.30** (6 sous-sections) : 23.30.1 fenêtre accessible au calcul (Q-6), 23.30.2 identité d'un plan de split (Q-7), 23.30.3
+  conséquences sur 23.10 et stabilisation de l'inventaire (Q-8), 23.30.4 compatibilité et versions, 23.30.5 limites connues, 23.30.6
+  obligations de test ;
+- cinq notes de renvoi : 23.3, 23.10 (Définitions), 23.11 (étape 1), 23.27.2 (Absorption), 23.27.3 (contenu de l'A0) ; une puce datée en
+  fin de « Conséquences » ;
+- **phrase de 23.10 réconciliée** : « un ajout sans rapport avec `W` ne la modifie pas » vaut pour une absence de rapport **établie** ; une
+  simple absence de recouvrement de la fenêtre d'exécution ne suffit pas ;
+- documenté, comme demandé : réservation impossible tant qu'une source pertinente demeure non résolue ; changement du digest épinglé et
+  refus de 23.10 (étape 8) et de 23.17 (étape 13), **exécutés par E3-D et E3-J (non implémentés)** à partir des digests qu'E3-A calcule ;
+  exposition établie distincte de l'absence non établie ; aucune preuve d'exclusion recevable pour les jobs aujourd'hui, donc `FRESH`
+  inatteignable tant qu'un job reste sous une racine auditée ;
+- **règle opérationnelle de stabilisation** ([N]) et interdiction de tout contournement (déplacement, suppression, omission, réduction
+  des racines auditées) : texte d'autorité en 23.30.3, non répété ici. Limite assumée de l'ADR : aucune détection avant la
+  `RESERVATION` ;
+- vocabulaire : l'ADR emploie « établie » (23.28 R1) ; la décision de l'utilisateur dit « démontrée » (citée dans le journal).
+
+**Un seul texte d'autorité.** `docs/adr/0025-addendum-23.30-PROPOSED.md` est remplacé par le journal non normatif
+`docs/adr/0025-addendum-23.30-decision-record.md` (chronologie, décisions citées, options écartées, revues ; aucune règle répétée).
+Erratum de numérotation conservé : le rattachement des Claims est **Q-7** ; Q-5 reste la règle `REAL` « tous les compteurs `OBSERVED` ».
+Glossaire : 4 termes en fin de `CONTEXT.md` (statut « À confirmer » annoté « règle validée par l'ADR ») ; vos modifications préexistantes
+et le CRLF sont intacts (comparaison d'octets du préfixe).
+
+**Correspondance texte ↔ code ↔ tests** (obligations de 23.30.6 → tests de B3) :
+1 → `test_job_after_w_whose_warmup_reads_w_is_established_by_loaded_coverage` ; 2 → `…without_manifest_has_absence_not_established` ;
+3 → `test_attributable_manifest_disjoint_from_w_never_excludes` ; 4 → `test_execution_window_establishes_but_never_excludes`,
+`…takes_priority_over_loaded_coverage` ; 5 → `test_civil_bounds_with_covering_manifest…`, `test_undeterminable_job_windows…` ;
+6, 7 → `test_a_proof_never_neutralises_an_anomaly_of_the_source` ; 8 → `test_invalid_or_unattributable_manifest…`,
+`test_legacy_manifest_without_bounds…`, `test_mixed_nullity_or_malformed_content_hash…` ; 9 → `test_loaded_coverage_boundaries_are_bar_instants` ;
+10 → cas `period_end` maximal de `test_invalid_or_unattributable_manifest…` ; 11 → `test_legacy_oos_validation_window…`,
+`…outside_w_has_absence_not_established` ; 12 → `test_evidence_register_has_one_state_per_execution_source…`,
+`test_evidence_entry_refuses_inconsistent_facts` ; 13 → `test_claim_is_bound_to_its_fingerprinted_plan…` ;
+14 → `test_two_copies_of_one_plan_identity_with_different_bytes…` ; 15 → `test_incompatible_fingerprint_claim…` ;
+16 → `test_claim_without_any_plan_of_its_identifier…` ; 17 → `test_plan_stored_under_another_directory_name…` ;
+18 → `test_event_whose_plan_is_missing_ambiguous…`, `test_event_designates_by_identifier_and_its_own_snapshot…` ;
+19 → `test_unresolved_execution_source_is_in_the_relevant_set`, `test_adding_removing_or_modifying_a_relevant_source…`,
+`test_changing_the_audited_roots_changes_the_inventory_id`, `test_established_exposure_and_unestablished_absence…` ;
+20 → `test_plan_validity_beyond_shape_is_dataset_split_responsibility…` (4 cas) ; 21 → à la charge d'E3-D/E3-J (hors B3).
+Dérivation de l'instrument : `test_instrument_derivation_matches_the_windows_writer…` (12 cas, oracle `ntpath`).
+
+**Limite de validation des plans (identifiant portable, chronologie des zones)** :
+- *Composant responsable* : `dataset_split` (`build_dataset_split_plan` à l'écriture, `load_dataset_split_plan(strict=True)` à la lecture,
+  utilisé par E2 avant tout Claim, `gate_v_final_holdout_claim_acquisition.py` l.208). B3 ne contrôle que la forme et les zones
+  `{start, end}`, et s'interdit d'importer `dataset_split` (liste blanche vérifiée par test).
+- *Pas de faux `FRESH`* : (1) le plan épinglé par un Claim créé par E2 a été chargé en `strict=True` et B3 en recalcule l'empreinte
+  avec la formule canonique (vérifié par le test : empreinte identique à `dataset_split_plan_fingerprint`) ; (2) ni l'identifiant ni
+  l'ordre des zones n'entrent dans un verdict de B3, qui ne dépend que de la fenêtre `FINAL_HOLDOUT` déclarée (4 cas testés, recoupant `W`
+  ou non) ; (3) un plan non indexable donne `PLAN_UNRESOLVED`. La convention « les écrivains construisent par `build_*` » n'est PAS une
+  garantie (`save_dataset_split_plan` n'invalide rien) et l'argument n'en dépend pas. Résidu : un plan altéré à la main de façon cohérente
+  reste indétecté, avec ou sans ces contrôles (limite générale de 23.3). **Aucun blocage.** B3 est aussi plus strict que le chargeur
+  (sept clés exactes) : conservateur.
+
+**Revue finale** (`/code-review`, deux sous-agents, axes Standards et Spec) sur le diff documentaire, les tests ajoutés et la docstring.
+Aucun BLOCKER. Corrigés : références à un §51.4 inexistant (écrit ici) ; deux lignes de la table de hiérarchie sans note de renvoi ;
+« démontrée » contre « établie » ; ligne 23.10 reclassée [N] ; affirmation fausse « les refus sont prévus par E3-A » (ils relèvent d'E3-D et
+d'E3-J) ; `static_sources_digest` ne couvre que `{source_id, content_hash}` (ajouter un manifeste change `inventory_id`, pas ce digest) ;
+« majorant sûr pour établir » (P1 est conservatrice : `max_rows` peut raccourcir l'exécution) ; « seul `save_*` écrit après `build_*` »
+(convention, non garantie) ; interdiction trop large de créer des « campagnes » d'autres campagnes ; test de retrait tautologique ; terme
+de glossaire aligné sur l'ADR (« Exposition à W »).
+
+**Mesures courantes de cette tranche** (code inchangé hors docstring de tête ; tests : +20 par rapport à la mesure précédente)
+- Tests de B3 : **149 passed** (129 avant cette tranche).
+- B3 + E3-A + B1 + B2 (`test_gate_v_exposure_interpreters`, `test_gate_v_final_holdout_protocol`, `test_gate_v_exposure_sources`,
+  `test_gate_v_exposure_scan`) : **1 139 passed, 4 skipped**.
+- Mutation des nouveaux tests (copie hors dépôt) : **5 mutants sur 5 tués** (verdict d'absence non établie, fenêtre déclarée du plan,
+  formule d'empreinte, extension de l'instrument, lecteur relatif).
+- TDD : RED non applicable aux tests de caractérisation (comportement d'E3-A inchangé, déjà implémenté) ; leur sensibilité est prouvée par la
+  mutation ci-dessus.
+- Aucun secret dans les fichiers modifiés ; `ruff` et `pyflakes` non installés dans le `.venv`.
+
+**Résultats HÉRITÉS (non rejoués dans cette tranche, code inchangé)** : mutation de B3 v2, **18 mutants sur 18 tués** (§51.3) ;
+régressions Gate V + CAT-1 + PARAM-1 : **3 402 passed, 8 skipped** (§51.3) ; suite complète : **5 007 passed, 9 skipped, 1 failed** (§51,
+ancienne, antérieure à B3 v2 ; **elle n'est pas un résultat de cette tranche**). L'échec résiduel `test_hook_blocks_a_force_push`
+(encodage `cp1252` ; antériorité démontrée au §51 sur une extraction propre de `91b406e`) est conservé tel quel, sans nouvelle
+investigation.
+
+**Interprétations à valider** [R] : (i) un événement legacy désigne les plans de son identifiant ET de son propre `dataset_snapshot_id` ;
+des fenêtres divergentes donnent `PLAN_UNRESOLVED` (ce n'est pas une concordance exigée entre plans partageant seulement un identifiant) ;
+(ii) l'incohérence explicite d'un Claim n'existe que si un plan valide du même identifiant est lu ; (iii) P1 retient l'exposition
+configurée dans le sens qui durcit.
+
+**Périmètre proposé pour le futur commit B3 (rien n'est indexé)**
+- Code et tests de B3, **sans dépendance locale non publiée** : `gate_v_exposure_interpreters.py` et `tests/test_gate_v_exposure_interpreters.py`
+  (nouveaux). Leurs imports (`gate_v_exposure_scan`, `gate_v_exposure_sources`, `gate_v_final_holdout_claim`,
+  `gate_v_final_holdout_protocol`, `dataset_split`, `validation_run`) sont tous déjà suivis à `91b406e`.
+- Contrat associé (même commit ou commit précédent) : `docs/adr/0025-gate-v-validation-policy-v1.md` (modifié) et
+  `docs/adr/0025-addendum-23.30-decision-record.md` (nouveau) ; `CONTEXT.md` **seulement son second hunk** (4 termes, `git add -p`) :
+  le premier hunk (`ParameterSpace`, `KnowledgeSource`, `Reference`, `Disponibilité d'exécution`, `ExplorationCampaign`) relève de
+  PARAM-1/CAT-1.
+- Documentation partagée, à votre choix : `AI_HANDOFF.md` (un seul hunk couvrant §48 à §51.4 : M1, PARAM-1, CAT-1 et B3) et
+  `docs/roadmap/V2_V3_V4_COMMON_PROGRAM.md` (nouveau, matrice de tout le programme).
+- **Hors périmètre** : CAT-1 (`knowledge_catalog.py`, `knowledge/`, `tests/test_knowledge_catalog.py`, schéma `contracts/knowledge/`,
+  ADR 0027), PARAM-1 (`parameter_space.py`, `exploration_campaign.py` et leurs tests), M1 (`api/`, `services/`, `frontend/`,
+  `contracts/http/`, ADR 0026, spec UX, tests API), `requirements-api.txt`, le fichier parasite `=1.12.0`, et vos 3 fichiers indexés.
+- Publication de B3 : sur votre autorisation explicite, après le commit ; E3-B4 ne démarre pas avant.
+
+**Questions restant ouvertes** : Q-0, Q-2 (fenêtres walk-forward / Monte-Carlo / stabilité), Q-3, Q-4, Q-5 (règle `REAL` « tous
+`OBSERVED` ») ; amendement de 23.5 pour qu'un `DataReceipt` puisse servir de preuve d'exclusion ; preuve d'exclusion liée à l'exécution pour
+les **nouveaux** jobs (option (b), évolution future distincte) ; concordance croisée OOS ↔ plan et événement ↔ validation ; fuseau de la
+colonne `time` hors du snapshot de recherche ; durée de la dernière barre dans F3 ; E3-D/E3-J : vérification de la réservation et
+épinglage de la configuration des racines.
+
+**Statut** : B3 v2 = **IMPLÉMENTÉ + TESTÉ + REVU**, **non commité, non publié**. B2 est publié (`91b406e`). B4 non démarré. E3-A inchangé.
+`REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE.

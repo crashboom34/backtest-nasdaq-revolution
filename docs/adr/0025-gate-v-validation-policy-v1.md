@@ -1857,6 +1857,11 @@ interviennent dans le test de recouvrement de 23.10, pas dans `E`. Un plan de sp
 comme exposition que s'il a servi (événement, `ValidationRun`, job) ou s'il est porté par une `CONSUMPTION` d'une
 autre campagne ; un plan jamais utilisé est inventorié mais n'est pas une exposition. *(Complété par 23.27.1 et
 23.27.2 : exception des enregistrements attendus de la campagne courante à son étage.)*
+*(Précisé par 23.30.1 : l'exposition d'une exécution porte sur sa fenêtre accessible au calcul, warm-up et données chargées
+compris, et non sur sa seule fenêtre d'exécution. Une preuve qui établit une exposition est recevable si elle est attribuable à la
+source auditée et satisfait les contrôles applicables ; une preuve qui l'exclut doit être liée à l'exécution auditée et couvrir
+toutes les données accessibles au calcul, durée des barres comprise. F2 reste une condition d'admission, jamais une correction de
+la classe. La désignation du plan d'un événement `HoldoutAccessEvent` est précisée par 23.30.2.)*
 `t_sel` est l'instant de la dernière décision de sélection ou de modification de stratégie informée par des données.
 **Il est déclaré par l'humain** à l'engagement (23.4), puis éventuellement repoussé à une date plus tardive par
 une déclaration ultérieure (23.11) : le `t_sel` effectif est le **maximum** entre celui de l'engagement et ceux des
@@ -2234,7 +2239,10 @@ cet ensemble est vide. `static_sources_digest` = SHA-256 de la liste canonique t
 (identifiant canonique et `content_hash` de chaque élément) : c'est donc une constante tant qu'aucune exposition ni
 aucun rival n'apparaît, et un ajout sans rapport avec `W` ne la modifie pas. `projection de recouvrement` = hash de la
 liste des réservations et admissions d'autres campagnes qui recoupent `W` (ou illisibles). *(La phrase « Pour une
-campagne `FRESH_UNEXPOSED_DECLARED`, cet ensemble est vide » est remplacée par 23.27.1.)*
+campagne `FRESH_UNEXPOSED_DECLARED`, cet ensemble est vide » est remplacée par 23.27.1.)* *(Précisé par 23.30.3 : « sans rapport avec `W` » signifie une absence de rapport
+**établie** selon 23.30.1, et une simple absence de recouvrement de la fenêtre d'exécution ne l'établit pas. Une source d'exécution
+dont l'absence de rapport n'est pas établie reste dans l'ensemble pertinent : la condition « ensemble pertinent vide » d'une
+`RESERVATION` n'est alors pas remplie, et sa modification après la réservation entraîne les refus de l'étape 8 de la publication.)*
 
 **Granularité globale.** Aucun artefact ne porte d'instrument vérifié (le plan, la pré-enregistration, le
 `ResearchRun` et le Claim n'ont pas de champ instrument ; seul `dataset_snapshot_id` existe). L'exclusivité porte donc
@@ -2358,7 +2366,9 @@ Séquence non circulaire. Chaque artefact est créé en exclusif et durable ; `_
    répertoire d'audit **configuré** manquant, lui, refuse. *(L'exclusion « par dossier de la campagne courante » est
 remplacée par 23.27.2 : absorption par `campaign_id` et par étage vérifié, doublons et enregistrements inattendus en
 échec fermé. Les « campagnes référencées par la chaîne du registre » ne sont pas des racines d'audit configurées :
-ce sont des sources dérivées, exclues de `scanned_roots` (23.27.3).)*
+ce sont des sources dérivées, exclues de `scanned_roots` (23.27.3).)* *(Complété par 23.30.3 : l'inventaire ne peut être contourné ni par déplacement, suppression ou
+omission d'une source pertinente, ni par réduction des racines auditées ; la stabilisation de l'inventaire pendant une campagne y est
+précisée.)*
 2. **Déclarations D1..Dn** : nominatives, versionnées, en slots denses, chacune liée à l'inventaire et à la précédente.
    Elles ne peuvent que durcir (une déclaration d'exposition passe la classe vers `RETROSPECTIVE_EXPOSED` ou
    `UNDETERMINED`), jamais assouplir une classe automatique. Une déclaration peut aussi repousser `t_sel` à une date
@@ -2805,7 +2815,9 @@ d'origine ne sont pas réécrites (traçabilité) : une note de renvoi les signa
   Le Claim E1 ne porte aucune fenêtre propre : la fenêtre du finding `FINAL_HOLDOUT_CLAIM` est celle de la fenêtre
   `FINAL_HOLDOUT` du plan désigné par `split_plan_id` du Claim, fournie par l'appelant (E3-B) ; si elle est introuvable,
   le finding est `UNRESOLVED` (cause `WINDOW_UNKNOWN`) et la classe est `UNDETERMINED`, jamais `FRESH` (sous réserve
-  de R1 : une exposition établie par ailleurs l'emporte).
+  de R1 : une exposition établie par ailleurs l'emporte). *(Précisé par 23.30.2 : le plan « désigné » est celui dont l'identifiant ET
+l'empreinte recalculée égalent ceux du Claim ; si un plan valide du même identifiant est lu sans que son empreinte corresponde, la
+revendication est une incohérence explicite.)*
 - **Échec fermé.** Un enregistrement propre non absorbé (doublon, fenêtre différente, type inattendu) ou un
   enregistrement attendu absent (noté `missing:<TYPE>`) n'est **jamais** masqué : s'il est exposant (`CONSUMPTION`,
   Claim, `ReadIntent`), c'est une **exposition établie** (`RETROSPECTIVE_EXPOSED`, par échec fermé et quel que soit
@@ -2852,7 +2864,8 @@ Trois identités distinctes, aucune ne remplace l'autre :
   compteurs.
 - `inventory_content_hash` : hash du contenu **intégral persisté** du A0 (E3-B), `created_at` inclus. Le A0 persisté
   contient `inventory_id`, `inventory_content_digest`, `trial_accounting`, le contexte propre
-  (`campaign_id` courant et étage) et `created_at`.
+  (`campaign_id` courant et étage) et `created_at`. *(Complété par 23.30.1 : il contient aussi le relevé des preuves d'exposition,
+  informatif, hors `inventory_id`.)*
 
 L'**attestation** épingle obligatoirement `inventory_content_hash` (donc le contenu complet) **et** `inventory_id`.
 **Avant l'admission** (étapes 8 à 11 de 23.17), E3-J recharge le A0 persisté (son `content_hash` doit égaler celui
@@ -3311,6 +3324,286 @@ d'octets ; anciens chemins refusés ; provenance des compteurs (jamais un zéro 
 passes). Un test vérifie qu'aucune API d'E3-B ne remet un `DeclarationSet` hors du chargeur de lignée ; côté E3-J (23.27.7), un test
 vérifie que ce chargeur est la seule source de `DeclarationSet`.
 
+### 23.30 — Addendum E3-B (2026-10-17) : fenêtre accessible au calcul (Q-6), identité d'un plan de split (Q-7) et conséquences sur 23.10 (Q-8)
+
+**Statut.** Amendement normatif ciblé, validé par l'utilisateur les 2026-10-16 (Q-6, Q-7) et 2026-10-17 (Q-8, option (a)), issu de la
+revue de B3 (`AI_HANDOFF.md` §51.1 à §51.4). La trace des décisions et de la revue est `docs/adr/0025-addendum-23.30-decision-record.md`,
+non normatif.
+
+- E3-A (publié, commit `7f30d0752465b755e8c08460e8ffb4ac13ff1d47`) est **inchangé** : API, énumérations (`UnresolvedCause` à 7
+  valeurs suffit), identités, formules, `EXPOSURE_INVENTORY_SEMANTICS_VERSION` et docstrings. Cet addendum n'autorise aucune
+  modification d'E3-A.
+- **Non-rétroactivité** : aucun fichier historique n'est réécrit, complété ni créé après coup. Seuls les verdicts recalculés sur ces
+  fichiers peuvent changer, puisque l'A0 est recalculé (23.11 étape 6).
+- **Numérotation** : Q-6 est la fenêtre accessible au calcul, Q-7 l'identité d'un plan de split (nommée « Q-5 » par erreur au §51.1 du
+  handoff) et Q-8 les conséquences sur 23.10. Q-5 reste la règle `REAL` « tous les compteurs `OBSERVED` » (23.29.5).
+- Les moteurs sont inchangés. `REAL` reste désactivé et non qualifié, `GATE V` non passée.
+
+**Hiérarchie.** En cas de divergence entre 23.30 et une clause listée ci-dessous, **23.30 prévaut**. Les clauses d'origine ne sont pas
+réécrites : une note de renvoi les signale. **[R]** = clarification rédactionnelle, **[N]** = changement réellement normatif.
+
+| Clause d'origine | Traitement | Nature |
+|---|---|---|
+| 23.3, définition de `E` (« fenêtres de toute exécution ou lecture ») | précisée par 23.30.1 : fenêtre accessible au calcul, asymétrie des preuves | [N] |
+| 23.3, plan de split « ayant servi » par un événement | précisée par 23.30.2 : désignation d'un plan par un événement legacy | [N] |
+| 23.10, « Définitions » (« un ajout sans rapport avec `W` ne la modifie pas ») | précisée par 23.30.3 : absence de rapport établie | [N] |
+| 23.10, publication d'une `RESERVATION` (« ensemble pertinent vide ») | complétée par 23.30.3 : jamais remplie tant qu'une source pertinente demeure non résolue ; stabilisation de l'inventaire | [N] |
+| 23.11, étape 1, racines d'audit | complétée par 23.30.3 : aucun contournement de l'inventaire | [N] |
+| 23.27.2, « plan désigné par `split_plan_id` du Claim » | précisée par 23.30.2 : identifiant + empreinte recalculée | [N] |
+| 23.27.3, contenu persisté de l'A0 | complété par 23.30.1 : relevé des preuves d'exposition, informatif, hors `inventory_id` | [N] |
+
+#### 23.30.1 — Fenêtre accessible au calcul (Q-6)
+
+**Quatre notions distinctes ; aucune n'est transformée en une autre.**
+
+- **Fenêtre d'exécution `X`** : fenêtre d'exécution *configurée*, c'est-à-dire les instants où la stratégie peut ouvrir, gérer ou
+  fermer des positions.
+  - Job à bornes ISO-8601 aware : `[opt_start_date, opt_end_date)`, convertie en instants UTC (`optimizer.resolve_execution_window` :
+    début inclusif, fin exclusive quand elle contient « T »). Une borne civile `YYYY-MM-DD` ou naïve ne peut pas être placée en UTC
+    (`TIMEZONE_UNKNOWN`).
+  - `ValidationRun` OOS legacy : `[start, end + 1µs)`, le moteur étant inclusif par défaut.
+  - L'exécution réelle peut être plus courte, par exemple tronquée par `max_rows`. `X` est la fenêtre configurée : P1 retient donc
+    l'exposition configurée, dans le sens qui durcit, sans prétendre que des données de `W` aient été effectivement lues.
+- **Fenêtre accessible au calcul `A`** : intervalle UTC demi-ouvert contenant toutes les données que le calcul (chargeur, optimiseur,
+  moteur, stratégie, warm-up compris) pouvait lire. On n'en connaît que des bornes prouvées.
+  - Le moteur laisse tout l'historique antérieur à `start` visible pour `prepare()` (23.15).
+  - Un job charge l'intégralité de son `data_file`.
+  - `X` ne borne donc pas `A`.
+- **Exposition à `W`** : fait de classification (23.28, R1 à R3) : des données de `W` étaient accessibles au calcul, ou ont été
+  déclarées consultées (23.11 étape 2). Trois états distincts :
+  - **établie** : une preuve d'établissement recevable existe ;
+  - **absence établie** : une preuve d'exclusion recevable existe ;
+  - **absence non établie** : aucune des deux. Ce n'est jamais une absence d'exposition.
+- **Condition F2** : condition chronologique d'admission (`ws ≥ max(fin de E, t_sel)`, `t_sel ≤ t_anchor`). Elle ne corrige jamais la
+  classe : une classe erronée reste erronée même si F2 refuse l'admission.
+
+**Asymétrie des preuves** (même principe que les déclarations, qui ne peuvent que durcir, 23.11 étape 2).
+
+- Une **preuve d'établissement** est recevable si elle est attribuable à la source auditée et satisfait les contrôles applicables
+  (lecture stricte, schéma exact, cohérence avec la source). Elle **ne neutralise aucune anomalie**.
+- Une **preuve d'exclusion** n'est recevable que si elle est **liée à l'exécution auditée** (le run qui a produit la source) et borne
+  toutes les données accessibles au calcul (données chargées, troncature comprise), **durée des barres comprise**.
+
+**Preuves d'établissement reconnues.**
+
+- **(P1)** `X ∩ W ≠ ∅`.
+- **(P2)** La couverture chargée d'un job, lue dans le `data_manifest.json` du **même** dossier de job.
+  - Lecture stricte : les 18 champs de `BacktestManifest`, types exacts (`resample_options` est un objet).
+  - `period_start`, `period_end` et `content_hash` sont soit tous nuls (chemin legacy : `write_data_manifest` les met à `None`
+    ensemble), soit tous non nuls. Une nullité mixte est une anomalie de la preuve.
+  - S'ils sont non nuls : les deux bornes sont des instants aware avec `period_start ≤ period_end`, `period_end + 1µs` est
+    représentable, et `content_hash` est un SHA-256 hexadécimal minuscule de 64 caractères.
+  - **Attribution** : le manifeste est attribuable au job si `config_used.json` porte un `data_file` texte non vide dont le nom de base,
+    extension retirée au dernier point (règle de `os.path.splitext`), égale l'`instrument` du manifeste. Le nom de base se calcule avec
+    les séparateurs `\` et `/` et sans préfixe de lecteur relatif (`C:fichier`), quel que soit le système de l'auditeur. C'est la
+    dérivation de `job_store.write_data_manifest` sur la même configuration.
+  - Couverture établie : `[period_start, period_end + 1µs)`, c'est-à-dire les instants d'ouverture des barres chargées. Aucune durée
+    de barre n'est ajoutée : on ne revendique que ce qui est établi.
+  - Un manifeste dont les trois champs sont nuls n'apporte pas de P2 et n'est pas une anomalie. Tout autre défaut est une anomalie de
+    la preuve : manifeste illisible, schéma inexact, nullité mixte, `content_hash` mal formé, bornes naïves ou inversées, fin non
+    représentable, `data_file` absent ou `instrument` différent. Il n'y a alors pas de P2, et l'inventaire est **incomplet**
+    (`complete = False`, donc R2 → `UNDETERMINED`).
+
+**Preuves d'exclusion reconnues : aucune à ce jour.**
+
+- Un manifeste de job n'est lié à aucun run : il ne porte ni identifiant de job, ni chemin, ni hash croisé, et il est écrit en fin de
+  job, en best-effort.
+- `DataReceipt.engine_input` (contenu défini en 23.5, lecture en 23.13 et 23.14) est lié à l'exécution par ses hashs. Il porte la
+  dernière heure de `S0`, la première heure de `S_H`, les première et dernière heures **transmises** et la borne de troncature `end`.
+  Il ne porte ni la première heure chargée de `S0`, ni la dernière heure chargée de `S_H` (lignes parsées puis tronquées), ni la durée
+  des barres. Tel que spécifié, il **n'est pas** une preuve d'exclusion. En faire une exigerait un amendement de 23.5, qui reste une
+  question ouverte.
+
+**Verdict d'une source d'exécution** (job, `ValidationRun` OOS), dans cet ordre :
+
+1. La source a une anomalie, ou un schéma invalide (bornes inversées, vides ou de type invalide, y compris deux bornes civiles ou deux
+   bornes naïves dont la fin précède le début) → `UNRESOLVED` avec la cause que lui donne déjà E3-B (`UNREADABLE`, `INVALID_SCHEMA`,
+   …). Aucune preuve ne la neutralise.
+2. P1 ou P2 recevable → `RESOLVED`, `OVERLAPS`, **exposition établie**. Fenêtre portée : `X` pour P1, sinon la couverture P2.
+3. Preuve d'exclusion recevable et `A ∩ W = ∅` → `RESOLVED`, `NO_OVERLAP`, **absence établie**. Aucune preuve de ce type n'existe à ce
+   jour.
+4. Sinon → `UNRESOLVED`, **absence non établie**, jamais `FRESH`. Cause : `TIMEZONE_UNKNOWN` si une borne d'exécution est civile ou
+   naïve, sinon `WINDOW_UNKNOWN`.
+
+Chaque fenêtre portée satisfait la règle de cohérence verdict/fenêtre d'E3-A.
+
+**Relevé des preuves d'exposition.** E3-B consigne, pour chaque source d'exécution qui atteint les étapes 2 à 4, son état
+(`ESTABLISHED_BY_EXECUTION_WINDOW`, `ESTABLISHED_BY_LOADED_COVERAGE`, `ABSENCE_ESTABLISHED`, `ABSENCE_NOT_ESTABLISHED`) et, le cas
+échéant, le `source_id` et le `content_hash` du manifeste utilisé. Une source arrêtée à l'étape 1 n'y figure pas : son finding porte
+déjà son anomalie. Ce relevé est informatif : ce n'est pas un finding, il ne sert pas à compter, et il n'entre pas dans `inventory_id`.
+B5 le persiste dans l'A0 (23.11 étape 1), hors identité.
+
+Un accès du calcul hors de son chemin de données (stratégie lisant un autre fichier, notebook, consultation humaine) n'est borné par
+aucun artefact. C'est la limite posée par 23.3, couverte seulement par les déclarations.
+
+#### 23.30.2 — Identité d'un plan de split (Q-7)
+
+- **Identité** : `split_plan_id` + empreinte **recalculée** par l'auditeur avec `dataset_split_plan_fingerprint` (contrat existant),
+  sur le contenu lu. Une empreinte n'est jamais lue dans le plan ni crue sur parole.
+- **Contenu vérifiable** : le plan désigné doit être présent dans une racine d'audit, lu strictement et valide, et son empreinte
+  recalculée (portée de cette validité : 23.30.5). Aucune copie ni aucun snapshot physique supplémentaire n'est exigé : le contenu
+  audité suffit.
+- **Plan désigné par un Claim** : plan dont l'identifiant et l'empreinte recalculée égalent `split_plan_id` et
+  `split_plan_fingerprint` du Claim. Sans plan correspondant, le finding est `UNRESOLVED`, `WINDOW_UNKNOWN` (23.27.2).
+- **Plans distincts partageant un identifiant** (empreintes différentes) : ce sont des plans différents, et aucune concordance n'est
+  exigée entre eux. Ceux qui ne sont pas désignés restent informatifs (23.27.1) et ne comptent comme exposition que s'ils ont servi
+  (23.3).
+- **Copies de même identité** (identifiant et empreinte égaux) : leur contenu canonique est identique, une collision SHA-256 étant hors
+  modèle. Elles sont cohérentes même si leurs octets diffèrent.
+- **Revendication d'empreinte incompatible** : un Claim dont l'empreinte ne correspond à aucun plan valide lu, alors qu'au moins un plan
+  valide du même identifiant est lu, est une **incohérence explicite**. Le finding est `WINDOW_UNKNOWN` **et** l'inventaire est
+  incomplet.
+  - Sans plan valide lu de cet identifiant, seule la non-résolution s'applique.
+  - Une copie illisible ou invalide rend déjà l'inventaire incomplet par elle-même.
+- **Rangement** : `split_plan_slug` est une convention de rangement. L'égalité entre identifiant et nom de répertoire n'est pas imposée
+  et n'a pas valeur d'identité.
+- **Événements legacy** (sans empreinte) : l'événement désigne les plans valides dont l'identifiant **et** le `dataset_snapshot_id`
+  égalent les siens. Ce sont deux champs que l'événement porte lui-même, comparés au contenu audité ; ce n'est pas le contrôle du plan
+  d'un Claim, écarté par la décision de l'utilisateur.
+  - Les plans de même identifiant mais d'un autre snapshot sont des plans distincts, sans concordance exigée.
+  - Si les plans désignés ont des fenêtres divergentes, le plan consulté ne peut pas être désigné → `PLAN_UNRESOLVED`. Retenir une
+    fenêtre arbitraire pourrait produire un faux `FRESH`.
+  - Aucun plan désigné → `PLAN_UNRESOLVED`.
+
+#### 23.30.3 — Conséquences sur 23.10 et stabilisation de l'inventaire (Q-8)
+
+**Réconciliation de 23.10.** La phrase « un ajout sans rapport avec `W` ne la modifie pas » vaut pour une source dont l'**absence de
+rapport avec `W` est établie** selon les règles de preuve de 23.30.1. Une simple absence de recouvrement de la fenêtre d'exécution ne
+suffit pas : une source d'exécution qui n'établit aucune exposition reste `UNRESOLVED` (absence non établie), entre dans l'ensemble
+pertinent (23.27.1 : « les inconnues et les non résolues ») et modifie `static_sources_digest`. La formule de ce digest (E3-A) est
+inchangée ; les docstrings d'E3-A qui reprennent la phrase de 23.10 se lisent au sens du présent paragraphe.
+
+Conséquences, toutes conformes au contrat actuel d'E3-A et de 23.10 :
+
+1. **Réservation impossible.** 23.10 exige un ensemble pertinent vide pour publier une `RESERVATION`. Tant qu'une source pertinente,
+   qu'elle établisse une exposition ou que son absence demeure non établie, reste sous une racine auditée, la condition n'est pas
+   remplie et la `RESERVATION` est refusée (vérification d'E3-D, selon 23.10).
+2. **Digest épinglé modifié.** `static_sources_digest` ne couvre que `{source_id, content_hash}` de l'ensemble pertinent. Toute source
+   pertinente ajoutée, retirée, ou dont le `content_hash` change, le modifie. Un changement qui ne touche que le verdict ou la fenêtre
+   d'une source déjà pertinente (par exemple l'ajout du `data_manifest.json` d'un job, quand il fait passer le verdict ou la fenêtre)
+   peut changer `inventory_id`, jamais ce digest. Si le
+   digest change après la `RESERVATION` ou l'`ADMISSION`, 23.10 (étape 8 de la publication) et 23.17 (étape 13) prescrivent les refus
+   terminaux `RESERVATION_STALE` avant la preuve de temps, `ADMITTED_STALE` pour une admission et `EXECUTION_VOID_EXPOSURE_CHANGED`
+   après le Claim. E3-A calcule les digests ; ces refus seront exécutés par E3-D et E3-J (non implémentés), sans exception nouvelle.
+   Toute modification qui change `inventory_id` périme en outre l'attestation (23.11 étape 4).
+3. **Exposition établie et absence non établie sont deux états distincts.** Une exposition établie donne `RETROSPECTIVE_EXPOSED`
+   (23.28, R1) ; une absence non établie donne `UNDETERMINED` (R2). Ni l'une ni l'autre n'est une absence d'exposition. Seule une preuve
+   d'exclusion recevable établit une absence.
+4. **Aucune preuve d'exclusion recevable aujourd'hui pour les jobs.** Tout job présent sous une racine auditée établit une exposition
+   ou reste non résolu : il appartient à l'ensemble pertinent. Une classe `FRESH` n'est donc pas atteignable tant qu'un tel job reste
+   sous une racine auditée. Une preuve d'exclusion liée à l'exécution pour les **nouveaux** jobs est une évolution future distincte,
+   non spécifiée ici et non préjugée.
+
+**Stabilisation de l'inventaire pendant une campagne** ([N], règle opérationnelle, selon le contrat actuel). De la publication de la
+`RESERVATION` jusqu'à la clôture de la campagne ou son état terminal :
+
+- aucune source d'exécution ou d'accès nouvelle (job, `ValidationRun`, événement d'accès, Claim d'une autre campagne, travail déclaré)
+  n'est créée sous une racine auditée. Les enregistrements du registre d'autres campagnes ne sont pas concernés : leur effet est réglé
+  par 23.10 et 23.27.4 ;
+- aucune source existante d'une racine auditée, ni aucun fichier informatif servant à l'interpréter (plan de split, manifeste de job),
+  n'est déplacé, supprimé, renommé, remplacé ni modifié ;
+- l'ensemble des racines auditées configurées (`scanned_roots`, 23.27.3) n'est ni réduit ni remplacé ;
+- tout calcul pouvant accéder à des données couvrant `W` réside sous une racine auditée ou est déclaré (23.11 étape 2). Le placer ailleurs
+  pour éviter l'inventaire est une omission de source pertinente.
+
+Pour la durée de la campagne, cette règle suspend donc toute écriture de ces sources sous les racines auditées.
+
+**Aucun contournement.** Il est interdit de déplacer, supprimer, omettre ou masquer une source pertinente, ou de réduire artificiellement
+les racines auditées, pour vider l'ensemble pertinent ou stabiliser un digest, avant comme après la `RESERVATION`. **Suspendre les
+écritures ne résout pas les incertitudes déjà présentes** : une source non résolue reste dans l'ensemble pertinent, et la seule issue est
+une preuve recevable (23.30.1), jamais le retrait de la source.
+
+**Portée de la vérification.** Le contrat actuel détecte, entre la `RESERVATION` et le Claim, tout changement qui modifie
+`static_sources_digest` ou `inventory_id`. Il ne détecte aucun retrait ou omission antérieur à la `RESERVATION` : une absence de trace
+n'est pas une preuve d'absence (23.3). La garde est la configuration des racines d'audit, qu'E3-J et l'attestation doivent épingler, et
+la déclaration humaine nominative (23.11 étape 2, F6), qui ne peut que durcir. Cet addendum ne crée aucun nouveau mécanisme de
+détection.
+
+#### 23.30.4 — Compatibilité et versions
+
+- **E3-A** : inchangé. Vérifié le 2026-10-17 :
+  - `compute_exposure_inventory_id` couvre, pour chaque finding non absorbé, `source_id`, `source_kind`, `status`, `overlap`,
+    `content_hash`, les fenêtres et la cause, ainsi que `complete`. Tout changement de verdict ou de complétude d'E3-B s'y reflète.
+  - `ExposureInventory` ne porte aucune version des règles d'E3-B : B5 la persiste dans l'A0 (23.11 étape 1), hors `inventory_id`.
+  - L'absorption du Claim propre (23.27.2) est inchangée.
+  - Les effets de 23.30.3 sur `static_sources_digest` et `inventory_id` sont ceux que le code publié d'E3-A calcule déjà ; ils sont
+    caractérisés par des tests de B3, sans modifier E3-A. Les refus qui en découlent relèvent d'E3-D et d'E3-J.
+- **B1, B2** (publiés) : inchangés.
+- **B3** : version `gate_v_exposure_interpreters_v2`. Aucune v1 n'a été publiée ni persistée : aucune migration.
+- **B4** (assemblage) : les compteurs de 23.27.5 ne dépendent pas des fenêtres et ne changent pas. B4 ne reclasse rien, ne compte jamais
+  avec le relevé des preuves et le transmet tel quel. `static_sources_digest` reste `{source_id, content_hash}` de l'ensemble
+  pertinent ; le `content_hash` d'un finding de job reste celui de `config_used.json`.
+- **B5** (persistance) : persiste le relevé des preuves dans l'A0, hors `inventory_id`.
+- **Artefacts historiques** : jamais réécrits.
+  - Aucun job existant n'a de preuve d'exclusion. Un job est donc `OVERLAPS` (P1 ou P2) ou `UNRESOLVED`, jamais `NO_OVERLAP`.
+  - Une `ValidationRun` OOS legacy hors de `W` devient `UNRESOLVED`.
+
+#### 23.30.5 — Limites connues
+
+- **Validité d'un plan.** B3 contrôle la forme d'un plan et ses zones `{start, end}` (instants aware, début strictement avant fin). Il ne
+  contrôle ni l'identifiant portable ni l'ordre et le non-chevauchement des zones. Ces contrôles relèvent de `dataset_split` :
+  `build_dataset_split_plan` à l'écriture, `load_dataset_split_plan(strict=True)` à la lecture (utilisée par E2 avant tout Claim). B3 ne
+  peut pas importer `dataset_split` : il s'interdit cet import (liste blanche vérifiée par test) pour rester pur. Cette limite ne
+  permet pas de faux `FRESH` :
+  - les écrivains existants construisent leurs plans par `build_dataset_split_plan`. C'est une convention : `save_dataset_split_plan`
+    écrit sans valider, et `DatasetSplitPlan` se construit directement. L'argument ne repose donc pas sur elle ;
+  - le plan épinglé par un Claim créé par E2 a été chargé en `strict=True` avant l'acquisition, et B3 en recalcule l'empreinte avec la
+    formule canonique : un plan non conforme ne peut pas égaler l'empreinte épinglée. Un Claim qui n'aurait pas été produit par E2 relève
+    de la même limite que l'altération manuelle ci-dessous : son verdict reste fondé sur la fenêtre `FINAL_HOLDOUT` déclarée ;
+  - ni l'identifiant portable ni l'ordre des zones n'entrent dans aucun verdict de B3. Pour un événement legacy, le verdict ne dépend que
+    de la fenêtre `FINAL_HOLDOUT` **déclarée** du plan : `NO_OVERLAP` exige que cette fenêtre ne recoupe pas `W`. Un plan altéré de façon
+    cohérente à la main resterait indétecté même avec ces contrôles, ce qui relève de la limite générale de 23.3 (`results/` non
+    versionné), couverte par les déclarations ;
+  - un plan que B3 ne peut pas indexer rend l'événement `PLAN_UNRESOLVED`, donc jamais `FRESH`.
+- B3 est plus strict que le chargeur de `dataset_split` (sept clés exactes, instants ISO-8601 aware) : un plan que celui-ci accepterait
+  avec une clé en plus n'est pas indexé. C'est conservateur (non résolu, inventaire incomplet).
+- Un `data_file` fait uniquement d'espaces n'est pas attribuable (conservateur : pas de P2, inventaire incomplet).
+- `ABSENCE_ESTABLISHED` est nommé par 23.30.1 mais n'est produit par aucune source à ce jour.
+- Questions ouvertes, non traitées ici : amendement de 23.5 pour qu'un `DataReceipt` serve de preuve d'exclusion ; preuve d'exclusion
+  liée à l'exécution pour les nouveaux jobs ; fenêtres walk-forward, Monte-Carlo et stabilité (Q-2) ; concordance croisée entre une
+  `ValidationRun` OOS et son plan, et entre un événement et sa `ValidationRun` ; fuseau de la colonne `time` hors de `S0` ; durée de la
+  dernière barre dans F3.
+
+#### 23.30.6 — Obligations de test (fixtures synthétiques uniquement ; `W = [2026-01-01, 2026-04-01)` UTC)
+
+1. Job exécuté après `W`, manifeste attribuable couvrant `W` : `OVERLAPS` par P2.
+2. Même job sans manifeste : `UNRESOLVED`, absence non établie.
+3. Job exécuté avant `W`, manifeste attribuable ne recoupant pas `W` : `UNRESOLVED`, car le manifeste n'exclut pas.
+4. `X ∩ W ≠ ∅` : `OVERLAPS` par P1, fenêtre `X`, avec ou sans manifeste.
+5. Bornes civiles ou naïves, manifeste non recoupant : `UNRESOLVED`, `TIMEZONE_UNKNOWN`.
+6. Bornes inversées et manifeste couvrant `W` : `UNRESOLVED`, `INVALID_SCHEMA`. Aucune neutralisation, aucune entrée au relevé.
+7. `config_used.json` illisible et manifeste couvrant `W` : anomalie conservée.
+8. Manifeste illisible, de schéma invalide, à nullité mixte, à bornes naïves, à `content_hash` mal formé, ou non attribuable
+   (`instrument` ≠ `data_file`, `data_file` absent) : pas de P2, inventaire incomplet. Manifeste à trois champs nuls : pas de P2 et
+   aucune incomplétude.
+9. Frontières de P2 :
+   - dernière barre à `ws − 1µs` : pas de P2, donc `UNRESOLVED` ;
+   - dernière barre à `ws` : `OVERLAPS` ;
+   - première barre à `we` : pas de P2 ;
+   - première barre à `we − 1µs` : `OVERLAPS`.
+10. `period_end` à la borne maximale représentable : pas de P2, inventaire incomplet.
+11. `ValidationRun` OOS legacy hors de `W` : `UNRESOLVED`. Égale à `W` : `OVERLAPS`.
+12. Relevé : un état par source d'exécution atteignant les étapes 2 à 4, cohérent avec son finding ; manifeste consigné pour P2 ;
+    aucune entrée pour les sources de l'étape 1.
+13. Q-7 : deux plans valides de même identifiant et d'empreintes différentes, Claim épinglant le premier : `RESOLVED`, sans incohérence.
+14. Q-7 : deux copies de même identité aux octets différents : une seule fenêtre.
+15. Q-7 : empreinte du Claim incompatible alors qu'un plan valide du même identifiant est lu : `WINDOW_UNKNOWN` et inventaire incomplet.
+16. Q-7 : aucun plan lu de l'identifiant : `WINDOW_UNKNOWN`, sans incohérence.
+17. Q-7 : plan rangé sous un répertoire de nom différent de son identifiant : indexé et désignable normalement.
+18. Événement legacy :
+    - deux plans désignés aux fenêtres divergentes : `PLAN_UNRESOLVED` ;
+    - un plan de même identifiant mais d'un autre snapshot, à côté du plan désigné : l'événement est résolu sur le plan désigné.
+19. Q-8 (caractérisation d'E3-A inchangé, tests de B3) : une source d'exécution à absence non établie rend le digest différent de celui
+    de l'ensemble vide ; ajouter une telle source, la retirer (retour au digest précédent) ou modifier son contenu change
+    `static_sources_digest` ; élargir ou réduire `scanned_roots` change `inventory_id` ; exposition établie et absence non établie
+    restent deux états, sans `NO_OVERLAP`.
+20. Limite de 23.30.5 (caractérisation) : un plan à identifiant non portable ou à chronologie invalide est refusé par `dataset_split` à la
+    construction et à la lecture stricte ; B3, qui l'indexe, fonde son verdict sur sa seule fenêtre `FINAL_HOLDOUT` déclarée, qu'elle recoupe `W` ou non, avec l'empreinte
+    canonique.
+21. À la charge d'E3-D et d'E3-J : `RESERVATION` refusée tant que l'ensemble pertinent contient une source d'exécution non résolue ; source
+    ajoutée, retirée ou modifiée après la `RESERVATION` : `RESERVATION_STALE` ou `ADMITTED_STALE` ; configuration des racines d'audit
+    épinglée dans l'attestation.
+
 ## Conséquences
 
 - **État réel initial** : `AF-V-07` = **DESIGN ACCEPTED / READY FOR IMPLEMENTATION** (2026-09-29,
@@ -3390,3 +3683,10 @@ vérifie que ce chargeur est la seule source de `DeclarationSet`.
   double passe. **E3-B = design documenté, NON IMPLÉMENTÉ** ; E3-A, E1 et E2 sont inchangés. Le mode `REAL` reste **désactivé et non
   qualifié**. Aucun accès `FINAL_HOLDOUT` nouveau, aucun Claim réel. `AF-V-07` = IN PROGRESS, `GATE V` NON PASSÉE, aucun Champion
   qualifié.
+- **Mise à jour (2026-10-17, additive, ne remplace rien de ce qui précède)** : l'**addendum 23.30** (fenêtre accessible au calcul,
+  Q-6 ; identité d'un plan de split, Q-7 ; conséquences sur 23.10 et stabilisation de l'inventaire, Q-8, option (a)) est **intégré**, avec
+  notes de renvoi dans 23.3, 23.10, 23.11, 23.27.2 et 23.27.3. E3-A (`7f30d0752465b755e8c08460e8ffb4ac13ff1d47`) et E3-B1/B2, publiés, sont
+  inchangés. E3-B3 (interprètes de sources, version 2) est implémenté et testé **localement**, non commité et non publié ; E3-B4 à B6
+  restent **NON IMPLÉMENTÉS**. Aucune preuve d'exclusion recevable n'existe pour les jobs : une classe `FRESH` reste inatteignable tant
+  qu'un job subsiste sous une racine auditée (23.30.3). Le mode `REAL` reste **désactivé et non qualifié**. Aucun accès `FINAL_HOLDOUT`
+  nouveau, aucun Claim réel. `AF-V-07` = IN PROGRESS, `GATE V` NON PASSÉE, aucun Champion qualifié.
