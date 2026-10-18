@@ -3806,3 +3806,193 @@ colonne `time` hors du snapshot de recherche ; durée de la dernière barre dans
 
 **Statut** : B3 v2 = **IMPLÉMENTÉ + TESTÉ + REVU**, **non commité, non publié**. B2 est publié (`91b406e`). B4 non démarré. E3-A inchangé.
 `REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE.
+
+## 52. `AF-V-07` — B3 PUBLIÉ (`41fe58d`) ; E3-B4 (assemblage de l'inventaire et comptabilité) IMPLÉMENTÉ + TESTÉ + REVU LOCALEMENT, NON COMMITÉ, NON PUBLIÉ (2026-10-18) — fait foi sur les §51 à §51.4 pour les statuts
+
+**Fait actuel vérifié (2026-10-18, après `git fetch`)** : branche `master`, `HEAD` = `origin/master` =
+`41fe58d3de4e4c608a38bae37d79869d2065e815` (« feat(gate-v): add E3-B3 exposure interpreters and evidence policy »), parent
+`91b406ebafd3fb996a8d527c38f6b2235cccdbff` ; divergence 0/0 ; aucune opération Git en cours ; 4,0 Go libres. **Les mentions « non commité, non
+publié » des §51 à §51.4 sont historiques : B3 v2 est commité ET publié à ce SHA.** Index : les 3 fichiers préexistants de l'utilisateur
+seulement (empreinte du diff indexé `8b78a333b37710b5…`, inchangée avant et après la mission). Changements locaux étrangers préservés (M1,
+PARAM-1, CAT-1, `requirements-api.txt`, `=1.12.0`, ADR 0026/0027, spec UX, matrice commune, §48 à §50 (locaux, absents de ce commit), premier hunk de `CONTEXT.md`).
+Aucun module publié (`gate_v_*`, `dataset_split.py`, `validation_run.py`, `job_store.py`, `optimizer.py`, `engine.py`) ni `app_corrupted_backup.py`
+n'est modifié.
+
+**Livré (2 fichiers NOUVEAUX, non suivis, LF)** : `gate_v_exposure_inventory.py` (518 lignes, SHA-256 `9eac67140541e1c4…`) et
+`tests/test_gate_v_exposure_inventory.py` (945 lignes, SHA-256 `b04079944e7e9967…`). Module PUR (stdlib, B1, B3, E3-A seulement ; aucune E/S,
+aucune horloge, aucun état global ; test AST). Il ne scanne pas, ne reclasse rien et ne duplique aucune formule d'E3-A.
+- API publique : `assemble_exposure_inventory(interpretation, *, registry, accounting, own_context, derived_root_labels=())
+  -> ExposureInventoryAssembly` ; `compute_trial_accounting(registry, accounting, *, current_campaign_id) -> (TrialAccounting,
+  TrialAccountingProvenance)` ; `CounterProvenance` (`OBSERVED` / `PARTIAL` / `NOT_OBSERVED`) ; vues d'entrée minimales `RegistryView` /
+  `RegistryRecordFact`, `AccountingViews` (`ClosingView`, `TrialItemsView`/`TrialItem` pour l'ingestion échouée et les engagements nuls,
+  `CampaignTrialsView`/`CampaignTrials` pour les chaînes et les campagnes V1 avec OOS) ; `TrialAccountingProvenance`.
+- `ExposureInventoryAssembly` : l'`ExposureInventory` d'E3-A, `inventory_id` et `inventory_content_digest` (formules d'E3-A, recontrôlées à la
+  construction), `accounting_provenance`, `incomplete_reasons` (celles de B3 mot pour mot, plus celles de B4), `registry_id`,
+  `registry_chain_head`, `derived_root_labels`, et l'interprétation de B3 transmise INTACTE (`plans`, `exposure_evidence`,
+  `non_oos_validations`, `scans` épinglés, `hooks_used`). Aucune persistance (B5).
+- **Findings** : ceux de B3 repris tels quels ; ceux du registre construits depuis la vue (`registry.<type>:<registry_id>/<seq6>`, jamais le
+  `campaign_dir_locator`). Règle de listabilité d'E3-A (23.28) appliquée : une `RESERVATION`/`ADMISSION` ÉTRANGÈRE `RESOLVED` qui ne recoupe pas
+  `W` n'est que comptée ; une `CONSUMPTION` étrangère est toujours listée ; les enregistrements PROPRES sont toujours listés (E3-A absorbe ou
+  signale) ; un enregistrement sans campagne ou sans fenêtre est `UNRESOLVED` (`INVALID_SCHEMA` / `WINDOW_UNKNOWN`) ; un enregistrement illisible
+  donne `REGISTRY_UNREADABLE`.
+- **Complétude** : `complete` n'est vrai que si B3 est complet ET aucun enregistrement du registre n'est illisible ou non résolu ET une racine
+  statique existe (`NO_STATIC_ROOT` sinon). Elle ne peut qu'être RESTREINTE (garde de construction) ; la comptabilité n'y touche jamais.
+- **Racines dérivées** : `derived_root_labels` retire des `scanned_roots` les racines de B3 qui sont des dossiers de campagnes de la chaîne
+  (23.27.3) ; les sources qu'elles portent restent lues. Le libellé est un fait de l'appelant : B4 le consigne dans l'assemblage, il ne peut pas le
+  prouver (E3-J devra l'épingler avec la configuration des racines).
+- **Comptabilité (23.27.5) pour le A0 avant admission, campagne courante EXCLUE de tous les compteurs** : `campaigns` = `campaign_id`
+  distincts des `RESERVATION`/`ADMISSION`/`CONSUMPTION` (trois types d'une même campagne : une seule) ; `abandoned_reservations` = parmi elles,
+  celles sans `ClosingRecord` terminal lisible (introuvable ou illisible ⇒ abandonnée) ; `failed_ingestion_attempts` et `void_commitments` =
+  éléments distincts SANS restriction aux campagnes de la chaîne (y compris avant toute `RESERVATION`) ; `research_runs` et `strategies` =
+  identités distinctes sur les campagnes de la chaîne et les campagnes V1 avec OOS. Les nombres déclarés ne sont jamais fusionnés ;
+  `non_oos_validations` et `exposure_evidence` ne servent jamais à compter (tests).
+- **Provenance (23.29.5)** : vue absente ⇒ `NOT_OBSERVED` et valeur `0` = espace réservé (jamais un zéro vérifié) ; élément illisible, campagne non
+  attribuable ou ensemble de campagnes partiel ⇒ `PARTIAL` (minorant ; majorant pour `abandoned_reservations`) ; sinon `OBSERVED`. La provenance
+  n'entre dans AUCUNE formule d'E3-A (tests : même valeur, provenances différentes ⇒ mêmes `inventory_id`, `inventory_content_digest`, digests de
+  sources et de projection). Une source de comptabilité indisponible ne change ni `complete`, ni `inventory_id`, ni les findings (tests) ; un
+  registre ou une racine d'exposition indisponible rend l'inventaire INCOMPLET (une vue de registre absente est une erreur d'appel `TypeError`).
+
+**Interprétations [R] et points ouverts (à valider ; aucune règle de l'ADR modifiée, E3-A et B3 inchangés)**
+1. **Source des compteurs `research_runs` / `strategies`** : l'ADR 23.27.5 dit « comptés sur ces campagnes, sur les campagnes V1 avec OOS et sur
+   les nombres déclarés » sans nommer l'artefact ni l'identité d'un `ResearchRun` ou d'une stratégie par campagne. B4 compte des identités
+   OPAQUES DISTINCTES fournies par des vues (la déduplication par identité est celle que vous avez demandée) ; QUEL artefact les fournit, et
+   comment une stratégie est identifiée, reste à spécifier (E3-D/E3-J ou slice dédiée). La jambe « nombres déclarés » n'est pas fusionnée (Q-3
+   reste ouverte) : un compteur `OBSERVED` ne vaut donc que pour la jambe observée. Une seule vue des essais lue donne `PARTIAL` ; une campagne
+   de la chaîne sans entrée, ou une entrée pour une campagne absente de la chaîne, donne `PARTIAL`.
+2. **Éléments attribuables à la campagne courante** (ingestion échouée, engagement nul) : exclus du A0 avant admission comme tout le reste de la
+   comptabilité courante (23.27.5, « exclut la campagne courante ») ; un élément non attribuable (`campaign_id` nul) est compté.
+3. **Comptabilité finale du `ClosingRecord`** (campagne courante incluse, 23.27.5) : NON calculée par cette tranche. Une portée `FINAL` avait été
+   écrite puis RETIRÉE à la revue (non demandée, sans appelant, périmètre exact non défini par l'ADR) ; à spécifier avec la clôture.
+4. **Vues d'entrée** (registre, clôtures, ingestion, engagements nuls, essais) : contrats de B4 minimaux, remplis plus tard par E3-D/E3-F/E3-J ;
+   B4 ne construit aucun de ces composants. Un registre entièrement indisponible se déclare par un identifiant illisible explicite.
+5. Un enregistrement du registre non résolu rend `complete` faux (cohérent avec la convention de B3 pour les sources non résolues) ; E3-A donne
+   déjà `UNDETERMINED` par R2.
+6. `abandoned_reservations` est `PARTIAL` dès qu'une clôture est introuvable (lecture littérale de 23.29.5) ; la règle `REAL` (Q-5) reste ouverte.
+
+**Vérification (mesurée le 2026-10-18, Windows 10, Python 3.13.7, `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider`)**
+- TDD : tranches 1 à 7 avec RED constaté (module absent, puis échecs ciblés) puis GREEN ; les tests de caractérisation de comportements déjà
+  implémentés (propagation, indépendance, invariants d'étage) ont leur sensibilité prouvée par la mutation ci-dessous.
+- `tests/test_gate_v_exposure_inventory.py` : **138 passed** (état final).
+- Mutation ciblée sur copie hors dépôt (fichiers suivis par Git + les deux fichiers B4, base verte exigée, « tué » = échec de test seulement) :
+  **41 mutants sur 41 tués** (état final). **Correction d'une fausse mesure** : une première passe affichait « 37/37 tués » parce que la copie ne
+  contenait pas le paquet `market_data` (erreur de collecte, code 2, comptée à tort comme détection) ; le script exige désormais une base verte et
+  distingue erreur et échec. La passe corrigée a révélé 2 trous de tests (enregistrement propre non recoupant listé ; garde contre l'élargissement
+  de complétude), comblés ; un mutant invalide (syntaxe) a été réécrit.
+- Régressions (avant les durcissements de revue, qui ne touchent que les deux fichiers B4) : B4 + B3 + E3-A + B1 + B2 + E1 + E2 + politique de
+  validation : **1 588 passed, 8 skipped** (liens symboliques, FIFO, `O_NONBLOCK` non démontrables sous Windows, déjà connus). Suite complète NON
+  relancée : B4 n'a aucun importeur et aucun module publié n'a changé ; le dernier résultat complet reste celui du §51 (5 007 passed, 9 skipped,
+  1 failed). L'échec résiduel `test_hook_blocks_a_force_push` (encodage `cp1252`) a une antériorité démontrée au §51 ; ni le test ni le hook ne sont
+  modifiés.
+- `/code-review` deux axes (sous-agents) : 0 BLOCKER. Corrigés : conventions d'erreur (`TypeError` type / `ValueError` valeur) et tests qui les
+  épinglent, validation de `TrialAccountingProvenance` et de l'assemblage, identités recontrôlées, `derived_root_labels` consigné, campagne inconnue
+  d'une vue des essais ⇒ `PARTIAL`, portée `FINAL` retirée, tests vacueux renforcés (`hooks_used` dans les deux sens, `non_oos_validations`
+  réellement non vide, provenance seule sans effet sur les digests). Non retenus : helpers hexadécimaux privés dupliqués (convention du dépôt),
+  types de retour nommés pour les helpers privés (jugement).
+- Aucun secret dans les fichiers ; `ruff`/`pyflakes` non installés dans le `.venv` ; aucune donnée de marché ; `FINAL_HOLDOUT` non accédé.
+
+**Limites** : B4 ne fait confiance à l'interprétation de B3 que par son type (un `SourceInterpretation` forgé à la main est constructible : E3-J
+recalcule le scan, B3 précondition n° 6) ; pas de persistance ni de relecture de l'A0 (B5) ; pas de déclarations ni de lignée (B6, bloqué par E3-C) ;
+pas de registre, d'admission ni de moteur ; `REAL` reste désactivé.
+
+**Statut** : E3-B4 = **IMPLEMENTED + TESTED + REVIEWED LOCALLY**, **non commité, non publié**. B5 et B6 : NOT IMPLEMENTED. `REAL` = DISABLED, NOT
+QUALIFIED. `GATE V` = NON PASSÉE. Aucun champion qualifié. Aucun accès `FINAL_HOLDOUT`.
+
+**Périmètre proposé pour un futur commit B4 (rien n'est indexé)** : `gate_v_exposure_inventory.py` et `tests/test_gate_v_exposure_inventory.py`
+(nouveaux), plus un extrait du handoff limité à ce §52 ; hors périmètre tout le reste des travaux locaux. Aucun fichier de B4 n'est importé par un
+module existant.
+
+**Prochaine tranche unique** : décision de l'utilisateur sur les points ouverts 1 et 3, puis commit et publication de B4 sur autorisation
+explicite ; **E3-B5** (persistance et relecture stricte de l'A0, `inventory_<content_hash>.json`, provenance et relevé des preuves hors
+`inventory_id`) ensuite. *(Remplacée par le §53.)*
+
+## 53. `AF-V-07` — E3-B4 : clôture contractuelle (D1, D2, D3) et prévalidation de publication (2026-10-18) — complète le §52
+
+**Fait actuel revérifié au démarrage (après `git fetch`)** : `master`, `HEAD` = `origin/master` = `41fe58d3de4e4c608a38bae37d79869d2065e815`,
+divergence 0/0, aucune opération Git en cours, 3,7 Go libres, index = les 3 fichiers préexistants (empreinte `8b78a333b37710b5…`, inchangée à
+la fin), B4 intact au démarrage (`9eac67140541e1c4…` et `b04079944e7e9967…` = §52). Aucun commit, aucun push, aucune indexation par cette mission.
+
+**Décisions de l'utilisateur appliquées (aucune règle de l'ADR 0025 modifiée ; E3-A, B1, B2, B3 inchangés)**
+- **D1 — identités de comptabilité.** B4 conserve des identités OPAQUES comparées par égalité exacte (sans normalisation) et reste pur : il ne lit
+  aucun artefact. Le « Contrat de la couche d'adaptation (D1) » est consigné dans le docstring du module : la couche qui alimente les vues DOIT
+  (a) ne reprendre un `research_run_id` existant que si son attribution à la campagne est PROUVÉE par un lien d'artefact vérifié, (b) ne jamais
+  déduire une identité d'un nom de fichier ou de dossier, (c) vérifier la configuration de stratégie effectivement évaluée, (d) garantir
+  qu'une évaluation a une seule identité et que deux évaluations distinctes n'en partagent jamais une (un identifiant portable n'est pas unique
+  d'une campagne à l'autre : `research_run.validate_portable_identifier` ne contrôle que le motif), sinon ne pas fournir l'élément et déclarer
+  la vue partielle. Le modèle public `ResearchRun` n'est pas modifié ; aucun modèle de stratégie n'est créé. **Q-3 reste ouverte** : B4 ne
+  fusionne jamais les nombres déclarés, n'invente aucune formule d'agrégation et ne revendique aucune couverture complète de cette question.
+- **D2 — `ClosingRecord`.** Contrat formalisé (docstring du module et glossaire) : le A0 préadmission EXCLUT la campagne courante de tous les
+  compteurs ; le `ClosingRecord` conserve la comptabilité finale qui l'INCLUT, sans compter sa propre clôture en cours comme abandon. Le calcul
+  final est REPORTÉ à la tranche responsable du `ClosingRecord` ; B4 n'en contient aucun (la portée `FINAL` retirée au §52 n'est pas
+  réintroduite ; un test fige la signature de `compute_trial_accounting`).
+- **D3 — racines dérivées.** `derived_root_labels` reste un FAIT DE L'APPELANT : B4 ne l'infère jamais de la disposition d'une racine, le valide
+  contre les labels scannés et le consigne dans l'assemblage. **Responsabilité future d'E3-J** : vérifier que chaque label dérivé désigne un
+  dossier de campagne de la chaîne du registre et que les racines statiques sont celles de la configuration de root (23.27.3, 23.30.3).
+- Statut des points ouverts du §52 : n° 1 → clos par D1 (reste à spécifier QUI implémente la couche d'adaptation, hors B4) ; n° 3 → clos par D2
+  (calcul reporté) ; D3 consigné ; n° 2, 4, 5 et 6 inchangés ; **Q-3 et Q-5 restent ouvertes**.
+
+**Changements de cette mission (documentation, tests, et UNE garde de cohérence ; aucun calcul de B4 modifié)**
+- `gate_v_exposure_inventory.py` (551 lignes) : docstring de module étendu (D1, D2, D3) et docstring de `CampaignTrials` ; seul changement de
+  logique : `ExposureInventoryAssembly` recontrôle à sa construction que `derived_root_labels` ⊆ racines scannées par B3 et que
+  `scanned_roots` = racines scannées − `derived_root_labels` (un assemblage construit à la main est ainsi cohérent). Précisions de fond du
+  docstring : deux chaînes identiques sont la MÊME identité et sont fusionnées, y compris entre campagnes ; B4 n'a aucune défense propre contre
+  un identifiant réutilisé pour deux évaluations (garantie entièrement à la charge de la couche d'adaptation) ; `OBSERVED` n'établit ni
+  l'exactitude au sens de l'ADR (qui compte aussi les nombres déclarés) ni la règle `REAL` Q-5 ; la portée exacte de l'inclusion de la
+  campagne courante pour les compteurs autres que `campaigns` est fixée par la tranche du `ClosingRecord` (23.27.5 ne dit que « `campaigns`
+  augmenté de un, à état par ailleurs inchangé »).
+- `tests/test_gate_v_exposure_inventory.py` (1 027 lignes) : 9 tests ajoutés (bloc « Clôture contractuelle ») : identités exactes jamais
+  normalisées (`R1`, `r1`, `R1 ` distinctes ; `R1` identique entre deux campagnes comptée une fois) ; exclusion de la campagne courante de TOUS
+  les compteurs à chaque étage ; racine dérivée jamais inférée de la disposition ; indépendance de l'identité scientifique, de `complete`, des
+  findings et des digests vis-à-vis de chaque état de provenance (4 compteurs dont la provenance ne dépend que des vues de comptabilité) ;
+  chaque contrat D1/D2/D3 présent dans SA section du docstring ; garde de cohérence de l'assemblage. Deux tests écrits puis SUPPRIMÉS à la revue
+  (import déjà couvert par le test de liste blanche existant ; signature figée, fragile et quasi vacueuse : la surface publique est déjà
+  figée). RED constaté sur les tests du docstring et de la garde ; les autres sont des tests de caractérisation, dont la sensibilité est prouvée
+  par la mutation.
+- `CONTEXT.md` : 4 termes ajoutés EN FIN de fichier (identité de run évaluée, identité de configuration de stratégie évaluée, comptabilité
+  préadmission, racine dérivée), statut « À confirmer », sans remarque d'implémentation ; fins de ligne CRLF préservées (536 CR = 536 LF) ; le
+  premier hunk (PARAM-1/CAT-1) n'est pas touché.
+
+**Vérification (mesurée le 2026-10-18, fichiers définitifs)**
+- `tests/test_gate_v_exposure_inventory.py` : **147 passed** (138 + 9).
+- Mutation ciblée hors dépôt (base verte exigée, tué = échec de test) : **45 mutants sur 45 tués**, dont normalisation des identités de runs et de
+  stratégies, provenance élargissant l'incomplétude et suppression de la garde de cohérence (4 mutants ajoutés). La passe a aussi révélé qu'un
+  de mes tests passait pour la mauvaise raison (la garde « B4 n'élargit jamais la complétude » était masquée par la nouvelle garde de racines) :
+  corrigé, puis 45/45.
+- Régressions Gate V pertinentes (B4, B3, E3-A, B1, B2, E1, E2, politique de validation) : **1 619 passed, 8 skipped** (skips POSIX connus).
+- Contrôle de la provenance : aucun état de provenance (`OBSERVED`, `PARTIAL`, `NOT_OBSERVED`) ne modifie `inventory_id`, `complete`, les findings,
+  `inventory_content_digest` ni les digests de sources/projection (tests paramétrés + mutant « provenance élargit l'incomplétude » tué).
+- Suite complète NON relancée (aucun module publié modifié, B4 sans importeur) ; le dernier résultat complet reste celui du §51
+  (5 007 passed, 9 skipped, 1 failed : `test_hook_blocks_a_force_push`, encodage `cp1252`, antériorité démontrée au §51, ni test ni hook modifiés).
+- Aucun secret ; aucune donnée de marché ; `FINAL_HOLDOUT` non accédé ; les deux fichiers B4 sont en LF (96 Ko au total, aucun fichier lourd) ;
+  aucun import inutilisé ; `ruff`/`pyflakes` non installés dans le `.venv`.
+- `/code-review` deux axes (sous-agents `general-purpose`) sur ce qui a changé depuis le §52 : 0 BLOCKER. Corrigés : « ne contient jamais » →
+  « ne compte jamais » ; notion de « jambe » non définie retirée ; glossaire sans remarque d'implémentation ni numéros de décision (renvois à
+  l'ADR), « comptabilité préadmission » opposée à la comptabilité finale ; identités identiques fusionnées, y compris entre campagnes, et
+  absence de défense propre de B4 écrites explicitement ; granularité de `unreadable_count` ; surclaim possible de `OBSERVED` face à Q-3/Q-5 ;
+  portée de l'inclusion de la campagne courante au `ClosingRecord` comparée à la lettre de 23.27.5 ; garde de cohérence de
+  `derived_root_labels` dans l'assemblage ; tests redondants ou quasi vacueux supprimés, test du docstring ancré par section. Conservé malgré
+  la remarque « non demandé » : le terme « identité de configuration de stratégie évaluée » (nommé par D1).
+
+**Prévalidation de publication (aucun commit, aucun push, aucune indexation de l'index réel)**
+- Périmètre PROPOSÉ pour un commit unique (message suggéré : `feat(gate-v): add E3-B4 exposure inventory assembly and trial accounting`) :
+  1. `gate_v_exposure_inventory.py` (nouveau) ;
+  2. `tests/test_gate_v_exposure_inventory.py` (nouveau) ;
+  3. `CONTEXT.md` : SEULEMENT le dernier hunk (+20 lignes, les 4 termes), à appliquer par patch ; le premier hunk (PARAM-1/CAT-1, +42) reste local ;
+  4. `AI_HANDOFF.md` : SEULEMENT un extrait ajoutant les §52 et §53 à la suite du §51.4 déjà publié (en excluant §48 à §50 et le paragraphe
+     CAT-1 du §51, locaux) ; les statuts des §52/§53 sont historiques une fois le commit fait (un document ne peut pas citer son propre commit).
+- Exclus : M1, PARAM-1, CAT-1, `requirements-api.txt`, `=1.12.0`, ADR 0026/0027, spec UX, tests API/connaissance/paramètres, matrice commune,
+  les 3 fichiers indexés de l'utilisateur, `app_corrupted_backup.py`.
+- Preuves : snapshot construit hors dépôt par index temporaire (HEAD + ces 4 éléments), extrait dans un dossier court sans aucun fichier exclu ;
+  tests B4 rejoués dans ce snapshot ; `git diff --check` propre ; aucune dépendance de B4 hors des modules déjà publiés (B1, B3, E3-A) ;
+  index réel inchangé (empreinte `8b78a333b37710b5…`).
+
+**Limites restantes** : la couche d'adaptation qui alimente les vues (qui l'implémente, quels artefacts prouvent l'attribution d'un run et la
+configuration d'une stratégie) reste à spécifier hors B4 ; Q-3 (agrégation observé/déclaré) et Q-5 (règle `REAL`) restent ouvertes ; le calcul
+de la comptabilité finale du `ClosingRecord` est reporté ; la vérification des racines dérivées est reportée à E3-J ; B5 (persistance de l'A0)
+et B6 (déclarations, lignée, bloqué par E3-C) ne sont pas commencés ; `REAL` reste désactivé.
+
+**Statut** : E3-B4 = **IMPLEMENTED + TESTED + REVIEWED LOCALLY**, contrat clos par D1/D2/D3, **non commité, non publié**. **Verdict de
+prévalidation : READY FOR COMMIT** (périmètre ci-dessus ; la publication exige une autorisation distincte). `REAL` = DISABLED, NOT QUALIFIED.
+`GATE V` = NON PASSÉE. Aucun champion qualifié. Aucun accès `FINAL_HOLDOUT`.
+
+**Prochaine tranche unique** : autorisation de commit puis de publication de B4 (périmètre ci-dessus), puis **E3-B5** (persistance et relecture
+stricte de l'A0, `inventory_<content_hash>.json`, provenance et relevé des preuves hors `inventory_id`).

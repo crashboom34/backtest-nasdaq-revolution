@@ -472,3 +472,23 @@ Couple identifiant du plan (`DatasetSplitPlan.split_plan_id`) + empreinte recalc
 d'empreintes différentes sont des plans différents.
 _À ne pas confondre avec_ : l'identifiant seul, non unique ; ni l'identifiant d'un snapshot ; ni le **Split train/test** de l'optimiseur.
 Statut : **À confirmer** (règle validée par l'ADR 0025 §23.30 ; terme à confirmer comme vocabulaire du projet).
+
+**Identité de run évaluée** :
+Identité d'un `ResearchRun` dont l'attribution à une campagne est prouvée par un lien d'artefact vérifié, jamais déduite d'un nom de fichier ou de dossier. Un identifiant portable n'est pas unique d'une campagne à l'autre : deux évaluations distinctes ne partagent jamais une identité de run évaluée.
+_À ne pas confondre avec_ : l'identifiant brut `research_run_id`, simple nom choisi par l'appelant.
+Statut : **À confirmer** (règle de l'ADR 0025 §23.27.5 ; terme à confirmer comme vocabulaire du projet).
+
+**Identité de configuration de stratégie évaluée** :
+Identité de la configuration de stratégie effectivement exécutée par une évaluation (stratégie, version et paramètres tels que les consigne l'artefact attribué).
+_À ne pas confondre avec_ : le nom de la stratégie seul.
+Statut : **À confirmer** (règle de l'ADR 0025 §23.27.5 ; terme à confirmer comme vocabulaire du projet).
+
+**Comptabilité préadmission** :
+Comptabilité des essais de l'inventaire d'exposition calculée avant l'admission d'une campagne : elle exclut la campagne courante.
+_À ne pas confondre avec_ : la comptabilité finale du `ClosingRecord`, qui inclut la campagne courante sans compter sa propre clôture en cours comme abandon ; ni avec les nombres déclarés par l'humain, qui ne sont jamais fusionnés avec les compteurs observés.
+Statut : **À confirmer** (règle de l'ADR 0025 §23.27.5 ; terme à confirmer comme vocabulaire du projet).
+
+**Racine dérivée** :
+Dossier de campagne lu parce que la chaîne du registre le référence ; c'est une source lue, jamais une racine d'audit statique de la configuration de root. Le fait qu'une racine soit dérivée est déclaré par l'appelant et vérifié avant l'admission.
+_À ne pas confondre avec_ : une racine d'audit configurée (statique).
+Statut : **À confirmer** (règle de l'ADR 0025 §23.27.3 et §23.30.3 ; terme à confirmer comme vocabulaire du projet).
