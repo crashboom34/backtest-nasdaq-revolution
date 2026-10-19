@@ -3,8 +3,8 @@
 Fixtures SYNTHÉTIQUES dans `tmp_path` uniquement : aucune donnée de marché, aucun `FINAL_HOLDOUT`, aucun accès réseau. Les fautes (`fsync`, `link`, écriture,
 nettoyage) sont INJECTÉES par `monkeypatch`, comme l'exige 23.2 (profil `SIMULATED_DURABLE`) ; aucune coupure d'alimentation n'est simulée ni qualifiée.
 Les tests dont l'appel système n'existe que sous POSIX (`fsync` de répertoire réel, `O_DIRECTORY`, `O_NOFOLLOW`, `follow_symlinks=False`) sont marqués `posix_only`
-(dernière tranche du fichier) : ils sont IGNORÉS sous Windows et ne sont donc PAS exécutés par cette machine de développement ; le profil `POSIX_DIR_FSYNC` n'y est
-exercé que par une LOGIQUE simulée (fixture `posix_profile`, descripteur de substitution). Voir `AI_HANDOFF.md`.
+(tranche 11) : IGNORÉS sous Windows, EXÉCUTÉS et passés sur un hôte Linux hébergé (AI_HANDOFF.md §62). Sous Windows, le profil `POSIX_DIR_FSYNC` n'est exercé que par
+une LOGIQUE simulée (fixture `posix_profile`, descripteur de substitution) qui ne prouve rien sur POSIX.
 """
 
 from __future__ import annotations
@@ -210,7 +210,7 @@ def test_a_nominal_publication_links_the_exact_bytes_and_confirms_durability_at_
     assert destination.read_bytes() == content
     assert isinstance(result, LinkPublication) and result.destination == destination
     assert result.state is PublicationState.PUBLISHED_DURABLE and result.operation is PublicationOperation.PUBLISHED
-    assert result.durability_profile is SIMULATED and result.real_durability_demonstrated is False         # 23.2 : aucune preuve réelle
+    assert result.durability_profile is SIMULATED and result.posix_dir_fsync_succeeded is False         # 23.2 : aucune preuve réelle
     assert result.identity == FileIdentity(os.stat(destination).st_dev, os.stat(destination).st_ino, len(content), sha(content))
     assert result.temp_disposition is TempDisposition.REMOVED and names(tmp_path) == ["admission_0001.json"]
     assert result.writer_pid == os.getpid() and re.fullmatch(r"[0-9a-f]{32}", result.publication_id)
@@ -328,7 +328,7 @@ def test_the_posix_profile_is_refused_before_anything_is_created_on_a_platform_w
 def test_the_posix_profile_logic_syncs_the_held_directory_descriptor_in_the_adr_order_with_a_stand_in(tmp_path, posix_profile, monkeypatch):
     events = record_events(monkeypatch, tmp_path)
     result = store.publish_bytes_by_link(tmp_path / "admission_0001.json", b"abc", durability=POSIX, naming=TempNaming.REGISTRY, kind="admission")
-    assert result.state is PublicationState.PUBLISHED_DURABLE and result.durability_profile is POSIX and result.real_durability_demonstrated is True
+    assert result.state is PublicationState.PUBLISHED_DURABLE and result.durability_profile is POSIX and result.posix_dir_fsync_succeeded is True
     assert events == ["fsync_directory", "create_temp", "write", "fsync_file", "close_temp", "link", "fsync_directory", "unlink_temp"]
     assert len(posix_profile["opened"]) == 1                                # le descripteur de répertoire est ouvert UNE fois pour toute la publication
 
@@ -725,7 +725,7 @@ def test_a_failing_final_barrier_leaves_a_binding_unconfirmed_slot_and_keeps_the
     assert error.reason is store.UnconfirmedReason.DIRECTORY_FSYNC_FAILED and error.__cause__ is boom and error.slot_is_binding is True
     result = error.publication
     assert result.state is PublicationState.PUBLISHED_UNCONFIRMED and result.operation is PublicationOperation.PUBLISHED
-    assert result.temp_disposition is TempDisposition.KEPT_UNCONFIRMED and result.real_durability_demonstrated is False
+    assert result.temp_disposition is TempDisposition.KEPT_UNCONFIRMED and result.posix_dir_fsync_succeeded is False
     assert (tmp_path / "slot.json").read_bytes() == b"abcdef"                           # le slot est COMPLET et reste en place (jamais supprimé)
     assert result.identity == FileIdentity(os.stat(tmp_path / "slot.json").st_dev, os.stat(tmp_path / "slot.json").st_ino, 6, sha(b"abcdef"))
     assert sorted(names(tmp_path)) == sorted(["slot.json", result.temp_path.name]) and result.temp_path.exists() and not descriptors
@@ -756,7 +756,7 @@ def test_a_failing_posix_directory_fsync_after_the_link_is_unconfirmed(tmp_path,
     with pytest.raises(PublishedUnconfirmedError) as unconfirmed:
         publish(tmp_path, durability=POSIX)
     assert unconfirmed.value.reason is store.UnconfirmedReason.DIRECTORY_FSYNC_FAILED
-    assert unconfirmed.value.publication.durability_profile is POSIX and unconfirmed.value.publication.real_durability_demonstrated is False
+    assert unconfirmed.value.publication.durability_profile is POSIX and unconfirmed.value.publication.posix_dir_fsync_succeeded is False
     assert (tmp_path / "slot.json").exists() and not descriptors
 
 
@@ -906,7 +906,7 @@ def test_reconfirmation_only_runs_a_barrier_and_never_writes_links_or_removes(tm
     assert result.operation is PublicationOperation.RECONFIRMED and result.state is PublicationState.PUBLISHED_DURABLE
     assert result.temp_path is None and result.temp_disposition is TempDisposition.NOT_CREATED and result.destination == slot
     assert result.identity == first.identity and result.publication_id != first.publication_id and result.writer_pid == os.getpid()
-    assert result.real_durability_demonstrated is False and not descriptors            # profil simulé : aucune valeur de preuve
+    assert result.posix_dir_fsync_succeeded is False and not descriptors            # profil simulé : aucune valeur de preuve
 
 
 def test_reconfirmation_turns_an_unconfirmed_slot_into_a_durable_one_without_touching_the_orphan(tmp_path, monkeypatch, descriptors):
@@ -1007,7 +1007,7 @@ def test_the_posix_reconfirmation_syncs_the_directory_descriptor_once(tmp_path, 
     published_slot(tmp_path)
     events = record_events(monkeypatch, tmp_path)
     result = confirm(tmp_path, durability=POSIX)
-    assert events == ["fsync_directory"] and result.durability_profile is POSIX and result.real_durability_demonstrated is True and not descriptors
+    assert events == ["fsync_directory"] and result.durability_profile is POSIX and result.posix_dir_fsync_succeeded is True and not descriptors
 
 
 def test_reconfirmation_twice_is_a_pure_read_with_distinct_confirmation_ids(tmp_path, descriptors):
@@ -1090,7 +1090,7 @@ def test_a_published_unconfirmed_error_cannot_be_mistaken_for_an_ordinary_collis
     unconfirmed = sample_unconfirmed()
     assert not isinstance(unconfirmed, (SlotOccupiedError, FileExistsError, OSError, PublicationNotStartedError))
     assert unconfirmed.replay_safe is False and unconfirmed.slot_is_binding is True
-    assert unconfirmed.publication.state is PublicationState.PUBLISHED_UNCONFIRMED and unconfirmed.publication.real_durability_demonstrated is False
+    assert unconfirmed.publication.state is PublicationState.PUBLISHED_UNCONFIRMED and unconfirmed.publication.posix_dir_fsync_succeeded is False
 
 
 def sample_unconfirmed():
@@ -1351,6 +1351,43 @@ def test_a_destination_name_the_filesystem_cannot_encode_is_refused_before_anyth
     assert names(tmp_path) == []
 
 
+def test_reconfirming_a_slot_that_exists_but_cannot_be_read_is_never_a_replay_safe_refusal(tmp_path, monkeypatch):
+    """Revue F-M3 : `PublicationNotStartedError` (`replay_safe` vrai, « rien n'est publié ») serait faux : le slot EXISTE. Échec non rejouable et binding."""
+    import builtins
+    published_slot(tmp_path)
+    real_open = builtins.open
+
+    def refusing(file, *args, **kwargs):
+        if Path(file) == tmp_path / "slot.json":
+            raise PermissionError(errno.EACCES, "lecture refusée")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", refusing)
+    with pytest.raises(store.SlotContentMismatchError) as refusal:
+        confirm(tmp_path)
+    assert refusal.value.replay_safe is False and refusal.value.slot_is_binding is True and "illisible" in str(refusal.value)
+
+
+def test_reconfirming_a_slot_that_cannot_be_observed_is_never_a_replay_safe_refusal(tmp_path, monkeypatch):
+    published_slot(tmp_path)
+    unobservable_slot(monkeypatch, tmp_path / "slot.json")
+    with pytest.raises(store.SlotContentMismatchError) as refusal:
+        confirm(tmp_path)
+    assert refusal.value.replay_safe is False and refusal.value.slot_is_binding is True and "inobservable" in str(refusal.value)
+
+
+@pytest.mark.parametrize("reason, reliable", [(store.UnconfirmedReason.DIRECTORY_FSYNC_FAILED, False), (store.UnconfirmedReason.FILE_FSYNC_FAILED, False),
+                                              (store.UnconfirmedReason.LINK_OUTCOME_UNKNOWN, True), (store.UnconfirmedReason.SLOT_MISSING, True),
+                                              (store.UnconfirmedReason.LINK_COUNT_ANOMALY, True)])
+def test_a_reconfirmation_after_an_fsync_failure_is_flagged_as_unreliable(tmp_path, reason, reliable):
+    """Revue F-M2 : après un échec de `fsync`, une re-confirmation (nouveau descripteur, cache de pages) peut réussir sans rien prouver (erreur déjà rapportée) :
+    décision humaine, pas boucle de re-confirmation."""
+    slot = tmp_path / "slot.json"
+    publication = LinkPublication(slot, PublicationState.PUBLISHED_UNCONFIRMED, SIMULATED, PublicationOperation.PUBLISHED, FileIdentity(1, 2, 3, "0" * 64),
+                                  "p" * 32, 1, None, TempDisposition.KEPT_UNCONFIRMED)
+    assert PublishedUnconfirmedError("x", slot, publication=publication, reason=reason).reconfirmation_reliable is reliable
+
+
 def test_a_missing_slot_after_a_link_error_is_still_a_replay_safe_refusal(tmp_path, monkeypatch, descriptors):
     only_for_temporaries(monkeypatch, "link", raising(OSError(errno.EIO, "x")))
     with pytest.raises(PublicationNotStartedError) as refusal:
@@ -1358,7 +1395,7 @@ def test_a_missing_slot_after_a_link_error_is_still_a_replay_safe_refusal(tmp_pa
     assert refusal.value.stage is PublicationStage.LINK and refusal.value.temp_disposition is TempDisposition.REMOVED and names(tmp_path) == []
 
 
-# ── Tranche 11 : appels système POSIX RÉELS (`posix_only` : IGNORÉS sous Windows, donc NON exécutés par cette machine) ─────────────────────────
+# ── Tranche 11 : appels système POSIX RÉELS (`posix_only` : IGNORÉS sous Windows ; exécutés sous Linux, AI_HANDOFF.md §62) ────────────────────
 
 linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="profil REAL : Linux uniquement (23.2) ; non exécuté ici")
 
@@ -1391,7 +1428,7 @@ def test_posix_a_regular_file_is_not_a_directory_descriptor(tmp_path):
 
 @posix_only
 @linux_only
-def test_posix_a_real_publication_syncs_the_held_directory_descriptor_twice_and_claims_real_durability(tmp_path, monkeypatch, descriptors):
+def test_posix_a_real_publication_syncs_the_held_directory_descriptor_twice_and_reports_a_successful_directory_fsync(tmp_path, monkeypatch, descriptors):
     real_fsync, kinds = os.fsync, []
 
     def recording(fd):
@@ -1401,7 +1438,7 @@ def test_posix_a_real_publication_syncs_the_held_directory_descriptor_twice_and_
     monkeypatch.setattr(os, "fsync", recording)
     result = publish(tmp_path, durability=POSIX)
     assert kinds == ["directory", "file", "directory"]                              # barrière de lecture, fsync du temporaire, barrière après le lien
-    assert result.real_durability_demonstrated is True and names(tmp_path) == ["slot.json"] and not descriptors
+    assert result.posix_dir_fsync_succeeded is True and names(tmp_path) == ["slot.json"] and not descriptors
 
 
 @posix_only
@@ -1419,7 +1456,7 @@ def test_posix_a_failing_real_directory_fsync_after_the_link_is_unconfirmed(tmp_
     monkeypatch.setattr(os, "fsync", failing)
     with pytest.raises(PublishedUnconfirmedError) as unconfirmed:
         publish(tmp_path, durability=POSIX)
-    assert unconfirmed.value.reason is store.UnconfirmedReason.DIRECTORY_FSYNC_FAILED and unconfirmed.value.publication.real_durability_demonstrated is False
+    assert unconfirmed.value.reason is store.UnconfirmedReason.DIRECTORY_FSYNC_FAILED and unconfirmed.value.publication.posix_dir_fsync_succeeded is False
     assert (tmp_path / "slot.json").read_bytes() == b"abcdef" and not descriptors
 
 
@@ -1513,7 +1550,7 @@ def test_posix_reconfirmation_syncs_the_slot_file_then_the_directory(tmp_path, m
     real_fsync, kinds = os.fsync, []
     monkeypatch.setattr(os, "fsync", lambda fd: (kinds.append(fsync_kind(fd)), real_fsync(fd))[1])
     result = confirm(tmp_path, durability=POSIX)
-    assert kinds == ["file", "directory"] and result.real_durability_demonstrated is True and not descriptors
+    assert kinds == ["file", "directory"] and result.posix_dir_fsync_succeeded is True and not descriptors
 
 
 @posix_only
@@ -1546,6 +1583,21 @@ def test_posix_a_real_process_death_under_the_real_profile_keeps_the_slot_comple
         assert slot.read_bytes() == b"abcdef"
     for orphan in orphans:
         assert store.is_publication_temp_name(orphan.name) is TempNaming[naming] and orphan.stat().st_size == orphan_size
+    # Moitié REPRISE sous le profil réel : un slot publié reste binding et se re-confirme ; un slot absent se republie sans toucher aux orphelins.
+    snapshot = {orphan.name: orphan.read_bytes() for orphan in orphans}
+    if slot_expected:
+        with pytest.raises(SlotOccupiedError):
+            publish(tmp_path, content=b"autre", naming=TempNaming[naming], durability=POSIX)
+        assert confirm(tmp_path, durability=POSIX).state is PublicationState.PUBLISHED_DURABLE and slot.read_bytes() == b"abcdef"
+    else:
+        publish(tmp_path, content=b"abcdef", naming=TempNaming[naming], durability=POSIX)
+        assert slot.read_bytes() == b"abcdef"
+    assert {entry.name: entry.read_bytes() for entry in tmp_path.iterdir() if entry.name in snapshot} == snapshot
+
+
+@posix_only
+def test_posix_the_no_follow_option_is_really_in_force_on_linux():
+    assert store._LINK_OPTIONS == {"follow_symlinks": False}
 
 
 # ── Tranche 9 : non-régression — l'extension est ADDITIVE, le code historique est figé ─────────────────────────────────────────
@@ -1607,7 +1659,7 @@ def test_the_link_never_follows_a_symlink_source_on_platforms_that_can_refuse_it
         real(source, destination)
 
     monkeypatch.setattr(os, "link", link)
-    monkeypatch.setattr(os, "supports_follow_symlinks", {link})
+    monkeypatch.setattr(store, "_LINK_OPTIONS", {"follow_symlinks": False})
     publish(tmp_path)
     assert seen == {"follow_symlinks": False}
 
@@ -1620,9 +1672,14 @@ def test_the_link_is_called_without_extra_arguments_where_follow_symlinks_is_uns
         real(source, destination)
 
     monkeypatch.setattr(os, "link", link)
-    monkeypatch.setattr(os, "supports_follow_symlinks", set())
+    monkeypatch.setattr(store, "_LINK_OPTIONS", {})
     publish(tmp_path)
     assert seen == {}
+
+
+def test_the_no_follow_capability_is_decided_once_from_the_real_os_link_not_from_a_wrapper():
+    """Revue F-L1 : avant, le test d'identité `os.link in os.supports_follow_symlinks` était refait à chaque appel : tout espion ou mock désactivait la protection."""
+    assert store._LINK_OPTIONS == ({"follow_symlinks": False} if os.link in os.supports_follow_symlinks else {})
 
 
 # ── Tranche 8 : mort RÉELLE du processus (`os._exit`) à chaque point de la matrice de crash 23.10, et course entre processus ─────────────────────
@@ -1798,7 +1855,7 @@ def test_an_occupied_slot_error_is_a_genuine_file_exists_error_with_its_errno(tm
 
 def test_every_failure_declares_whether_a_replay_is_safe_and_whether_the_slot_is_binding():
     expected = {PlatformNotQualifiedError: (False, False), PublicationNotStartedError: (True, False), SlotOccupiedError: (False, True),
-                PublishedUnconfirmedError: (False, True), SlotAbsentError: (False, False), SlotContentMismatchError: (False, False)}
+                PublishedUnconfirmedError: (False, True), SlotAbsentError: (False, False), SlotContentMismatchError: (False, True)}
     assert {cls: (cls.replay_safe, cls.slot_is_binding) for cls in expected} == expected
 
 

@@ -321,10 +321,12 @@ def validate_portable_identifier(value: str, field_name: str) -> str:
 #   directory_read_barrier(directory, *, durability) -> None                                                   (barrière de lecture, 23.10 étape 1)
 #
 #   Succès : un `LinkPublication` d'état `PUBLISHED_DURABLE`. Il n'est JAMAIS renvoyé pour un lien non confirmé. Sous `SIMULATED_DURABLE`, `PUBLISHED_DURABLE`
-#   n'a AUCUNE valeur de preuve de durabilité réelle (23.2) : `real_durability_demonstrated` est alors faux. Même sous `POSIX_DIR_FSYNC`, il dit seulement que le
+#   n'a AUCUNE valeur de preuve de durabilité réelle (23.2) : `posix_dir_fsync_succeeded` est alors faux. Même sous `POSIX_DIR_FSYNC`, il dit seulement que le
 #   `fsync` du répertoire a réussi sur un hôte POSIX non macOS : la qualification du système de fichiers (local, ni NFS/SMB, ni matériel qui ment sur `fsync`)
 #   et de la plateforme (Linux/OCI, 23.2 et 23.9) n'est PAS vérifiée ici ; elle relève de l'admission REAL. Les chemins système POSIX (`O_DIRECTORY`,
-#   `O_NOFOLLOW`, `fsync` d'un vrai descripteur de répertoire, `follow_symlinks=False`) ne sont exécutés que par les tests `posix_only`, jamais sous Windows.
+#   `O_NOFOLLOW`, `fsync` d'un vrai descripteur de répertoire, `follow_symlinks=False`) sont exécutés par les tests `posix_only`, ignorés sous Windows ; ils ont été
+#   exécutés et sont passés sur un hôte Linux hébergé (Ubuntu 24.04, voir AI_HANDOFF.md §62) : cela valide le COMPORTEMENT des appels système, JAMAIS la durabilité
+#   face à une coupure d'alimentation (aucune n'est simulée) ni la qualification d'un volume.
 #   LIMITES CONNUES : les opérations sont faites PAR CHEMIN (création, écriture, `link`, `lstat`, `unlink` du temporaire), seul le `fsync` utilise le descripteur
 #   tenu. Un parent remplacé par un lien PENDANT `precheck` voit le temporaire créé, écrit et synchronisé À TRAVERS ce lien avant d'être détecté puis supprimé ; une
 #   fenêtre TOCTOU subsiste aussi entre le dernier contrôle d'identité et le `link`. Les contrôles d'identité avant, juste après le lien et après la barrière la
@@ -332,12 +334,16 @@ def validate_portable_identifier(value: str, field_name: str) -> str:
 #   `os.supports_dir_fd` sous Linux) est PROPOSÉ, NON implémenté : il touche l'UNIQUE chemin REAL et ne peut pas être exécuté sans Linux. Seul le parent FINAL est
 #   contrôlé (pas ses ancêtres). Le nettoyage du temporaire (`lstat` puis `unlink` par chemin) a la même fenêtre ; l'inode d'un temporaire fermé peut être recyclé
 #   (ext4/xfs) : garder le descripteur ouvert jusqu'au nettoyage est PROPOSÉ, non implémenté. Aucune permission restrictive n'est appliquée (23.24 ouvert).
-#   Sur tmpfs, `fsync` de répertoire ne fait RIEN et renvoie 0 : `real_durability_demonstrated` y est vrai sans rien prouver (les tests sur un `tmp_path` tmpfs ne
-#   prouvent aucune durabilité) ; l'admission REAL doit lister les systèmes de fichiers qualifiés. Hypothèse non exécutée : `fsync` sur un descripteur `O_RDONLY`
-#   (répertoire, fichier du slot) est supporté par Linux. Un `PublishedUnconfirmedError` `DIRECTORY_FSYNC_FAILED` n'est PAS récupérable automatiquement de façon
-#   fiable (erreur d'écriture déjà rapportée à un autre descripteur) : décision humaine ou remontage, pas une boucle de re-confirmation.
-#   ORDRE : 23.10 étape 1 dit « lire la chaîne PUIS barrière de lecture » ; ici la barrière précède `precheck`. Un appelant qui lit la chaîne dans `precheck`
-#   obtient barrière-puis-lecture : il doit lire AVANT l'appel et rappeler `directory_read_barrier` si l'ordre ADR est exigé. Après un lien, seules les exceptions
+#   Sur tmpfs, `fsync` de répertoire ne fait RIEN et renvoie 0 : `posix_dir_fsync_succeeded` y est vrai sans rien prouver (les tests sur un `tmp_path` tmpfs ne
+#   prouvent aucune durabilité) ; l'admission REAL doit lister les systèmes de fichiers qualifiés. `fsync` sur un descripteur `O_RDONLY` (répertoire, fichier du
+#   slot) est accepté sous Linux (constaté, ext4 et tmpfs). Un `PublishedUnconfirmedError` `DIRECTORY_FSYNC_FAILED` ou `FILE_FSYNC_FAILED` n'est PAS récupérable
+#   de façon fiable par re-confirmation (`reconfirmation_reliable` est faux : nouveau descripteur, erreur peut-être déjà rapportée) : décision humaine ou
+#   remontage. AVERTISSEMENT PROPOSÉ ; la ligne de la matrice 23.10 qui prévoit la re-confirmation reste inchangée.
+#   DURABILITÉ DU RÉPERTOIRE LUI-MÊME : `fsync` du répertoire du slot persiste SES entrées, pas sa propre entrée dans son parent. Après un `mkdir` (répertoire
+#   d'inventaire, d'admissions, d'événements), l'appelant doit rendre le parent durable (`directory_read_barrier(parent)`, jusqu'à la racine durable) AVANT la
+#   première publication, sinon un `PublishedDurable` peut disparaître avec son répertoire (précondition de l'appelant, documentation seulement).
+#   ORDRE : 23.10 étape 1 dit « lire la chaîne PUIS barrière de lecture » ; ici la barrière précède `precheck`. Lire la chaîne AVANT l'appel donne lecture-puis-
+#   barrière (conforme) ; `precheck` sert aux vérifications de l'étape 2 : y LIRE la chaîne donne barrière-puis-lecture, non conforme à l'ordre ADR. Après un lien, seules les exceptions
 #   `OSError` sont converties en échecs typés ; une interruption ou un `MemoryError` se propage tel quel (temporaire conservé, slot binding).
 #   PRÉCONDITIONS d'un écrivain qui consomme un slot DENSE et IRRÉPARABLE (B6, E3-D, E3-G ; AI_HANDOFF.md §61) : prouver AVANT la publication que SON lecteur
 #   relira ces octets, au niveau de la LIGNÉE et pas seulement du fichier (une preuve par fichier laisse passer une chaîne cassée : test d'intégration). La preuve
@@ -584,20 +590,31 @@ class PublishedUnconfirmedError(LinkPublicationError):
         self.publication = publication
         self.reason = reason
 
+    @property
+    def reconfirmation_reliable(self) -> bool:
+        """Faux après un échec de `fsync` (`DIRECTORY_FSYNC_FAILED`, `FILE_FSYNC_FAILED`) : une re-confirmation ouvre un NOUVEAU descripteur et lit le cache de pages ;
+        sous Linux une erreur d'écriture n'est rapportée qu'une fois par description de fichier, donc elle peut réussir SANS rien prouver. Décision humaine ou remontage,
+        jamais une boucle de re-confirmation. Vrai pour les autres causes, où `confirm_published_slot` observe réellement le slot."""
+        return self.reason not in (UnconfirmedReason.DIRECTORY_FSYNC_FAILED, UnconfirmedReason.FILE_FSYNC_FAILED)
+
 
 class SlotAbsentError(LinkPublicationError):
     """Re-confirmation : le slot n'existe pas (ou plus) : rien n'a été publié (23.10)."""
 
 
 class SlotContentMismatchError(LinkPublicationError):
-    """Re-confirmation : le slot existe mais ce n'est pas le fichier attendu (contenu ou identité) : jamais confirmé."""
+    """Re-confirmation : le slot existe mais ce n'est pas le fichier attendu (contenu ou identité), ou son contenu ne peut pas être vérifié (illisible,
+    inobservable) : jamais confirmé. Le slot est OCCUPÉ et le reste (`slot_is_binding`) : ni rejeu, ni suppression."""
+
+    slot_is_binding = True
 
 
 @dataclass(frozen=True)
 class LinkPublication:
-    """Résultat vérifiable d'une publication ou d'une re-confirmation. `real_durability_demonstrated` n'est vrai que pour `PUBLISHED_DURABLE` obtenu avec
-    `POSIX_DIR_FSYNC` (le `fsync` du répertoire a réussi) ; sous `SIMULATED_DURABLE`, il est faux et l'état n'a aucune valeur de preuve (23.2) : un consommateur
-    REAL doit tester ce drapeau (ou le profil), JAMAIS `state` seul. Il ne qualifie ni le système de fichiers ni la plateforme. `publication_id` identifie
+    """Résultat vérifiable d'une publication ou d'une re-confirmation. `posix_dir_fsync_succeeded` n'est vrai que pour `PUBLISHED_DURABLE` obtenu avec
+    `POSIX_DIR_FSYNC` : il dit SEULEMENT que l'appel `fsync` du répertoire a rendu 0 ; sous `SIMULATED_DURABLE`, il est faux et l'état n'a aucune valeur de preuve
+    (23.2). Ce n'est NI une preuve de durabilité NI une qualification du système de fichiers ou de la plateforme (tmpfs : `fsync` de répertoire sans effet, ext4 en
+    `nobarrier` : aucune garantie de vidage) : l'admission REAL doit en plus qualifier le volume (23.9) ; un consommateur ne doit JAMAIS tester `state` seul. `publication_id` identifie
     l'APPEL (nouvel identifiant à chaque re-confirmation) : il n'est ni persisté, ni authentifié, ni corrélé à la publication d'origine."""
 
     destination: Path
@@ -612,7 +629,7 @@ class LinkPublication:
     temp_cleanup_error: Optional[str] = None
 
     @property
-    def real_durability_demonstrated(self) -> bool:
+    def posix_dir_fsync_succeeded(self) -> bool:
         return self.state is PublicationState.PUBLISHED_DURABLE and self.durability_profile is DurabilityProfile.POSIX_DIR_FSYNC
 
 
@@ -774,6 +791,8 @@ def _remove_own_temp(temp_path: Path, identity: tuple) -> tuple:
 
 
 _TEMP_CREATE_ATTEMPTS = 3
+# Décidé UNE fois à l'import depuis le VRAI `os.link` (un test d'identité refait à chaque appel serait désactivé par tout espion ou mock).
+_LINK_OPTIONS = {"follow_symlinks": False} if os.link in os.supports_follow_symlinks else {}
 _UNSUPPORTED_LINK_ERRNOS = frozenset(getattr(errno, name) for name in ("EPERM", "EXDEV", "ENOTSUP", "EOPNOTSUPP", "ENOSYS") if hasattr(errno, name))
 _UNSUPPORTED_LINK_WINERRORS = frozenset({1, 50})  # ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED
 
@@ -984,10 +1003,9 @@ def _publish_with_anchor(anchor: _DirectoryAnchor, target: Path, content: bytes,
     # Le comportement de `link` sur une SOURCE qui est un lien symbolique dépend de la plateforme (Linux ne le suit pas, d'autres systèmes POSIX peuvent le
     # suivre) : là où `follow_symlinks=False` existe, on le demande explicitement. Sous Windows l'option n'existe pas : la vérification d'identité après le
     # lien (`_post_link_problem`) reste la seule défense.
-    link_options = {"follow_symlinks": False} if os.link in os.supports_follow_symlinks else {}
     link_error: Optional[OSError] = None
     try:
-        os.link(str(temp_path), str(target), **link_options)
+        os.link(str(temp_path), str(target), **_LINK_OPTIONS)
     except OSError as error:
         link_error = error
     observed = _observe_slot_after_link_error(target, temp_identity) if link_error is not None else _SLOT_OURS
@@ -1087,13 +1105,14 @@ def confirm_published_slot(destination, *, expected_sha256: str, durability: Dur
         except FileNotFoundError as error:
             raise SlotAbsentError(f"Le slot {target} est absent : rien à confirmer, rien republié.", target) from error
         except OSError as error:
-            raise PublicationNotStartedError(f"slot inobservable : {error}", target, stage=PublicationStage.PREFLIGHT) from error
+            # Le slot existe peut-être : « rien n'est publié, rejeu permis » serait faux. Échec non rejouable, jamais confirmé.
+            raise SlotContentMismatchError(f"Le slot {target} est inobservable ({error}) : jamais confirmé.", target) from error
         if _is_symlink_or_reparse_point(slot) or not stat.S_ISREG(slot.st_mode):
             raise SlotContentMismatchError(f"Le slot {target} n'est pas un fichier régulier.", target)
         try:
             observed_sha256, observed_size = _sha256_and_size(target)
         except OSError as error:
-            raise PublicationNotStartedError(f"slot illisible : {error}", target, stage=PublicationStage.PREFLIGHT) from error
+            raise SlotContentMismatchError(f"Le slot {target} existe mais est illisible ({error}) : contenu non vérifiable, jamais confirmé.", target) from error
         identity = FileIdentity(slot.st_dev, slot.st_ino, observed_size, observed_sha256)
         if observed_sha256 != expected_sha256:
             raise SlotContentMismatchError(f"Le contenu du slot {target} n'est pas celui attendu.", target)
