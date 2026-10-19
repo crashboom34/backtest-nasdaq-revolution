@@ -1,0 +1,99 @@
+name: e3d-linux-validation
+
+# Workflow TEMPORAIRE (branche e3d-linux-validation-* uniquement, jamais master) : valide le registre E3-D (SYNTHETIC) sous un vrai Linux.
+# Aucun secret, aucune donnée de marché : tests synthétiques dans des répertoires temporaires. À supprimer avec sa branche.
+
+on:
+  push:
+    branches: ['e3d-linux-validation-**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  validate:
+    name: validate (${{ matrix.variant }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [workspace_ext4, tmpfs]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Environment (distribution, kernel, python, user, filesystems)
+        run: |
+          set -x
+          uname -a
+          cat /etc/os-release
+          python -VV
+          id
+          df -hT . "$RUNNER_TEMP" /dev/shm
+          stat -f -c 'workspace fstype=%T' .
+          stat -f -c 'runner_temp fstype=%T' "$RUNNER_TEMP"
+          stat -f -c 'dev_shm fstype=%T' /dev/shm
+          git --version
+      - name: Install the minimal pinned dependencies
+        run: python -m pip install pytest==9.0.3 numpy==2.2.6 pandas==3.0.3 pyarrow==24.0.0 python-dateutil==2.9.0.post0 six==1.17.0
+      - name: Select the test base directory
+        run: |
+          if [ "${{ matrix.variant }}" = "tmpfs" ]; then BT=/dev/shm/e3d; else BT="$RUNNER_TEMP/e3d"; fi
+          mkdir -p "$BT"
+          echo "BASETEMP=$BT" >> "$GITHUB_ENV"
+          stat -f -c 'base fstype=%T' "$BT"
+          echo "variant=${{ matrix.variant }} (tmpfs ne QUALIFIE PAS la durabilité : comparaison seulement)"
+      - name: Git identity for the synthetic E2 world
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "ci"
+      - name: Verify the transferred files (SHA-256)
+        run: sha256sum gate_v_registry_*.py tests/test_gate_v_registry_*.py tests/_gate_v_registry_*.py | tee sha256.txt
+      - name: E3-D tests (verbose, skips reported)
+        run: |
+          set -o pipefail
+          python -m pytest -v -p no:cacheprovider --basetemp "$BASETEMP/run_e3d" -rs --durations=15 tests/test_gate_v_registry_*.py --junitxml=junit-e3d.xml 2>&1 | tee e3d.log
+      - name: Count skipped tests (a skipped test is NOT a passed test)
+        if: always()
+        run: |
+          echo "SKIPPED lines:"; grep -c '^SKIPPED' e3d.log || true
+          grep '^SKIPPED' e3d.log || true
+          grep -E '[0-9]+ (passed|failed|skipped)' e3d.log | tail -n 3
+      - name: Regression (E3-C primitive, E2 claim, historical store)
+        run: |
+          set -o pipefail
+          python -m pytest -q -p no:cacheprovider --basetemp "$BASETEMP/run_regression" -rs \
+            tests/test_atomic_link_publication.py tests/test_atomic_link_publication_consumers.py tests/test_atomic_json_store.py \
+            tests/test_gate_v_final_holdout_claim.py tests/test_gate_v_final_holdout_claim_acquisition.py tests/test_gate_v_exposure_store.py \
+            --junitxml=junit-regression.xml 2>&1 | tee regression.log
+      - name: Concurrency and crash tests repeated 5 times (flakiness)
+        run: |
+          set -o pipefail
+          for i in 1 2 3 4 5; do
+            python -m pytest -q -p no:cacheprovider --basetemp "$BASETEMP/repeat_$i" tests/test_gate_v_registry_concurrency.py tests/test_gate_v_registry_posix.py 2>&1 | tail -n 2
+          done | tee repeat.log
+      - name: POSIX-only mutants (symlink, fstat, O_NOFOLLOW, O_NONBLOCK) that Windows cannot kill
+        if: matrix.variant == 'workspace_ext4'
+        env:
+          MUT_ONLY: "symlinks not links|open fstat unchecked|open follows links|open may block|non regular accepted|orphan not regular tolerated"
+        run: python tools/e3d_mutation.py 2>&1 | tee mutation-posix.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e3d-linux-${{ matrix.variant }}
+          path: |
+            sha256.txt
+            e3d.log
+            regression.log
+            repeat.log
+            mutation-posix.log
+            junit-e3d.xml
+            junit-regression.xml
+          if-no-files-found: warn
