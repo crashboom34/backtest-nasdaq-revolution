@@ -93,28 +93,28 @@ def test_a_symlink_slot_is_refused_and_never_followed(tmp_path):
     assert caught.value.failure is store.ReadFailure.NOT_REGULAR
 
 
-def test_a_slot_swapped_for_a_symlink_between_the_check_and_the_open_is_not_followed(tmp_path, monkeypatch):
-    # TOCTOU : même si le contrôle `lstat` est contourné, l'ouverture elle-même refuse de suivre un lien (O_NOFOLLOW) et compare la nature du fichier ouvert.
-    root = posix_registry(tmp_path)
-    engine._append_record(root, lambda snapshot: reservation_body(), max_attempts=3, unproven_synthetic=True)
-    slot = root / "admissions" / "admission_000000.json"
+def test_the_open_itself_never_follows_a_symlink_even_if_the_earlier_checks_were_raced(tmp_path):
+    # TOCTOU : le listage et `lstat` du lecteur refusent déjà un lien ; cette ouverture est la DERNIÈRE barrière si le slot est échangé après ces contrôles (O_NOFOLLOW).
     target = tmp_path / "outside.json"
-    target.write_bytes(slot.read_bytes())
-    slot.unlink()
-    os.symlink(target, slot)
-    monkeypatch.setattr(store, "_lstat_regular", lambda path, what: None)
-    with pytest.raises(store.RegistryReadError) as caught:
-        store.read_registry(root, barrier=False)
-    assert caught.value.failure is store.ReadFailure.SLOT_UNREADABLE
+    target.write_bytes(b"{}")
+    link = tmp_path / "admission_000000.json"
+    os.symlink(target, link)
+    with pytest.raises(OSError):
+        store._read_slot_bytes(link, 1024)
 
 
-def test_a_fifo_in_place_of_a_slot_never_blocks_the_reader(tmp_path, monkeypatch):
-    root = posix_registry(tmp_path)
-    slot = root / "admissions" / "admission_000000.json"
-    os.mkfifo(slot)
-    monkeypatch.setattr(store, "_lstat_regular", lambda path, what: None)
-    with pytest.raises(store.RegistryReadError):
-        store.read_registry(root, barrier=False)                                  # O_NONBLOCK + vérification S_ISREG : aucun blocage
+def test_the_open_of_a_fifo_neither_blocks_nor_returns_data(tmp_path):
+    fifo = tmp_path / "admission_000000.json"
+    os.mkfifo(fifo)
+    with pytest.raises(OSError, match="pas un fichier ordinaire"):
+        store._read_slot_bytes(fifo, 1024)                                        # O_NONBLOCK + fstat S_ISREG : aucun blocage, aucune lecture
+
+
+def test_a_regular_file_is_read_up_to_the_limit_plus_one(tmp_path):
+    path = tmp_path / "admission_000000.json"
+    path.write_bytes(b"x" * 50)
+    assert store._read_slot_bytes(path, 10) == b"x" * 11                          # limite + 1 octets : de quoi détecter un dépassement sans tout lire
+    assert store._read_slot_bytes(path, 100) == b"x" * 50
 
 
 def test_a_symlinked_registry_root_is_refused(tmp_path):
