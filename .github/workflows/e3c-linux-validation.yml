@@ -1,0 +1,126 @@
+name: e3c-linux-validation
+
+# Workflow TEMPORAIRE (branche e3c-linux-validation-* uniquement, jamais master) : valide la primitive de publication par lien E3-C sous un vrai Linux.
+# Aucun secret, aucune donnée de marché : tests synthétiques dans des répertoires temporaires. Supprimé avec sa branche à la fin de la mission.
+
+on:
+  push:
+    branches: ['e3c-linux-validation-**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  validate:
+    name: validate (${{ matrix.variant }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [workspace_ext4, tmpfs]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Environment (distribution, kernel, python, user, filesystems)
+        run: |
+          set -x
+          uname -a
+          cat /etc/os-release
+          python -VV
+          id
+          df -hT . "$RUNNER_TEMP" /dev/shm
+          findmnt -T . || true
+          findmnt -T "$RUNNER_TEMP" || true
+          findmnt -T /dev/shm || true
+          stat -f -c 'workspace fstype=%T' .
+          stat -f -c 'runner_temp fstype=%T' "$RUNNER_TEMP"
+          stat -f -c 'dev_shm fstype=%T' /dev/shm
+          sysctl fs.protected_hardlinks fs.protected_symlinks || true
+          grep -E ' / | /home | /mnt ' /proc/self/mountinfo || true
+      - name: Install the minimal pinned dependencies
+        run: python -m pip install pytest==9.0.3 numpy==2.2.6 pandas==3.0.3 pyarrow==24.0.0 python-dateutil==2.9.0.post0 six==1.17.0
+      - name: Select and describe the test base directory
+        run: |
+          if [ "${{ matrix.variant }}" = "tmpfs" ]; then BT=/dev/shm/e3c; else BT="$RUNNER_TEMP/e3c"; fi
+          mkdir -p "$BT"
+          echo "BASETEMP=$BT" >> "$GITHUB_ENV"
+          findmnt -T "$BT" || true
+          stat -f -c 'base fstype=%T' "$BT"
+          echo "variant=${{ matrix.variant }} (tmpfs ne QUALIFIE PAS la durabilité : comparaison seulement)"
+      - name: Verify the transferred files (SHA-256)
+        run: |
+          sha256sum atomic_json_store.py tests/test_atomic_link_publication.py tests/test_atomic_link_publication_consumers.py | tee sha256.txt
+      - name: E3-C tests (verbose, skips reported)
+        run: |
+          set -o pipefail
+          python -m pytest -v -p no:cacheprovider --basetemp "$BASETEMP/run_e3c" -rs --durations=15 \
+            tests/test_atomic_link_publication.py tests/test_atomic_link_publication_consumers.py \
+            --junitxml=junit-e3c.xml 2>&1 | tee e3c.log
+      - name: Count skipped tests (a skipped test is NOT a passed test)
+        if: always()
+        run: |
+          echo "SKIPPED lines:"; grep -c '^SKIPPED' e3c.log || true
+          grep '^SKIPPED' e3c.log || true
+          grep -E '[0-9]+ (passed|failed|skipped)' e3c.log | tail -n 3
+      - name: Regression (historical store, B3, B5, B6, importers)
+        run: |
+          set -o pipefail
+          python -m pytest -q -p no:cacheprovider --basetemp "$BASETEMP/run_regression" -rs \
+            tests/test_atomic_json_store.py tests/test_atomic_json_store_durable.py tests/test_job_store.py tests/test_optimization_store.py \
+            tests/test_gate_v_exposure_store.py tests/test_gate_v_exposure_declarations.py tests/test_gate_v_exposure_attestation_phases.py \
+            tests/test_gate_v_exposure_integration.py tests/test_gate_v_exposure_scan.py tests/test_gate_v_exposure_interpreters.py \
+            --junitxml=junit-regression.xml 2>&1 | tee regression.log
+      - name: Crash matrix and multi-process race, repeated 5 times (flakiness)
+        run: |
+          set -o pipefail
+          for i in 1 2 3 4 5; do
+            python -m pytest -q -p no:cacheprovider --basetemp "$BASETEMP/repeat_$i" \
+              tests/test_atomic_link_publication.py -k "real_process_death or racing" 2>&1 | tail -n 2
+          done | tee repeat.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e3c-linux-${{ matrix.variant }}
+          path: |
+            sha256.txt
+            e3c.log
+            regression.log
+            repeat.log
+            junit-e3c.xml
+            junit-regression.xml
+          if-no-files-found: warn
+
+  mutation:
+    name: mutation (shard ${{ matrix.shard }}/4)
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install the minimal pinned dependencies
+        run: python -m pip install pytest==9.0.3 numpy==2.2.6 pandas==3.0.3 pyarrow==24.0.0 python-dateutil==2.9.0.post0 six==1.17.0
+      - name: Targeted mutation campaign (copy outside the repository, green baseline required)
+        env:
+          MUT_SHARD: ${{ matrix.shard }}
+          MUT_SHARDS: "4"
+        run: python tools/e3c_mutation.py 2>&1 | tee mutation-${{ matrix.shard }}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e3c-linux-mutation-${{ matrix.shard }}
+          path: mutation-${{ matrix.shard }}.log
