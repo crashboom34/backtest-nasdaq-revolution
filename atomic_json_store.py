@@ -324,9 +324,9 @@ def validate_portable_identifier(value: str, field_name: str) -> str:
 #   n'a AUCUNE valeur de preuve de durabilité réelle (23.2) : `posix_dir_fsync_succeeded` est alors faux. Même sous `POSIX_DIR_FSYNC`, il dit seulement que le
 #   `fsync` du répertoire a réussi sur un hôte POSIX non macOS : la qualification du système de fichiers (local, ni NFS/SMB, ni matériel qui ment sur `fsync`)
 #   et de la plateforme (Linux/OCI, 23.2 et 23.9) n'est PAS vérifiée ici ; elle relève de l'admission REAL. Les chemins système POSIX (`O_DIRECTORY`,
-#   `O_NOFOLLOW`, `fsync` d'un vrai descripteur de répertoire, `follow_symlinks=False`) sont exécutés par les tests `posix_only`, ignorés sous Windows ; ils ont été
-#   exécutés et sont passés sur un hôte Linux hébergé (Ubuntu 24.04, voir AI_HANDOFF.md §62) : cela valide le COMPORTEMENT des appels système, JAMAIS la durabilité
-#   face à une coupure d'alimentation (aucune n'est simulée) ni la qualification d'un volume.
+#   `O_NOFOLLOW`, `fsync` d'un vrai descripteur de répertoire, `follow_symlinks=False`) sont exécutés par les tests `posix_only`, ignorés sous Windows. Le jeu complet a été
+#   exécuté sur un hôte Linux hébergé (GitHub Actions, Ubuntu 24.04) AVANT publication : run, commit et empreintes sont dans AI_HANDOFF.md §62. Cela valide le
+#   COMPORTEMENT des appels système, JAMAIS la durabilité face à une coupure d'alimentation (aucune n'est simulée) ni la qualification d'un volume.
 #   LIMITES CONNUES : les opérations sont faites PAR CHEMIN (création, écriture, `link`, `lstat`, `unlink` du temporaire), seul le `fsync` utilise le descripteur
 #   tenu. Un parent remplacé par un lien PENDANT `precheck` voit le temporaire créé, écrit et synchronisé À TRAVERS ce lien avant d'être détecté puis supprimé ; une
 #   fenêtre TOCTOU subsiste aussi entre le dernier contrôle d'identité et le `link`. Les contrôles d'identité avant, juste après le lien et après la barrière la
@@ -336,7 +336,7 @@ def validate_portable_identifier(value: str, field_name: str) -> str:
 #   (ext4/xfs) : garder le descripteur ouvert jusqu'au nettoyage est PROPOSÉ, non implémenté. Aucune permission restrictive n'est appliquée (23.24 ouvert).
 #   Sur tmpfs, `fsync` de répertoire ne fait RIEN et renvoie 0 : `posix_dir_fsync_succeeded` y est vrai sans rien prouver (les tests sur un `tmp_path` tmpfs ne
 #   prouvent aucune durabilité) ; l'admission REAL doit lister les systèmes de fichiers qualifiés. `fsync` sur un descripteur `O_RDONLY` (répertoire, fichier du
-#   slot) est accepté sous Linux (constaté, ext4 et tmpfs). Un `PublishedUnconfirmedError` `DIRECTORY_FSYNC_FAILED` ou `FILE_FSYNC_FAILED` n'est PAS récupérable
+#   slot) est accepté sous Linux (constaté sur l'hôte hébergé). Un `PublishedUnconfirmedError` `DIRECTORY_FSYNC_FAILED` ou `FILE_FSYNC_FAILED` n'est PAS récupérable
 #   de façon fiable par re-confirmation (`reconfirmation_reliable` est faux : nouveau descripteur, erreur peut-être déjà rapportée) : décision humaine ou
 #   remontage. AVERTISSEMENT PROPOSÉ ; la ligne de la matrice 23.10 qui prévoit la re-confirmation reste inchangée.
 #   DURABILITÉ DU RÉPERTOIRE LUI-MÊME : `fsync` du répertoire du slot persiste SES entrées, pas sa propre entrée dans son parent. Après un `mkdir` (répertoire
@@ -360,7 +360,8 @@ def validate_portable_identifier(value: str, field_name: str) -> str:
 #                                 LINK_OUTCOME_UNKNOWN` : `link` a échoué d'une façon ambiguë (EIO, ESTALE, ETIMEDOUT, EINTR, ECONNRESET) et le slot est
 #                                 inobservable : le lien existe PEUT-ÊTRE, jamais une certitude ; même traitement (binding, temporaire conservé) ;
 #                                 `confirm_published_slot` lèvera `SlotAbsentError` si rien n'a été publié (rejeu alors permis sous les règles d'unicité).
-#     SlotAbsentError / SlotContentMismatchError   (re-confirmation seulement) le slot a disparu, ou son contenu n'est pas celui attendu.
+#     SlotAbsentError / SlotContentMismatchError   (re-confirmation seulement) le slot (ou son répertoire parent) est absent ; ou le slot existe mais son contenu n'est
+#                                 pas celui attendu, est illisible/inobservable, ou son parent est inutilisable (état inconnu) : binding, jamais rejouable.
 #
 #   E3-C n'implémente AUCUNE règle métier du registre, des déclarations ni de l'événement : ni unicité par campagne, ni recouvrement, ni nouvelle tentative
 #   (`REGISTRY_CONTENTION`), ni politique propre à la `CONSUMPTION` (aucune re-confirmation après redémarrage : orchestrateur / registre). Il fournit les
@@ -592,14 +593,16 @@ class PublishedUnconfirmedError(LinkPublicationError):
 
     @property
     def reconfirmation_reliable(self) -> bool:
-        """Faux après un échec de `fsync` (`DIRECTORY_FSYNC_FAILED`, `FILE_FSYNC_FAILED`) : une re-confirmation ouvre un NOUVEAU descripteur et lit le cache de pages ;
+        """PROPOSÉ (la ligne de la matrice 23.10 qui prévoit la re-confirmation reste inchangée ; cette propriété n'interdit rien, elle avertit). Faux après un
+        échec de `fsync` (`DIRECTORY_FSYNC_FAILED`, `FILE_FSYNC_FAILED`) : une re-confirmation ouvre un NOUVEAU descripteur et lit le cache de pages ;
         sous Linux une erreur d'écriture n'est rapportée qu'une fois par description de fichier, donc elle peut réussir SANS rien prouver. Décision humaine ou remontage,
         jamais une boucle de re-confirmation. Vrai pour les autres causes, où `confirm_published_slot` observe réellement le slot."""
         return self.reason not in (UnconfirmedReason.DIRECTORY_FSYNC_FAILED, UnconfirmedReason.FILE_FSYNC_FAILED)
 
 
 class SlotAbsentError(LinkPublicationError):
-    """Re-confirmation : le slot n'existe pas (ou plus) : rien n'a été publié (23.10)."""
+    """Re-confirmation : le slot n'existe pas (ou plus, ou son répertoire parent n'existe pas) : rien n'est publié (23.10). `replay_safe` reste FAUX : ce n'est pas un
+    feu vert de rejeu, l'unicité et les préconditions de l'appelant (E3-D : revenir à l'étape 1) s'appliquent."""
 
 
 class SlotContentMismatchError(LinkPublicationError):
@@ -1098,7 +1101,14 @@ def confirm_published_slot(destination, *, expected_sha256: str, durability: Dur
     target = directory / name
     if durability is DurabilityProfile.POSIX_DIR_FSYNC and not _posix_profile_available():
         raise PlatformNotQualifiedError(f"Le profil {durability.value} exige un fsync de répertoire, indisponible sur cette plateforme.", target)
-    anchor = _open_anchor(directory, durability, target)
+    try:
+        anchor = _open_anchor(directory, durability, target)
+    except PublicationNotStartedError as error:
+        if isinstance(error.__cause__, FileNotFoundError):
+            # Parent absent : le slot ne peut pas exister (rien n'est créé).
+            raise SlotAbsentError(f"Le répertoire parent de {target} est absent : le slot n'existe pas.", target) from error
+        # Parent inutilisable (pas un répertoire, lien, droits, erreur d'E/S, identité changée) : l'état du slot est INCONNU, jamais « rejeu permis ».
+        raise SlotContentMismatchError(f"Le répertoire parent de {target} est inutilisable ({error}) : état du slot inconnu, jamais confirmé.", target) from error
     try:
         try:
             slot = os.lstat(target)
@@ -1111,6 +1121,8 @@ def confirm_published_slot(destination, *, expected_sha256: str, durability: Dur
             raise SlotContentMismatchError(f"Le slot {target} n'est pas un fichier régulier.", target)
         try:
             observed_sha256, observed_size = _sha256_and_size(target)
+        except FileNotFoundError as error:
+            raise SlotAbsentError(f"Le slot {target} a disparu entre son observation et sa lecture : rien à confirmer, rien republié.", target) from error
         except OSError as error:
             raise SlotContentMismatchError(f"Le slot {target} existe mais est illisible ({error}) : contenu non vérifiable, jamais confirmé.", target) from error
         identity = FileIdentity(slot.st_dev, slot.st_ino, observed_size, observed_sha256)

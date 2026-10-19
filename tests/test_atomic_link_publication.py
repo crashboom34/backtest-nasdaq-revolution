@@ -999,9 +999,9 @@ def test_reconfirmation_arguments_are_strict(tmp_path):
         confirm(tmp_path, expected_identity=(1, 2, 3, "x"))
     with pytest.raises(ValueError):
         store.confirm_published_slot(tmp_path / (".exposure.tmp." + "a" * 32), expected_sha256="0" * 64, durability=SIMULATED)
-    with pytest.raises(PublicationNotStartedError) as refusal:
+    with pytest.raises(store.SlotAbsentError):                                          # parent absent : le slot ne peut pas exister (jamais créé)
         store.confirm_published_slot(tmp_path / "absent" / "slot.json", expected_sha256="0" * 64, durability=SIMULATED)
-    assert refusal.value.stage is PublicationStage.PREFLIGHT and not (tmp_path / "absent").exists()
+    assert not (tmp_path / "absent").exists()
 
 
 def test_the_posix_reconfirmation_syncs_the_directory_descriptor_once(tmp_path, posix_profile, monkeypatch, descriptors):
@@ -1377,16 +1377,52 @@ def test_reconfirming_a_slot_that_cannot_be_observed_is_never_a_replay_safe_refu
     assert refusal.value.replay_safe is False and refusal.value.slot_is_binding is True and "inobservable" in str(refusal.value)
 
 
-@pytest.mark.parametrize("reason, reliable", [(store.UnconfirmedReason.DIRECTORY_FSYNC_FAILED, False), (store.UnconfirmedReason.FILE_FSYNC_FAILED, False),
-                                              (store.UnconfirmedReason.LINK_OUTCOME_UNKNOWN, True), (store.UnconfirmedReason.SLOT_MISSING, True),
-                                              (store.UnconfirmedReason.LINK_COUNT_ANOMALY, True)])
-def test_a_reconfirmation_after_an_fsync_failure_is_flagged_as_unreliable(tmp_path, reason, reliable):
+UNRELIABLE_RECONFIRMATION = {store.UnconfirmedReason.DIRECTORY_FSYNC_FAILED, store.UnconfirmedReason.FILE_FSYNC_FAILED}
+
+
+@pytest.mark.parametrize("reason", list(store.UnconfirmedReason), ids=lambda reason: reason.name)
+def test_a_reconfirmation_after_an_fsync_failure_is_flagged_as_unreliable(tmp_path, reason):
     """Revue F-M2 : après un échec de `fsync`, une re-confirmation (nouveau descripteur, cache de pages) peut réussir sans rien prouver (erreur déjà rapportée) :
     décision humaine, pas boucle de re-confirmation."""
     slot = tmp_path / "slot.json"
     publication = LinkPublication(slot, PublicationState.PUBLISHED_UNCONFIRMED, SIMULATED, PublicationOperation.PUBLISHED, FileIdentity(1, 2, 3, "0" * 64),
                                   "p" * 32, 1, None, TempDisposition.KEPT_UNCONFIRMED)
-    assert PublishedUnconfirmedError("x", slot, publication=publication, reason=reason).reconfirmation_reliable is reliable
+    assert PublishedUnconfirmedError("x", slot, publication=publication, reason=reason).reconfirmation_reliable is (reason not in UNRELIABLE_RECONFIRMATION)
+
+
+def test_reconfirming_below_a_parent_that_is_not_a_directory_never_claims_the_slot_is_free(tmp_path):
+    """Revue H-M1 : un parent inutilisable (pas un répertoire, lien, droits, erreur d'E/S) ne dit RIEN de l'état du slot : jamais « rejeu permis »."""
+    (tmp_path / "file_not_dir").write_bytes(b"x")
+    with pytest.raises(store.SlotContentMismatchError) as refusal:
+        store.confirm_published_slot(tmp_path / "file_not_dir" / "slot.json", expected_sha256="0" * 64, durability=SIMULATED)
+    assert refusal.value.replay_safe is False and refusal.value.slot_is_binding is True and "parent" in str(refusal.value)
+
+
+def test_reconfirming_when_the_directory_descriptor_cannot_be_opened_never_claims_the_slot_is_free(tmp_path, posix_profile, monkeypatch):
+    published_slot(tmp_path)
+
+    def refusing(path):
+        raise PermissionError(errno.EACCES, "ouverture refusée")
+
+    monkeypatch.setattr(store, "_open_posix_directory_descriptor", refusing)
+    with pytest.raises(store.SlotContentMismatchError) as refusal:
+        confirm(tmp_path, durability=POSIX)
+    assert refusal.value.replay_safe is False and (tmp_path / "slot.json").exists()
+
+
+def test_a_slot_that_vanishes_between_the_observation_and_the_read_is_absent_not_unreadable(tmp_path, monkeypatch):
+    import builtins
+    published_slot(tmp_path)
+    real_open = builtins.open
+
+    def vanishing(file, *args, **kwargs):
+        if Path(file) == tmp_path / "slot.json":
+            raise FileNotFoundError(errno.ENOENT, "disparu")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", vanishing)
+    with pytest.raises(store.SlotAbsentError):
+        confirm(tmp_path)
 
 
 def test_a_missing_slot_after_a_link_error_is_still_a_replay_safe_refusal(tmp_path, monkeypatch, descriptors):
@@ -1589,14 +1625,16 @@ def test_posix_a_real_process_death_under_the_real_profile_keeps_the_slot_comple
     if slot_expected:
         with pytest.raises(SlotOccupiedError):
             publish(tmp_path, content=b"autre", naming=TempNaming[naming], durability=POSIX)
-        assert confirm(tmp_path, durability=POSIX).state is PublicationState.PUBLISHED_DURABLE and slot.read_bytes() == b"abcdef"
+        again = confirm(tmp_path, durability=POSIX)
+        assert again.state is PublicationState.PUBLISHED_DURABLE and again.posix_dir_fsync_succeeded is True and slot.read_bytes() == b"abcdef"
     else:
-        publish(tmp_path, content=b"abcdef", naming=TempNaming[naming], durability=POSIX)
-        assert slot.read_bytes() == b"abcdef"
+        republished = publish(tmp_path, content=b"abcdef", naming=TempNaming[naming], durability=POSIX)
+        assert republished.posix_dir_fsync_succeeded is True and slot.read_bytes() == b"abcdef"
     assert {entry.name: entry.read_bytes() for entry in tmp_path.iterdir() if entry.name in snapshot} == snapshot
 
 
 @posix_only
+@linux_only
 def test_posix_the_no_follow_option_is_really_in_force_on_linux():
     assert store._LINK_OPTIONS == {"follow_symlinks": False}
 

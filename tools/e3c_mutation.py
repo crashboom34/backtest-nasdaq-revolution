@@ -216,6 +216,9 @@ mut('reconfirm reliability inverted', '        return self.reason not in (Unconf
 mut('link option not applied', 'os.link(str(temp_path), str(target), **_LINK_OPTIONS)', 'os.link(str(temp_path), str(target))')
 mut('link always no-follow', '_LINK_OPTIONS = {"follow_symlinks": False} if os.link in os.supports_follow_symlinks else {}', '_LINK_OPTIONS = {"follow_symlinks": False}')
 mut('link follows symlinks', '_LINK_OPTIONS = {"follow_symlinks": False} if os.link in os.supports_follow_symlinks else {}', '_LINK_OPTIONS = {}')
+mut('confirm vanished slot reported unreadable', '        except FileNotFoundError as error:\n            raise SlotAbsentError(f"Le slot {target} a disparu entre', '        except KeyError as error:\n            raise SlotAbsentError(f"Le slot {target} a disparu entre')
+mut('confirm unusable parent claims absent', 'raise SlotContentMismatchError(f"Le répertoire parent de {target} est inutilisable', 'raise SlotAbsentError(f"Le répertoire parent de {target} est inutilisable')
+mut('confirm absent parent not absent', '        if isinstance(error.__cause__, FileNotFoundError):\n            # Parent absent', '        if False:\n            # Parent absent')
 
 
 def main() -> int:
