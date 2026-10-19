@@ -3996,3 +3996,557 @@ prévalidation : READY FOR COMMIT** (périmètre ci-dessus ; la publication exig
 
 **Prochaine tranche unique** : autorisation de commit puis de publication de B4 (périmètre ci-dessus), puis **E3-B5** (persistance et relecture
 stricte de l'A0, `inventory_<content_hash>.json`, provenance et relevé des preuves hors `inventory_id`).
+## 54. `AF-V-07` — E3-B5 (persistance de l'A0) et E3-B6 (partie indépendante d'E3-C) IMPLÉMENTÉS + TESTÉS + MUTÉS + REVUS LOCALEMENT, NON COMMITÉS, NON PUBLIÉS (2026-10-18) — fait foi sur les §52 et §53 pour B5/B6 (« non commencés » y est périmé)
+
+**Point de départ** : `HEAD` = `origin/master` = `2b25354a7139d4080f5a8c1f0bb06e22203718dc` (B4 publié, §52/§53). Aucun commit, aucun push, index réel inchangé
+(empreinte `8b78a333b37710b5…` ; trois fichiers indexés de l'utilisateur intacts). `REAL` reste désactivé et non qualifié ; `GATE V` reste NON PASSÉE ;
+`FINAL_HOLDOUT` n'a pas été accédé ; aucune donnée de marché, aucun backtest réel.
+
+### 54.1 Livrables (tous NON SUIVIS sauf B3, modifié de façon additive ; tous en LF)
+
+| Fichier | Rôle |
+|---|---|
+| `gate_v_exposure_store.py` (nouveau, ~680 lignes) | **E3-B5** : enregistrement A0, identités, sérialisation normative, publication exclusive durable, relecture stricte |
+| `gate_v_exposure_declarations.py` (nouveau, ~750 lignes) | **E3-B6, partie indépendante d'E3-C** : enveloppe de déclaration, lecture stricte, chaînes, lignée, `DeclarationSet`, brouillon de report, lecture des slots d'attestation |
+| `gate_v_exposure_interpreters.py` (B3, modifié, +32/−3) | règles ADDITIVES reconnaissant l'arborescence `exposure/` (voir 54.6) |
+| `tests/gate_v_exposure_support.py` (nouveau) | fixtures synthétiques partagées (fenêtre `W`, `make_job`, `interpret`, `registry`, `assemble`) |
+| `tests/test_gate_v_exposure_store.py` (113 tests) · `tests/test_gate_v_exposure_declarations.py` (138) · `tests/test_gate_v_exposure_integration.py` (28) | tests B5, B6 et intégration B3↔B5/B6 |
+
+Aucun module publié n'est modifié, hormis l'ajout additif de B3 ; E3-A, B1, B2, B4, `atomic_json_store`, `dataset_split`, `validation_run` sont inchangés.
+Graphe d'imports direct : `store → inventory (B4), interpreters (B3), sources (B1), scan (B2), E3-A, atomic_json_store` ; `declarations → store, scan, E3-A`.
+Jamais E2, moteur ni `dataset_split` en import direct ; en indirect, B3 tire déjà `gate_v_final_holdout_claim` (donc `dataset_split`, `research_run`,
+numpy, pandas) : l'invariant « jamais `dataset_split` » n'est vrai qu'au sens direct (écart documenté, non corrigé).
+
+### 54.2 E3-B5 — format et API
+
+- **Trois identités** : `inventory_id` (scientifique, E3-A), `inventory_content_digest` (id + six compteurs), `inventory_content_hash` (SHA-256 du JSON canonique
+  COMPACT de l'enregistrement entier sans la clé du hash, `created_at` inclus ; couvre provenance, preuves et pins de scan ; n'entre dans aucune formule d'E3-A).
+- **Représentation normative** (distincte de la pré-image du hash) : `json.dumps(record, sort_keys=True, ensure_ascii=False, indent=2, allow_nan=False) + "\n"`,
+  UTF-8 sans BOM, LF. `save_exclusive` reçoit un `dict` trié récursivement ; l'égalité octet pour octet est vérifiée avant l'écriture et à la relecture (point fixe).
+- **Chemin** : `<campaign_dir>/exposure/inventory_<inventory_content_hash>.json` (jamais de parent créé hors `exposure/`).
+- **API** : `build_exposure_inventory_record`, `serialize_exposure_inventory_record`, `compute_inventory_content_hash`, `publish_exposure_inventory(campaign_dir, assembly, *, created_at)`,
+  `load_exposure_inventory(path)`, `read_exposure_inventory(campaign_dir, hash)`, `exposure_inventory_path`, `read_strict_file`, `parse_strict_record`, `lstat_directory`,
+  `finding_to_record/from_record`, types `PersistedExposureInventory`, `ScanPin`, `ScanPinRoot`, `ExposureStoreError(failure, detail)`, `StoreFailure` (causes typées).
+- **Publication** : `created_at` INJECTÉ (aucune horloge). Même contenu republié = idempotence après relecture stricte ; contenu différent ou tronqué au nom attendu =
+  `NAME_CONSUMED` (nouveau `created_at` exigé, jamais de suppression ni de réparation) ; écriture incomplète = `INCOMPLETE_WRITE`, chemin consommé laissé en place.
+  Un enregistrement que la relecture stricte refuserait est refusé AVANT toute écriture (`SCHEMA`, ajouté après la revue A).
+- **Relecture stricte** : `lstat` sans lien ni point d'analyse ni non régulier, plafond de taille (16 Mio), identité stable (ino, dev, taille, mtime) avant/après lecture,
+  JSON strict de B2 (BOM, UTF-8 invalide, clés dupliquées, `NaN`/`Infinity`, profondeur 32), clés exactes, version, hash recalculé, nom = hash, point fixe d'octets,
+  schéma complet, recalcul des trois identités avec E3-A (un hash valide ne sauve pas une identité fausse), cohérence `complete` ⇔ raisons, `scanned_roots` =
+  racines des pins moins racines dérivées, tris/unicités des registres, versions de règles strictement égales (sinon `UNKNOWN_VERSION`), scans à `ScanHooks` jamais persistés.
+- **Durabilité** : celle de `save_exclusive(durable=True)`. Sous Windows le `fsync` de répertoire n'est pas démontrable (journal NTFS) ; les garanties POSIX exigées par `REAL`
+  ne sont PAS établies ; la création de `exposure/` n'est jamais synchronisée dans `campaign_dir`.
+
+### 54.3 E3-B6 — ce qui est implémenté et ce qui est BLOQUÉ
+
+**Implémenté (lecture, vérification, lignée)** : `build_declaration_envelope`, `serialize_declaration_envelope`, `compute_declaration_id/content_hash`, `parse_declaration_file`,
+`load_declaration_lineage(campaign_dir, *, current_inventory_id, pinned_a0_hashes=frozenset())`, `draft_first_declaration_carry`, `read_attestation_slot`, `declaration_path`,
+`attestation_path`. Chemins : `exposure/<inventory_id>/declaration_<seq4>.json` et `attestation_<seq4>.json` (slots denses `0001`…`9999`, séquences indépendantes).
+Règles vérifiées (23.29.1–23.29.2) : nom du répertoire = `inventory_id` de chaque déclaration ; un A0 valide du même `inventory_id` existe avec `created_at` ≤ celui de la
+première déclaration ; chaîne d'identités `prev_declaration_id` ; `hash_linked` faux SEULEMENT si ids et fichiers sont valides mais un `prev_declaration_content_hash` ne
+correspond pas, et un lien rompu est refusé dans toute chaîne non terminale ; racine unique, fourche, cycle, chaîne non reliée, retour à un ancien inventaire ; épinglage
+`carried_from` (`inventory_id`, `tip_seq`, `tip_declaration_id`, `tip_declaration_content_hash`) ; report cumulatif comparé par contenu (tous les champs d'`ExposureFinding`
+sauf `source_id`) en MULTIENSEMBLE avec renumérotation `declared:0001:<pos4>` ; `t_sel` jamais abaissé ; plafond 9 999 reports ; dossiers vides et orphelins
+`.exposure.tmp.<32 hex>` ignorés ET consignés ; attestation sans déclaration refusée ; A0 illisible = orphelin consigné sauf s'il est épinglé (par l'appelant ou cité comme
+chaîne dans une attestation) ; refus fermé, aucune réparation. `DeclarationSet` n'est produit que par la fonction privée `_declaration_set`, appelée par le chargeur
+(test AST ; l'API publique est toutefois constructible, voir 54.8). Plafonds d'entrées (100 000) et d'octets cumulés (512 Mio) : `TOO_MANY_ENTRIES` / `TOO_MUCH_DATA`.
+
+**BLOQUÉ par E3-C (non implémenté, non simulé)** : la PUBLICATION des déclarations et des attestations (primitive de publication par lien d'E3-C, absente). Aucun code de B6
+n'écrit, ne publie ni ne supprime (test AST). Il n'y a donc pas d'`O_EXCL` de remplacement, pas de modification d'E3-C. B6 n'est PAS déclaré entièrement implémenté.
+
+### 54.4 Tests et résultats mesurés (`.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider`)
+
+- B5 + B6 + intégration (après correctifs des revues) : **279 tests collectés** (113 + 138 + 28), tous verts sauf 2 skipped (tests de lien symbolique sans privilège Windows, compensés par des
+  jonctions `mklink /J` et par la simulation du drapeau de point d'analyse via `os.lstat`).
+- **Suite complète FINALE (code final, toutes revues appliquées)** : **5 513 passed, 11 skipped, 0 failed** en 875 s. Pour mémoire, la régression Gate V ciblée avant les correctifs de la revue A
+  avait donné 3 971 passed, 11 skipped. Les skips sont les skips POSIX/privilège connus.
+
+- **Mutation** (copies hors dépôt, base verte exigée, « tué » = code pytest 1 uniquement) : store 41/42, déclarations 63/65, règles B3 17/17 = **121/124 tués**. Les 3 survivants
+  sont ÉQUIVALENTS : (a) garde `reasons` de la provenance, redondante avec le constructeur de B4 ; (b) garde « marche en cycle » du parcours de lignée, inatteignable
+  (chaque chaîne n'a qu'un `carried_from`, la fourche est refusée avant) ; (c) champ `status` du contenu comparé, déterminé par `overlap` et la cause d'`ExposureFinding`.
+  La campagne a fait ajouter des dizaines de tests (jonction du répertoire de campagne, taille lue ≠ taille observée, A0 d'un autre inventaire, auto-référence, `carried_from` hors seq 1,
+  chaque champ du contenu comparé, largeurs de seq d'attestation en B3, registres triés/uniques…). Un test d'ordre A0 qui était vacueux (même campagne pour les deux cas) a été corrigé.
+- Le test historiquement défaillant `test_hook_blocks_a_force_push` (encodage `cp1252`, §51) est vert dans cette exécution ; il n'a été ni modifié ni désactivé et reste dépendant de l'environnement.
+
+### 54.5 Revues indépendantes (deux sous-agents `general-purpose` en lecture seule) et corrections
+
+- **Revue A (sécurité/architecture)** : 0 BLOCKER, 4 MAJOR corrigés : (1) ancêtres non contrôlés en lecture (`read_exposure_inventory`, `read_attestation_slot` contrôlent maintenant `campaign_dir`
+  et `exposure/`) ; (2) publication d'un A0 que la relecture refuserait (prouvé relisible avant écriture) ; (3) attestations relues une fois par A0 illisible (agrégées en une passe, erreur brute
+  évitée) ; (4) plafonds : `os.scandir` avec arrêt anticipé, octets cumulés. Mineurs corrigés : `lstat` du répertoire d'inventaire au début de la lecture de chaîne, `OSError` typées,
+  réserve de durabilité, code mort supprimé. Documentés sans changement : import indirect de `dataset_split`, constructibilité des dataclasses, A0 valides gardés en mémoire.
+- **Revue B (science/contrats)** : 0 BLOCKER. Voir 54.7 pour les points renvoyés à validation humaine (aucune décision scientifique prise en silence).
+
+### 54.6 Changement additif de B3 (justifié par un test RED)
+
+Sans lui, un `exposure/` légitime rendait la racine de campagne incomplète (entrée inconnue). Ajouts : balises `campaign.exposure.*`, 7 règles de la table fermée (répertoire, A0,
+orphelin, répertoire de chaîne, déclaration, attestation, orphelin de chaîne) APRÈS les deux règles publiées inchangées, balises informatives étendues. Rétrocompatibilité testée
+(digests épinglés des dispositions `RESULTS` et `SPLIT_PLAN_DIR`, deux premières règles inchangées). `B3_SEMANTICS_VERSION` reste `…_v2` alors que le `rules_digest` de `CAMPAIGN_DIR` change :
+**à documenter ou à faire monter en `v3` (décision humaine)** ; seul `scan_pins.rules_digest` distingue les deux états dans un A0.
+
+### 54.7 Interprétations [R] et questions ouvertes (À VALIDER par l'humain ; rien n'est tranché ici)
+
+1. Noms et forme exacts des clés de l'enregistrement A0 ; `inventory_content_hash` stocké DANS le fichier ; refus de persister un scan à `ScanHooks`.
+2. « A0 existant avant la première déclaration » lu comme `a0.created_at <= first.created_at` (inclusif ; horodatages injectés, donc pas une preuve d'ordre).
+3. Un A0 est « épinglé par une attestation » si son hash apparaît comme CHAÎNE (clé ou valeur) dans le JSON d'une attestation (schéma d'attestation = E3-E) ; `pinned_a0_hashes` fourni par l'appelant (`ADMISSION`).
+   Un A0 épinglé ABSENT (et non seulement illisible) n'est pas détecté (E3-J).
+4. **B3 vs B6 sur un `inventory_<hash>.json` illisible** : B3 le rend `INFORMATIVE_UNRESOLVED` (racine incomplète, fermé) alors que 23.29.1 le traite comme orphelin consigné ; un A0 tronqué laissé par
+   `INCOMPLETE_WRITE` rend donc toute racine dérivée `UNDETERMINED`. Fail-closed, non corrigé : exige une décision (exception B3 pour le A0 illisible non épinglé, ou précision de l'ADR).
+5. La lignée est liée à `inventory_id`, jamais à la campagne : un A0/une chaîne copiés d'une autre campagne de même `W` sont acceptés (un test fige `campaign_id` ≠ identité). Option : `expected_campaign_id`.
+6. Géométrie des expositions DÉCLARÉES (verdict vs `W`) non vérifiée au chargement (`ClassificationInput` lève plus tard) ; blocs informatifs (`plans`, `non_oos_validations`, `exposure_evidence`)
+   non recoupés avec les findings (seul le hash les protège) ; slots d'attestation sans contrôle de point fixe (forme normative d'attestation = E3-E).
+7. `rules_versions` strictement égales aux constantes courantes : tout changement de B3/B4 rend un A0 attesté illisible (`UNKNOWN_VERSION`) donc bloque la lignée ; aucune migration.
+8. `hash_linked=False` accepté seulement sur la chaîne terminale ; un cycle détaché est `UNLINKED_CHAIN`, un cycle sans racine `CYCLE` (énumération `LineageFailure` au lieu des exceptions nommées de l'ADR).
+9. `resolved_path` ABSOLU persisté dans les pins de scan : le hash dépend de la machine ; plafonds opérationnels (`MAX_A0_BYTES` 16 Mio, profondeur 32, 100 000 entrées, 512 Mio) inventés, absents de 23.24.
+10. Deux modules (store + déclarations) au lieu d'un seul. Questions héritées inchangées : Q-3 (agrégation observé/déclaré), Q-5 (règle `REAL`), couche d'adaptation des identités de run/configuration (D1),
+    comptabilité finale du `ClosingRecord` (D2), preuve des racines dérivées (D3, E3-J). D1/D2/D3 du §53 restent en vigueur.
+
+### 54.8 Limites et risques résiduels
+
+Publication des déclarations/attestations impossible tant qu'E3-C n'existe pas ; durabilité POSIX non établie ; TOCTOU résiduel limité à une course (jamais à un lien statique) ; les A0 valides sont
+tous gardés en mémoire dans `LoadedLineage` ; `LoadedLineage`/`DeclarationChain` constructibles par un appelant (l'exclusivité du `DeclarationSet` repose sur le test AST et sur la convention) ;
+deux tests de lien symbolique non exécutables sur cette machine.
+
+### 54.9 Commandes de reprise et périmètres de commit PROPOSÉS (aucun exécuté)
+
+`PYTHONDONTWRITEBYTECODE=1 .venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/test_gate_v_exposure_store.py tests/test_gate_v_exposure_declarations.py tests/test_gate_v_exposure_integration.py`
+puis la régression `tests/test_gate_v_*.py tests/test_atomic_json_store*.py tests/test_dataset_split.py tests/test_validation_run.py`. Le script de mutation est hors dépôt (scratchpad de session), à recréer si besoin.
+Commits ISOLÉS suggérés, chacun par index temporaire (`GIT_INDEX_FILE`), jamais `git add .` :
+1. `feat(gate-v): add E3-B5 exposure inventory persistence` — `gate_v_exposure_store.py`, `tests/gate_v_exposure_support.py`, `tests/test_gate_v_exposure_store.py` ;
+2. `feat(gate-v): add E3-B6 declaration reading and lineage loader` — `gate_v_exposure_declarations.py`, `tests/test_gate_v_exposure_declarations.py`, `gate_v_exposure_interpreters.py`, `tests/test_gate_v_exposure_integration.py`
+   (B3 additif ; option : le séparer en un commit propre) ;
+3. documentation : SEULEMENT les hunks de `AI_HANDOFF.md` §54 et, si retenus, de `CONTEXT.md` ; exclure M1, PARAM-1, CAT-1, ADR 0016/0026/0027, `requirements-api.txt`, `=1.12.0`, les trois fichiers indexés.
+
+**Statut** : E3-B5 = **IMPLEMENTED + TESTED + MUTATED + REVIEWED LOCALLY**. E3-B6 = **PARTIALLY IMPLEMENTED (lecture, vérification, lignée) ; publication BLOQUÉE par E3-C**. Verdict :
+**PARTIALLY READY / DEPENDENCY BLOCKED** (le code livré est prêt à être commité ; E3-B6 n'est pas complet). `REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE. Aucun champion qualifié.
+**Prochaine tranche** : décisions de 54.7 (surtout 4, 5, 6 et la version de B3), puis autorisation de commit ; E3-C (primitive de publication) avant de finir B6.
+
+---
+
+## 55. `AF-V-07` — E3-B5/B6 : clôture contractuelle et revue finale de précommit (2026-10-18) — complète le §54 et PRÉVAUT sur lui pour tout ce qui suit
+
+Le §54 reste l'historique de l'implémentation initiale ; ses statuts « ouverts » (54.7 points 4, 5, 6 ; 54.6 ; l'API de 54.3 sans `campaign_id`) sont **périmés** là où ce §55 les traite. Aucun commit, aucun push ; `HEAD` = `origin/master` = `2b25354a7139d4080f5a8c1f0bb06e22203718dc`
+(branche `master`, divergence 0/0) ; index réel inchangé (empreinte `8b78a333b37710b5…`, trois fichiers pré-indexés) ; M1, PARAM-1, CAT-1, ADR 0016/0026/0027,
+`app_corrupted_backup.py` et tous les artefacts scientifiques intacts. `REAL` = DISABLED, NOT QUALIFIED. `GATE V` = NON PASSÉE. `FINAL_HOLDOUT` = NON ACCÉDÉ.
+ADR 0025, E3-A, B1, B2, B4, `atomic_json_store` : AUCUNE modification. Seul module publié touché : B3 (additif, +41/−3 depuis `41fe58d`).
+
+### 55.1 Défauts traités (RED → GREEN, un test au moins par ligne)
+
+| # | Point de la mission | Constat | Décision |
+|---|---|---|---|
+| 1 | A0 orphelin vs B3 (23.29.1) | **Confirmé** : B3 rendait la racine INCOMPLÈTE pour un `inventory_<hash>.json` illisible, alors que 23.29.1 en fait un orphelin consigné, refusé seulement s'il est épinglé. B3 ne peut pas connaître l'épinglage. | **Corrigé** (B3 `_bind`, `_ORPHAN_A0_ANOMALIES`) : seules les anomalies de CONTENU de ce fichier (JSON invalide, tronqué, clé dupliquée, constante non finie, BOM, non UTF-8, substitut isolé, profondeur, trop gros, non objet) ne rendent plus la racine incomplète. Un répertoire ou lien nommé comme un A0, une erreur d'E/S, un nom inconnu, une déclaration ou une attestation illisible RESTENT bloquants. L'épinglage est refusé par B6 (`pinned_a0_hashes` de l'ADMISSION, hash cité dans une attestation) et reste à E3-J pour l'attestation à évaluer. |
+| 2 | Même contrat côté B6 | La relecture d'un A0 classait tout `ExposureStoreError` (E/S, instabilité, lien, non régulier) comme orphelin : divergence avec B3 (revue A). | **Corrigé** : seules les défaillances de CONTENU font un orphelin ; E/S, instabilité, absence tardive, lien, non régulier = refus typé. |
+| 3 | A0 épinglé SUPPRIMÉ | **Confirmé** (revue A) : supprimer un A0 épinglé était plus avantageux que le tronquer. | **Corrigé** : `PINNED_A0_MISSING` ; un hash épinglé d'une autre campagne = `CAMPAIGN_MISMATCH`. `pinned_a0_hashes` est maintenant OBLIGATOIRE (un oubli désactivait le refus). |
+| 4 | Citation d'un A0 par une attestation | Égalité de chaîne entière (revue A) : `sha256:<hash>` ou `inventory_<hash>.json` passaient. | **Corrigé** : chaque fenêtre de 64 hexadécimaux de chaque chaîne (clé, valeur, liste, imbrication) épingle (échec fermé). |
+| 5 | Liaison entre campagnes | Voir 55.2. | **Corrigé dans la limite de l'ADR** + limite démontrée ; amendement proposé, non implémenté. |
+| 6 | Point fixe d'octets des attestations (23.29.3/23.29.4) | **Confirmé** : le sérialiseur normatif est UNIQUE pour déclarations, attestations et A0 ; les attestations n'avaient que le JSON strict. | **Corrigé** : relecture stricte + point fixe (chargeur ET `read_attestation_slot`). Schéma, épinglages et validité restent à E3-E/E3-J : l'API ne PROUVE que les octets. `highest_attestation_slot` désigne le slot de plus haut `seq` de la chaîne terminale quand l'inventaire courant EST cette chaîne, sinon `None` ; aucun repli ; aucune évaluation d'épinglage. |
+| 7 | Géométrie des expositions déclarées | **Confirmé** : une déclaration `RESOLVED`/`NO_OVERLAP` dont la fenêtre recoupe `W` (ou l'inverse) était remise, puis refusée plus tard par `ClassificationInput`. | **Corrigé** : la chaîne terminale est contrôlée par `ClassificationInput` d'E3-A (API publique, formule non recopiée, chronologie neutre) ; le brouillon de report l'est quand l'A0 du nouvel inventaire existe. Les chaînes anciennes ne le sont que par leur report. Garde ajoutée : « `W` étant fixe pour une campagne » (23.29.2) → `WINDOW_NOT_FIXED`. |
+| 8 | Informations d'audit | **Confirmé** (revue B, MAJOR) : un relevé forgé (hash valide) pouvait déclarer `ABSENCE_ESTABLISHED`, ce qui contredit 23.30.1 (« preuves d'exclusion : aucune à ce jour »). | **Corrigé** (`_check_audit_coherence`, relecture) : aucune absence établie ; exposition établie = RESOLVED/OVERLAPS ; P2 seulement pour un job et avec le manifeste de SON dossier ; absence non établie = UNRESOLVED par fenêtre/fuseau inconnus avec entrée obligatoire ; finding d'exécution RESOLVED ⇒ entrée ; note non OOS ⇒ finding UNKNOWN_SOURCE non résolu de même hash. Aucun finding inventé, `inventory_id` et digests inchangés. |
+| 9 | Chemins absolus | `resolved_path` est de l'AUDIT LOCAL : couvert par `inventory_content_hash` (identité d'un FICHIER sur une machine), jamais par une identité portable. | Documenté dans le module + test (mêmes sources, deux emplacements : identités scientifiques égales, hash différent). Rien supprimé. |
+| 10 | Plafonds et durabilité | Voir 55.5. | Étiquetés PROVISOIRES NON NORMATIFS ; 512 → **128 Mio** cumulés (A0 gardés en mémoire) ; `os.scandir` arrêté tôt. |
+| 11 | Autres (revues) | Code mort (`seen` du parcours de lignée : inatteignable, supprimé avec preuve de terminaison), docstring d'exclusivité (`_declaration_set` / sonde du brouillon), commentaires B3 (« consigné », 23.29.1 et non 23.29.4), `OSError` typées, étiquette `CAMPAIGN_MISMATCH` réservée au cas où AUCUN A0 de la campagne n'existe. | Corrigés. |
+| — | Rejetés / non retenus | `AttestationRead.value` dict mutable dans une dataclass gelée (NIT) ; `_require_hex` en `ValueError` simple (convention du lot) ; validation intégrale d'une attestation (hors E3-B) ; recontrôle de `rules_digest` à la relecture de l'A0 (relève d'E3-J : B5 le consigne) ; géométrie de chaque chaîne ancienne (leurs expositions doivent être reportées, donc contrôlées) ; `plans` non recoupé (seul le hash le protège : aucune source indépendante). | Justifiés ici. |
+
+Tests RED écrits d'abord (échecs observés) puis GREEN : A0 orphelin (9 contenus) et cohérence B3/B6, liaison de campagne (8), attestations (graphies non normatives × 6, JSON strict × 5, absence de repli, sélection, citation × 4 + quasi-collision), géométrie (7 verdicts cohérents / 4 contradictoires / report / brouillon), cohérence d'audit (16 cas + positifs sur 3 fixtures), épinglages (absent, étranger), taxonomie E/S (5), fenêtre fixe, ancêtres de lecture, publication prouvée relisible.
+
+### 55.2 Risque de copie entre campagnes (analyse démontrée)
+
+Cas testés : (a) chaîne seule copiée de A vers B : `A0_MISSING` ; (b) A0 + chaîne copiés : `CAMPAIGN_MISMATCH` (le contexte propre VALIDÉ de l'A0, couvert par son hash, porte A) ; (c) A0 de B légitime de même `inventory_id` + A0 étranger : l'étranger est écarté et consigné (`FOREIGN_CAMPAIGN_INVENTORY`), jamais remis ; (d) chaîne historique non terminale copiée : `CAMPAIGN_MISMATCH` ;
+(e) `campaign_id` attendu ≠ celui de l'A0 : `CAMPAIGN_MISMATCH` ; (f) A0 de B postérieur à la première déclaration copiée : `A0_MISSING`.
+**Limite démontrée, NON corrigée** (`test_known_limit_the_chain_itself_carries_no_campaign_id`) : une déclaration porte l'`inventory_id` scientifique et jamais une campagne (23.29.1) ; `declaration_id` est inchangé. Si un A0 LÉGITIME de B existe pour le même `inventory_id` avant la première déclaration copiée, la chaîne copiée est acceptée : la liaison à la campagne vient de l'A0, pas de la chaîne. Et un A0 se forge sans secret avec un autre `campaign_id` (nouveau nom, hash valide) : le contrôle protège d'une COPIE ACCIDENTELLE, pas d'une falsification. **Aucune lignée n'est qualifiée de cryptographiquement liée à une campagne.** Amendement à décider : voir D2 (55.7).
+
+### 55.3 Matrice B3 avant/après (fixtures identiques ; avant = arbre `git archive HEAD`, après = arbre de travail)
+
+| Scénario | Avant (41fe58d) | Après |
+|---|---|---|
+| Racine `RESULTS` + 1 job | complète ; `inventory_id`, digest, `rules_digest` | **identiques** |
+| Dossier de campagne SANS `exposure/` | complet ; findings vides | `inventory_id`, digest, findings **identiques** ; `rules_digest` **différent** (table CAMPAIGN_DIR élargie) |
+| `exposure/` avec A0 lisible, déclaration, attestation, orphelins | `UNKNOWN_SOURCE` « exposure » ; **incomplet** ; autre `inventory_id` | structure connue ; **complet** ; `inventory_id` de la campagne nue |
+| A0 tronqué | idem (incomplet) | orphelin : **complet**, aucun finding, identités de la campagne nue |
+| Déclaration illisible | incomplet (entrée inconnue) | incomplet (`INFORMATIVE_UNRESOLVED`) |
+| Fichier inconnu dans `exposure/` | incomplet | incomplet (`UNKNOWN_ENTRY` précise le fichier) |
+
+Compatibilité des artefacts historiques : aucun A0 n'a jamais été persisté (B5 n'est pas publié) ; aucun artefact historique n'est réécrit ; les inventaires de campagnes sans `exposure/` gardent leurs identités scientifiques.
+
+### 55.4 Version B3 (`gate_v_exposure_interpreters_v2` inchangée) — analyse, décision NON prise
+
+Preuves : (1) B2 documente `rules_digest` comme le moyen d'épingler « la table de sources EXACTE appliquée » pour qu'« un A0 ne puisse pas être rejoué avec une autre table » : il distingue le changement de TABLE (CAMPAIGN_DIR) mais PAS le changement d'INTERPRÉTATION (exception de l'A0 orphelin, qui ne touche pas la table). (2) `rules_versions` d'un A0 est comparée par ÉGALITÉ STRICTE : une version qui ne change pas ne distingue pas deux comportements. (3) L'ADR 23.30.4 cite « B3 : version `gate_v_exposure_interpreters_v2`. Aucune v1 n'a été publiée ni persistée : aucune migration » ; l'ancien comportement (`exposure/` inconnu) contredisait déjà 23.29.1 ; aucun A0 v2 n'existe. (4) Un bump en v3 n'a donc AUCUN coût de migration aujourd'hui mais change une ligne citée par l'ADR : il exige votre autorisation. Options en D3 (55.7).
+
+### 55.5 Plafonds et durabilité
+
+Plafonds (PROVISOIRES, NON NORMATIFS, absents de 23.24, à faire valider) : 100 000 entrées sous `exposure/` (une chaîne pleine 9 999 + 9 999 tient ; six non), 128 Mio de taille cumulée observée (lstat) avant toute lecture profonde, 16 Mio par A0, profondeur JSON 32 ; 9 999 slots = format `seq4`, normatif. Mesures (cette machine) : lecture + JSON strict d'un fichier de 14,9 Mio = 3,6 s, pic ≈ 91 Mio ; refus d'un fichier hors plafond = 0,4 ms (taille vérifiée avant lecture) ; listage ≈ 0,12 ms/entrée (30 000 entrées = 3,6 s, soit ≈ 12 s au plafond) ; l'excès d'entrées est refusé pendant `scandir` (arrêt anticipé).
+Durabilité, distinguée : (i) **fichier** : `save_exclusive(durable=True)` = flush + fsync du fichier, et fsync du répertoire parent (`exposure/`) sous POSIX seulement ; (ii) **entrée de répertoire** : sous Windows le fsync d'un répertoire n'est pas démontrable depuis Python (journal NTFS) ; la création de `exposure/` dans `campaign_dir` (`os.mkdir`) n'est JAMAIS synchronisée, sur aucun système ; (iii) **garantie obtenue ici** : Windows, sans crash simulé ; (iv) **garantie requise pour REAL** : POSIX qualifié (volume, fsync de répertoire, matrice de crash) — NON établie, NON testable sur cette machine. Rien de ce qui précède ne qualifie POSIX ni REAL.
+
+### 55.6 Vérifications finales (code définitif)
+
+- Suite complète : **5 600 passed, 11 skipped, 0 failed** (646 s ; 5 597 avant les derniers tests). B5 + B6 + intégration : **366 tests** (132 + 194 + 40), 364 passed, 2 skipped (liens symboliques sans privilège Windows, compensés par des jonctions `mklink /J` et la simulation du drapeau de point d'analyse). Le test historique `test_hook_blocks_a_force_push` (cp1252) est vert dans ces exécutions ; non modifié, non désactivé, toujours dépendant de l'environnement.
+- Régressions B1 à B4, E3-A, E1/E2, politique de validation, `atomic_json_store`, `dataset_split`, `validation_run` : incluses dans la suite complète (aucune régression).
+- **Mutation** (copies hors dépôt, base verte exigée avant chaque groupe, « tué » = code pytest 1 uniquement) : B5 56/58, B6 92/93, règles B3 29/29 = **177/180**. Survivants ÉQUIVALENTS (justifiés) : garde `reasons` de la provenance (redondante avec le constructeur de B4) ; clause `status` des notes non OOS (un `UNKNOWN_SOURCE` n'est jamais RESOLVED dans E3-A) ; clause `status` de la clé de contenu du report (déterminé par `overlap` et la cause).
+- **Deux revues indépendantes** par sous-agents `general-purpose` en lecture seule, après les correctifs du §54 : revue A (sécurité/architecture) = 0 BLOCKER, 1 MAJOR (A0 épinglé supprimé) + 8 mineurs, corrigés sauf les points renvoyés ci-dessous ; revue B (science/contrats) = 0 BLOCKER, 1 MAJOR (`ABSENCE_ESTABLISHED` accepté) + mineurs, corrigés sauf D1–D7. Fuzz des revues : ≈ 2 700 A0 et enveloppes mutés avec hash recalculé, aucune exception hors `ExposureStoreError`.
+- Contrôles : `git diff --check` propre sur le fichier suivi modifié ; fichiers nouveaux en LF sans espace final ; aucun import inutile ; aucun secret ; aucune donnée de marché ni accès `FINAL_HOLDOUT` (le mot n'apparaît dans aucun module nouveau) ; imports directs de B5/B6 limités à B1, B2, B3, B4, E3-A et `atomic_json_store` (B3 tire déjà `dataset_split` en indirect : écart documenté au §54) ; espace disque 2,6 Go libres (> 2 Go).
+
+### 55.7 Décisions normatives restantes (options et conséquences) — RIEN n'est implémenté sur ces points
+
+- **D1 — Exception B3 de l'A0 orphelin** (implémentée car imposée par la mission et 23.29.1). *Confirmer* l'état actuel ; *alternative* : B3 garde l'incomplétude (fail-closed) et B6 la lève : plus sûr, mais un A0 tronqué laissé par `INCOMPLETE_WRITE` (non supprimable) bloquerait définitivement toute racine dérivée.
+- **D2 — Liaison de la chaîne à la campagne.** (a) statu quo, documenté (A0 seul lié) ; (b) ajouter `campaign_id` à l'enveloppe de déclaration (champ d'enveloppe additif, `declaration_id` inchangé, nouvelle version d'enveloppe) ; (c) épingler dans la première déclaration l'`inventory_content_hash` de l'A0 de la campagne (lie la chaîne à UN A0, donc à une campagne ; les autres A0 de même `inventory_id` ne partageraient plus la chaîne sans règle supplémentaire). Conséquence : (b) et (c) modifient un format en lecture stricte et exigent un amendement d'ADR.
+- **D3 — Version B3** : (a) rester en v2 en ajoutant à l'ADR la note « v2 amendée avant toute persistance, `rules_digest` CAMPAIGN_DIR modifié » ; (b) passer en v3 (aucune migration aujourd'hui ; ligne 23.30.4 de l'ADR à amender). Avis : (b) si la v2 déjà poussée doit rester un état distinct ; (a) n'est défendable qu'avec la note.
+- **D4 — Attestations** : flottants tolérés (« sans flottant » de 23.29.4 non appliqué ; seules les graphies non canoniques échouent au point fixe) ; lecture de TOUS les slots de TOUTES les chaînes (un slot invalide refuse la lignée) : après l'`ADMISSION`, 23.29.3 dit qu'un slot postérieur n'a aucun effet, donc E3-J ne pourra pas utiliser tel quel ce chargeur après l'ADMISSION sans un mode dédié (décision sur le périmètre de lecture après ADMISSION).
+- **D5 — Plafonds** : valeurs à fixer en 23.24 (aujourd'hui provisoires).
+- **D6 — Épinglage par attestation** : « toute fenêtre de 64 hexadécimaux » est un choix fail-closed sans schéma ; le schéma relève d'E3-E.
+- **D7 — `rules_versions` / `rules_digest` à la relecture** : égalité stricte des versions (tout changement de B3/B4 rend un A0 attesté illisible, donc bloque la lignée, sans migration) ; `rules_digest` non recontrôlé (E3-J).
+- Hérités inchangés : Q-3, Q-5, couche d'adaptation des identités (D1 du §53), ClosingRecord final (D2 du §53), preuve des racines dérivées (D3 du §53, E3-J).
+
+### 55.8 Périmètres de commits indépendants PROPOSÉS (aucun exécuté ; index temporaire `GIT_INDEX_FILE`, jamais `git add .`)
+
+1. `feat(gate-v): recognise the exposure tree in the E3-B3 campaign rules` — `gate_v_exposure_interpreters.py` (+41/−3). Seul, ce commit ne dépend d'aucun fichier nouveau ; ses tests d'intégration importent le store : les placer avec le commit 2.
+2. `feat(gate-v): add E3-B5 exposure inventory persistence` — `gate_v_exposure_store.py`, `tests/gate_v_exposure_support.py`, `tests/test_gate_v_exposure_store.py`, `tests/test_gate_v_exposure_integration.py`.
+3. `feat(gate-v): add E3-B6 declaration reading and lineage loader` — `gate_v_exposure_declarations.py`, `tests/test_gate_v_exposure_declarations.py`.
+4. documentation : SEULEMENT les hunks de `AI_HANDOFF.md` §54 et §55 ; exclure M1, PARAM-1, CAT-1, ADR 0016/0026/0027, `requirements-api.txt`, `=1.12.0`, `CONTEXT.md`, les trois fichiers pré-indexés.
+Ordre sûr : B3 additif → B5 (+ support + intégration) → B6 → documentation ; rejouer chaque étape dans un snapshot isolé avant publication. Toute publication exige votre autorisation distincte.
+
+**Verdicts** : `B5 READY FOR COMMIT` · `B6 READ-ONLY READY FOR COMMIT` · `B6 PUBLICATION DEPENDENCY BLOCKED` (la primitive de publication par lien d'E3-C est absente ; elle n'est ni inventée ni remplacée par `O_EXCL`). B6 n'est pas déclaré complet au-delà de la lecture, de la vérification et de la lignée. Les décisions D1–D7 n'empêchent pas le commit du code livré (qui n'a pris aucune décision normative nouvelle) ; D2 et D3 demandent un amendement d'ADR si vous les retenez.
+
+---
+
+## 56. `AF-V-07` — E3-B5/B6 : verrouillage contractuel final (D2, D3 approuvés ; D1, D4–D7 précisés) et précommit (2026-10-18/19) — complète le §55 et PRÉVAUT sur lui pour tout ce qui suit
+
+Le §55 reste l'historique ; ses mentions « ADR 0025 : AUCUNE modification », « B3 v2 inchangée » (55.4), la limite « NON corrigée » de 55.2 (le test
+`test_known_limit_the_chain_itself_carries_no_campaign_id`, désormais réécrit en contrôle positif) et les options ouvertes D2/D3 de 55.7 sont **périmées**.
+Checkpoint initial = final : `HEAD` = `origin/master` = `2b25354a7139d4080f5a8c1f0bb06e22203718dc`, branche `master`. **Aucun commit, aucun push.** Index réel
+inchangé (empreinte `8b78a333b37710b5…`, trois fichiers pré-indexés de l'utilisateur). `REAL` = DISABLED / NOT QUALIFIED. `GATE V` = NON PASSÉE.
+`FINAL_HOLDOUT` = NON ACCÉDÉ. Aucune donnée réelle, aucun backtest. E3-A, B1, B2, B4, `atomic_json_store` : inchangés. E3-C/D/E/J : non implémentés.
+
+### 56.1 Décisions de l'utilisateur appliquées (mission « E3-B5/B6 FINAL CONTRACT LOCK & PRECOMMIT »)
+
+- **D2** (approuvée) : `campaign_id` dans l'enveloppe persistée de déclaration, couvert par `declaration_content_hash`, contrôlé à la relecture et dans chaque chaîne ;
+  `declaration_id` et le modèle E3-A inchangés.
+- **D3** (approuvée) : `B3_SEMANTICS_VERSION` = `gate_v_exposure_interpreters_v3` ; v2 = état publié `41fe58d`, distinct et jamais réécrit.
+- **ADR** : amendement **23.31** écrit AVANT l'implémentation (table [N]/[R], 23.31.1 à 23.31.6), notes de renvoi en 23.29.1 et 23.30.4, mise à jour additive
+  des « Conséquences ». Aucune clause d'origine réécrite. Les sous-sections 23.31.3 à 23.31.6 sont des précisions [R] de règles existantes (aucune règle nouvelle hors D2/D3).
+
+### 56.2 Implémentation (TDD : RED observé avant chaque GREEN)
+
+| Point | Code | Comportement |
+|---|---|---|
+| D2 | B6 `build_declaration_envelope(..., campaign_id)`, `parse_declaration_file(..., campaign_id)`, `ParsedDeclaration.campaign_id`, `CarryOverDraft.campaign_id` ; B5 `StoreFailure.CAMPAIGN_MISMATCH` | enveloppe à 8 clés ; ancien jeu de clés = `SCHEMA` ; campagne ≠ attendue = `CAMPAIGN_MISMATCH` (lecture et chargeur, toute chaîne) ; brouillon porte la campagne |
+| D3 | B3 `B3_SEMANTICS_VERSION` v3, `KNOWN_B3_VERSIONS`, `B3_RULES_DIGESTS` (tuple immuable version/disposition/digest) | v2 : RESULTS `9014a865…`, CAMPAIGN_DIR `cb94f97f…`, SPLIT_PLAN_DIR `e98082af…` ; v3 : CAMPAIGN_DIR `7cc0cb30…`, autres identiques. Registre en tuple (pas de fonction publique) : un test publié de B3 fige la liste blanche d'imports et les paramètres des fonctions publiques |
+| D7 | B5 `RulesVersions` (+ `is_current()`), `PersistedExposureInventory.rules_versions`, `StoreFailure.RULES_DIGEST_MISMATCH` | versions connues seulement (`UNKNOWN_VERSION` sinon) ; chaque `rules_digest` épinglé = table de la version de B3 enregistrée ; A0 v2 = lecture historique intègre (`is_current()` faux), jamais requalifiée ; la lignée l'accepte comme A0 existant et l'expose |
+| D4 | B5 `parse_strict_record` refuse tout flottant (`SCHEMA`) ; B6 `AttestationPin`, `LineagePhase`, paramètre OBLIGATOIRE `admitted_attestation` | avant ADMISSION : tous les slots lus ; après : seul le slot épinglé (hash du fichier comparé AVANT analyse : `ADMITTED_ATTESTATION_REPLACED` / `_MISSING`), autres consignés `ATTESTATION_WITHOUT_EFFECT` ; densité des noms de slots contrôlée dans les deux phases ; `highest_attestation_slot` = `None` après ADMISSION |
+| D1/D6 | B6 `PinningReport` (`admission_pinned_a0_hashes`, `orphan_a0_hashes`, `attestation_pins_evaluated` toujours faux), `A0_PIN_UNRESOLVED` | citation (casse ignorée, sous-chaîne) d'un A0 illisible = référence NON RÉSOLUE, refusée, jamais une preuve ; orphelin non cité consigné « épinglage par attestation non évalué » ; épinglages de l'ADMISSION fournis alors qu'`exposure/` est absent = refus (défaut latent corrigé : ils étaient acceptés silencieusement) |
+| D5 | `OPERATIONAL_LIMITS_QUALIFIED_FOR_REAL = False` (B5, réexporté par B6) | 100 000 entrées, **128 Mio** cumulés (la mission cite 512 Mio : valeur déjà réduite au §55, conservée), 16 Mio par fichier, profondeur 32 ; gardes `SYNTHETIC`, non qualifiées pour `REAL` ; B5/B6 n'ont aucun mode `REAL` |
+
+### 56.3 Copies entre campagnes (D2) — tests
+
+Contrôle positif (deux campagnes jumelles, même `W`, même `inventory_id`, chacune sa chaîne) + six scénarios refusés `CAMPAIGN_MISMATCH` : (1) chaîne entière copiée chez la jumelle qui a son
+propre A0 légitime (ancienne limite du §55.2) ; (2) une seule déclaration substituée ; (3) A0 + chaîne copiés ; (4) chaîne historique copiée sous un successeur ; (5) lecture sous une autre
+campagne attendue, même sans A0 ; (6) déclarations d'une même chaîne en désaccord. **Limite démontrée et documentée** (`test_known_limit_a_deliberate_rewrite_with_recomputed_hashes_is_not_detected`) :
+une intégrité SHA-256 recalculable sans secret ne prouve pas l'authenticité ; réécrire `campaign_id` puis les hashs n'est pas détecté. Aucune liaison cryptographique n'est revendiquée.
+
+### 56.4 Compatibilité B3 v2/v3 (fixtures synthétiques identiques ; v2 = arbre `git archive HEAD`, B3 identique à `41fe58d`)
+
+| Scénario | v2 (complet / findings / `inventory_id` / `rules_digest`) | v3 |
+|---|---|---|
+| racine `RESULTS` + 1 job | True / 1 / `4e8e7013` / `9014a865` | identique |
+| campagne sans `exposure/` | True / 0 / `cfcc3ac1` / `cb94f97f` | True / 0 / `cfcc3ac1` / `7cc0cb30` |
+| `exposure/` légitime | False / 1 / `4ec99f28` | True / 0 / `cfcc3ac1` |
+| A0 tronqué | False / 1 / `4ec99f28` | True / 0 / `cfcc3ac1` |
+| déclaration illisible | False / 1 / `4ec99f28` | False / 0 / `6fe57c04` (incomplet, `INFORMATIVE_UNRESOLVED`) |
+
+v2 n'est jamais plus permissive que v3. Aucun A0 n'a jamais été persisté hors fixtures ; aucun artefact historique réécrit. Les digests v2 sont dérivés indépendamment par un test (scan des deux seules règles publiées).
+
+### 56.5 Revues indépendantes (sous-agents en lecture seule) et suites données
+
+- **Revue A (sécurité, architecture, durabilité)** : 0 BLOCKER, 2 MAJOR, 3 MINOR, 3 NIT. **Corrigés (RED → GREEN)** : M1 balayage des citations qui retenait chaque fenêtre de 64 caractères
+  (≈ ×137 la taille lue ; 140 Mo mesurés pour 1 Mo d'hexadécimal) → recherche des seuls hashs d'A0 illisibles ; M2 publication d'un A0 que la relecture refuserait (taille, JSON strict) → refus
+  avant toute écriture ; m1 trou de slots d'attestation non vu après ADMISSION → densité contrôlée dans les deux phases ; m3 plafond cumulé sur tailles `lstat` → aucun fichier lu au-delà de sa
+  taille listée, croissance = refus `UNSTABLE`. **Documentés, non corrigés** : m2 (supprimer un A0 cité par une attestation est plus avantageux que le tronquer : 23.31.3 « ne produit rien »,
+  à E3-J qui relit l'A0 épinglé par hash) ; course de publication entre `lstat` d'`exposure/` et `save_exclusive` (écrivain local requis ; `_save_exclusive_durable` crée les parents) ;
+  `read_attestation_slot` sans garde de phase ; post-ADMISSION avec `pinned_a0_hashes` vide accepté et attestation admise dans une chaîne non terminale non signalée (à E3-J, qui compare
+  `admitted_attestation.inventory_id` à `terminal_inventory_id`).
+- **Revue B (science, contrats, reproductibilité)** : 0 BLOCKER, 0 MAJOR, aucun chemin vers un faux FRESH ; E3-A inchangé vérifié. **Traités** : F2 (ce §56), F3 (test de dérivation indépendante
+  des digests v2), F4 (formulation de 23.31.5 : comptage par fichier listé), F6 (densité dans les deux phases, cf. m1). **Renvoyés à décision HUMAINE** (rien tranché) : **F1** — B3 v3 lit chaque
+  `attestation_<seq4>.json` d'une campagne scannée ; un slot postérieur illisible rend la racine incomplète, donc change l'`inventory_id` recalculé à l'étape 13 (échec fermé, jamais un faux
+  FRESH), ce qui contredit « sans effet » (23.29.3) : (a) note ADR « artefact illisible sous `exposure/` = incomplétude structurelle même après ADMISSION » (recommandé par la revue) ou (b) traiter
+  ces anomalies comme l'A0 orphelin (B3 v4 + ADR) ; **F5** — forme de l'épinglage de l'attestation par l'ADMISSION (SHA-256 des octets du fichier indentés vs JSON canonique compact) à fixer par
+  E3-D ; F7 (`WINDOW_NOT_FIXED`, `DECLARED_GEOMETRY_CONTRADICTION` non nommés dans 23.31, refus plus stricts seulement) ; F8 (`read_exposure_inventory` sans `campaign_id` attendu : à E3-J).
+
+### 56.6 Vérifications finales mesurées (`.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider`)
+
+- B3 + B5 + B6 + intégration (code et tests définitifs) : voir 56.9 (chiffres de la dernière exécution).
+- **Régression Gate V** (`tests/test_gate_v_*.py`, `atomic_json_store`, `dataset_split`, `validation_run`, avant les correctifs de la revue A) : **4 128 passed, 11 skipped**.
+- **Suite complète** (code définitif, avant l'ajout des 6 derniers tests B5 de 56.7) : **5 672 passed, 11 skipped, 0 failed** (1 122 s). Les 11 skips sont les skips POSIX/privilège connus.
+- **Mutation** (copies hors dépôt sous `%TEMP%\e3bm_*`, base verte exigée, « tué » = code pytest 1 uniquement, copies restaurées identiques) : B3 **34/34** ; B5 **68/70** (survivants
+  ÉQUIVALENTS déjà justifiés au §55.6 : garde `reasons` de la provenance, clause `status` des notes non OOS ; 4 survivants « flottants » et « JSON strict avant publication » TUÉS après
+  ajout de tests au niveau B5) ; B6 : voir 56.9.
+
+### 56.7 Incident de session (transparence)
+
+Un script de patch (scratchpad) a TRONQUÉ `tests/test_gate_v_exposure_store.py` à 0 octet (Python 3.13 ouvre le fichier avant de rejeter l'argument `newline`). Fichier non suivi par Git.
+**Restauré** depuis la copie de mutation la plus récente de la session précédente (`%TEMP%\e3bm_store_fgkklmqm`, 833 lignes = taille relevée en début de session, 132 tests = §55.6, extraits
+identiques à ceux lus avant l'incident), puis les ajouts de cette mission ont été réappliqués et retestés. Les scripts de patch écrivent désormais par fichier temporaire + remplacement atomique.
+
+### 56.8 Commits ISOLÉS proposés (aucun exécuté ; index temporaire `GIT_INDEX_FILE`, jamais `git add .`)
+
+1. `feat(gate-v): bump E3-B3 to v3 with the exposure tree and orphan A0 rule` — `gate_v_exposure_interpreters.py` seul (v3, table `exposure/`, exception A0 orphelin, `KNOWN_B3_VERSIONS`, `B3_RULES_DIGESTS`).
+2. `feat(gate-v): add E3-B5 exposure inventory persistence` — `gate_v_exposure_store.py`, `tests/gate_v_exposure_support.py`, `tests/test_gate_v_exposure_store.py`, `tests/test_gate_v_exposure_integration.py`.
+3. `feat(gate-v): add E3-B6 declaration reading and lineage loader` — `gate_v_exposure_declarations.py`, `tests/test_gate_v_exposure_declarations.py`.
+4. `docs(gate-v): amend ADR 0025 with 23.31 (campaign binding, B3 v3, proof levels)` — SEULEMENT les hunks 23.31, notes de renvoi et « Conséquences » de `docs/adr/0025-gate-v-validation-policy-v1.md`.
+5. `docs(handoff): record E3-B5/B6 lock` — SEULEMENT les hunks §54, §55, §56 d'`AI_HANDOFF.md`.
+Exclure : M1, PARAM-1, CAT-1, ADR 0016/0026/0027, `requirements-api.txt`, `=1.12.0`, `CONTEXT.md`, les trois fichiers pré-indexés. Ordre sûr : 4 (ADR) → 1 → 2 → 3 → 5 ; rejouer chaque étape dans un
+snapshot isolé (les tests d'intégration de B3 importent B5 et vont avec le commit 2). Toute publication exige votre autorisation distincte.
+
+### 56.9 Résultats finaux et verdicts
+
+- **Fichiers définitifs**, E3-A + B1 + B2 + B3 + B4 + B5 + B6 + intégration (`test_gate_v_final_holdout_protocol`, `test_gate_v_exposure_{sources,scan,interpreters,inventory,store,
+  declarations,integration}`) : **1 729 passed, 6 skipped**, 0 failed. Dont B5 148, B6 251, intégration 47, B3 149 tests collectés. Skips = liens symboliques sans privilège
+  Windows (compensés par jonctions `mklink /J`) et skips POSIX connus.
+- **Mutation finale** : B3 **34/34** ; B5 **68/70** ; B6 **122/124** (124 mutants valides après correction de 3 ancres déplacées par cette mission ; survivants ÉQUIVALENTS : clause `status`
+  de la clé de contenu du report, héritée du §55.6, et `ParsedDeclaration.campaign_id` = campagne attendue, identique par construction puisqu'une autre est refusée avant). Total **224/228**.
+  Un trou réel révélé et comblé : le brouillon de report testé seulement avec la campagne par défaut (test ajouté avec une autre campagne).
+- `git diff --check` propre ; fichiers B3/B5/B6/tests/ADR/handoff en UTF-8 sans BOM, LF, sans espace final introduit ; aucun fichier temporaire de patch laissé dans le dépôt ;
+  `app_corrupted_backup.py` intact ; index réel inchangé (empreinte complète `8b78a333b37710b5987d1e535c8487e797984df193dc80362efd946ed9670e6f`) ; `HEAD` = `origin/master` = `2b25354` ; espace
+  libre 3,2 Go (> 2 Go).
+- **Limites cryptographiques résiduelles** : intégrité SHA-256 recalculable sans secret = détection de COPIE, jamais d'authenticité (A0, enveloppes, chaînes, `carried_from`) ; aucune
+  signature ni témoin externe ; l'épinglage par attestation n'est jamais évalué par B6 (E3-E/E3-J) ; les citations d'A0 illisibles sont une heuristique de refus, pas une preuve.
+- **Impact des versions B3** : tout nouvel A0 enregistre `b3_interpreters` = v3 et les digests v3 ; un A0 v2 reste lisible (historique, non courant), jamais requalifié ; E3-J devra recalculer avec
+  les règles courantes. Campagnes sans `exposure/` : `inventory_id` identique en v2 et v3.
+
+**Verdicts séparés** :
+- `B3 ADDITIVE READY FOR COMMIT` (v3 approuvée par D3, tests publiés de B3 verts, digests figés et dérivés indépendamment).
+- `B5 READY FOR COMMIT`.
+- `B6 READ-ONLY READY FOR COMMIT` (lecture, vérification, lignée, liaison de campagne, phases avant/après ADMISSION ; aucune écriture).
+- `B6 PUBLICATION DEPENDENCY BLOCKED` (primitive de publication par lien d'E3-C absente ; ni inventée ni remplacée par `O_EXCL`).
+`REAL` = DISABLED / NOT QUALIFIED. `GATE V` = NON PASSÉE. `FINAL_HOLDOUT` = NON ACCÉDÉ. Aucun commit, aucun push.
+
+**Prochaine tranche** : décisions humaines F1 (slot d'attestation illisible après l'ADMISSION vs incomplétude B3) et F5 (forme de l'épinglage d'attestation, avec E3-D) ; autorisation de
+commit selon 56.8 ; puis E3-C (primitive de publication) avant de compléter B6.
+
+---
+
+## 57. `AF-V-07` — E3-B : barrière finale F1 / F5, audit de l'ADR 23.31 et du fichier de tests restauré (2026-10-19) — complète le §56 et PRÉVAUT sur lui pour tout ce qui suit
+
+Le §56 reste l'historique. Sont **périmés** : sa ligne D4 (« autres consignés `ATTESTATION_WITHOUT_EFFECT` » : désormais scindé, voir 57.3), son point « attestation admise dans une chaîne non terminale non
+signalée » (56.5 : B6 la refuse maintenant), le découpage de commits de 56.8 (corrigé en 57.8) et le préambule « aucune règle nouvelle » de l'ADR 23.31 (corrigé, voir 57.4). Checkpoint initial = final :
+`HEAD` = `origin/master` = `2b25354a7139d4080f5a8c1f0bb06e22203718dc`, divergence 0/0, branche `master`. **Aucun commit, aucun push, aucun indexage.** Index réel inchangé (empreinte complète
+`8b78a333b37710b5987d1e535c8487e797984df193dc80362efd946ed9670e6f`, trois fichiers pré-indexés). M1, PARAM-1, CAT-1, ADR 0016/0026/0027 et `app_corrupted_backup.py` intacts. E3-A, B1, B2, B4,
+`atomic_json_store`, `dataset_split`, `validation_run` : `git diff HEAD` vide. `REAL` = DISABLED / NOT QUALIFIED. `GATE V` = NON PASSÉE. `FINAL_HOLDOUT` = NON ACCÉDÉ. Aucune donnée réelle.
+
+### 57.1 F1 — conclusion DÉMONTRÉE : `SPEC BLOCKED` (identité côté B3) ; rien n'est improvisé
+
+Mesures séparées (`tests/test_gate_v_exposure_attestation_phases.py`, fixtures synthétiques ; tableau complet dans `docs/adr/0025-proposal-E3B-F1-F5-PROPOSED.md` §1.1) :
+- Un slot d'attestation illisible ne change **que** `complete`, donc `inventory_id` (et `inventory_content_digest`, qui en dérive). Findings, `static_sources_digest` et projection de recouvrement restent
+  égaux à la campagne nue dans les 8 scénarios : ce n'est jamais une exposition scientifique nouvelle.
+- Avant l'`ADMISSION` (scénario 2) B3 **et** B6 refusent : fail-closed correct. Après l'`ADMISSION` : slot valide postérieur sans effet partout (3) ; **slot illisible postérieur : B6 « sans effet »
+  (conforme à 23.29.3) mais B3 incomplet, `inventory_id` différent (4) = le conflit F1, caractérisé par un test qui devra basculer volontairement** ; attestation épinglée illisible ou remplacée :
+  refus de B6 (5, 5b) ; slot ANTÉRIEUR altéré : B6 ne le relit pas, B3 le signale (6) ; épinglage forgé : hash faux, slot absent, chaîne inconnue refusés (7a) mais **épinglage d'un slot
+  antérieur valide non détectable** (7b) ; reprise : B6 identique d'un chargement à l'autre (8b), identité stable à l'étage exact avec enregistrements propres RESERVATION/ADMISSION réels (8),
+  mais **un mauvais étage change `inventory_id`** (E3-J doit fournir l'étage exact).
+- **B3 n'a pas l'information** : `interpret_audit_roots` ne reçoit que racines, plafonds, fenêtre (signature verrouillée par un test publié). **B6 n'a qu'un témoin non authentifié** fourni par
+  l'appelant (`AttestationPin`) : il vérifie l'existence et le hash du fichier désigné, jamais que ce témoin est celui de l'enregistrement `ADMISSION` du registre. L'autorité (E3-D registre, E3-J)
+  est indispensable et **n'est pas simulée**.
+- Options (a) exception générale et (b) B3 qui ignore toute anomalie d'attestation : écartées (voir la proposition pour les réserves honnêtes de la revue B : B6 est de toute façon obligatoire avant
+  l'`ADMISSION`). Mécanisme recommandé (ii) : vue post-`ADMISSION` pure hors de B3, alimentée par une portée issue du registre, **avec exigences** issues des revues (filtrer sur les observations de
+  contenu et la racine de campagne, jamais sur des chaînes de raisons ; marqueur interdisant la persistance ; étage exact ; atomicité « épinglé = plus haut `seq` » à la publication de l'`ADMISSION`).
+  Pas de B3 v4 requise. **Décisions demandées** : adopter (ii) ; sort d'un slot antérieur altéré ; acceptation que d'autres écritures locales postérieures (fichier inconnu, déclaration illisible) annulent
+  toujours l'exécution. Tant qu'elles ne sont pas prises : **F1 = SPEC BLOCKED**.
+
+### 57.2 F5 — recommandation normative (PROPOSITION, non adoptée ; `docs/adr/0025-proposal-E3B-F1-F5-PROPOSED.md` §2)
+
+Hash de **contenu du record** (SHA-256 du JSON canonique compact de la Décision 20.3, record privé de sa seule clé de hash, `created_at` inclus), distinct de la représentation persistée indentée,
+aligné sur `inventory_content_hash` et `declaration_content_hash`. Versionné (`gate_v_exposure_attestation_v1`, versions connues antérieures relues en historique), vérifié à la relecture (JSON strict sans
+flottant, clés exactes, version, hash, point fixe, répertoire, nom du slot, campagne), référence portée par l'`ADMISSION` : `{inventory_id, seq, version, attestation_content_hash}` (E3-D). Le
+SHA-256 du fichier reste valable (bijection par le point fixe) mais crée un second type de référence. **L'adoption amende 23.10 / 23.29.3 (« fichier épinglé par hash ») : décision humaine.** Le jeu de clés
+est illustratif (E3-E décide). **B6 ne contient aucune formule d'attestation** : `AttestationPin(inventory_id, seq, file_sha256)` est marqué PROVISOIRE et non authentifié dans sa docstring et dans l'ADR.
+
+### 57.3 Corrections autorisées effectuées (RED → GREEN, compatibles avec l'ADR déjà approuvée)
+
+| Changement (B6) | Justification | Tests |
+|---|---|---|
+| `LineageFailure.ADMITTED_CHAIN_NOT_TERMINAL` : l'attestation épinglée n'est pas dans la chaîne terminale | 23.29.3 : changement de chaîne terminale après l'`ADMISSION` = changement d'exposition | s7d, mutants tués |
+| `LineageFailure.ADMITTED_INVENTORY_CHANGED` : inventaire courant sans chaîne alors que l'épinglage vise la terminale | trou trouvé par la revue A (état `NO_CHAIN_FOR_CURRENT` acceptait) | s7e, mutants tués |
+| `IgnoredKind.ATTESTATION_NOT_REREAD` (slot antérieur ou d'une autre chaîne) séparé de `ATTESTATION_WITHOUT_EFFECT` (seq supérieur, même chaîne) | l'information dont E3-J a besoin ; aucune date, « postérieur » déduit de 23.29.3 | s3, s6, s6b, s6c |
+| Docstrings : `AttestationPin` provisoire/non authentifié ; `load_declaration_lineage` | F5 et honnêteté du niveau de preuve | — |
+| Un test d'intégration qui importait B6 déplacé (assertions inchangées) de `test_gate_v_exposure_integration.py` vers `test_gate_v_exposure_attestation_phases.py` | le rejeu des commits a montré que le commit B5 seul échouait | rejeu 57.8 |
+
+Aucune modification de B3, B4, B5 ni d'E3-A dans cette tranche. B3 v3 : version inchangée (aucune v4).
+
+### 57.4 Audit de l'ADR 23.31 — résultats
+
+- **D2 et D3 correspondent exactement** aux décisions approuvées (revue B, diff vérifié) : `campaign_id` couvert par `declaration_content_hash`, absent de `declaration_id` et du modèle E3-A ; B3 = `..._v3`, v2
+  conservée comme état publié distinct.
+- **Clauses d'origine conservées** : diff = ajouts, plus **2 lignes d'origine prolongées d'une note finale** (23.29.1 et 23.30.4), texte d'origine verbatim. E3-A (`7f30d07`) inchangé ; identités v2/v3 reproduites
+  par un scan réel des tables ; aucun artefact `exposure/` n'existe dans le dépôt, aucun artefact historique réécrit.
+- **Faute corrigée** : le préambule de 23.31 affirmait que 23.31.3 à 23.31.6 « ne créent aucune règle nouvelle ». C'était inexact : plusieurs refus sont des durcissements demandés par la mission du
+  2026-10-18 comme exigences, non approuvés comme règles. L'ADR les marque maintenant **[R*]** et les liste sous « **Points à confirmer** ». Hiérarchie : 23.31 prévaut sur les seuls points de sa table.
+- **Décisions nouvelles nécessitant votre autorisation** (liste de l'ADR, 7 points) : (1) A0 illisible par son contenu = orphelin et non incomplétude ; (2) aucun flottant (23.29.4 disait « non finis ») ;
+  (3) lecture post-`ADMISSION` limitée au slot épinglé, « postérieur » = seq supérieur dans la même chaîne, refus `ADMITTED_CHAIN_NOT_TERMINAL` / `ADMITTED_INVENTORY_CHANGED`, structure et densité strictes ;
+  (4) citation d'un A0 illisible dans une attestation = référence non résolue refusée (`A0_PIN_UNRESOLVED`) ; (5) plafonds numériques (128 Mio, et non les 512 Mio de la mission, déjà réduits au §55) ;
+  (6) versions de B3 connues {v2, v3}, digest vérifié, lecture historique d'un A0 v2 ; (7) étiquette `gate_v_exposure_declaration_v1` conservée malgré le jeu de clés, A0 d'une autre campagne écarté.
+  Ces durcissements refusent plus, jamais moins ; aucun n'affaiblit une garde.
+- **23.31.4** consigne désormais : forme de l'épinglage PROVISOIRE (F5 non adopté), refus de chaîne non terminale / d'inventaire changé, et la **limite F1** (conflit non résolu, `SPEC BLOCKED`).
+
+### 57.5 Audit du fichier de tests restauré (`tests/test_gate_v_exposure_store.py`) — la preuve n'est PAS le comptage
+
+Sources de référence indépendantes retrouvées dans le stockage de sauvegardes du harnais (`~/.claude/file-history`) :
+- sauvegarde faite **avant mon premier edit de cette session** : 833 lignes, SHA-256 `5496e66a43964d856b43e362be37660473b6bbbc22973988741c244544b0617f` ;
+- dernière sauvegarde de la **session précédente** (celle du §55, 833 lignes) : **même SHA-256, octets identiques** ;
+- copie de mutation restaurée (`%TEMP%\e3bm_store_fgkklmqm`) : même SHA-256 ;
+- le fichier actuel commence par ces 48 552 octets **identiques** (`cmp`) ; entre cette base et l'état actuel : **0 ligne retirée**, ajouts seuls (blocs D3/D7, D5, M2, flottants) ; l'état de 944 lignes
+  d'avant la présente tranche est identique octet pour octet à la sauvegarde `@v2` du harnais.
+- Éléments d'appui : mutation B5 sur le fichier restauré = **68/70 avec les 2 mêmes survivants équivalents que le §55.6** (aucune assertion perdue sur les 58 mutants hérités) ; 148 tests collectés aujourd'hui
+  (132 hérités + ajouts) ; aucun test modifié pour atteindre un nombre. Défaut résiduel : le fichier n'est pas suivi par Git, donc aucune empreinte versionnée n'existait avant cette tranche.
+- Incident de cause : `Path.write_text(..., newline=...)` (Python 3.13) ouvre le fichier avant de rejeter l'argument invalide ; écritures désormais via fichier temporaire + remplacement atomique.
+
+### 57.6 Résultats mesurés (code et tests définitifs)
+
+- Tests ciblés : `attestation_phases` 26, `declarations` 251, `store` 148, `integration` 45, `interpreters` 149 (collectés) ; B3 + B5 + B6 + F1 + intégration : **468 passed, 2 skipped** (rejeu 57.8, après les 5 commits).
+- **Suite complète** sur les fichiers définitifs : **5 704 passed, 11 skipped, 0 failed** (926 s) ; les 11 skips sont les skips POSIX/privilège connus. Elle a été exécutée après la dernière modification de code et
+  de test (seules des modifications de documentation ont suivi).
+- **Mutation** (copies hors dépôt, base verte exigée avant chaque groupe, « tué » = code 1, copies restaurées identiques) : B3 **34/34** ; B5 **68/70** (2 équivalents du §55.6) ; B6 **128/131**, 3 survivants
+  ÉQUIVALENTS : clause `status` de la clé de contenu du report (§55.6), `ParsedDeclaration.campaign_id` relu = attendu (une autre valeur est refusée avant), `seq >=` au lieu de `seq >` (le slot épinglé n'est
+  jamais consigné) ; les 4 mutants du nouveau refus (`ADMITTED_*`, chaîne du slot) **4/4 tués** à l'exécution finale. Un trou réel comblé par la mutation : slots d'une autre chaîne (test s6c).
+- Régression E3-A + B1 à B4 + Gate V : incluse dans la suite complète ; rejeu du commit B3 seul : 1 286 passed, 4 skipped.
+- Contrats et identités : `git diff HEAD` vide sur E3-A, B1, B2, B4 ; v2/v3 : mêmes `inventory_id` pour une campagne sans `exposure/`, v2 jamais plus permissive (matrice du §56.4 inchangée).
+- Hygiène : `git diff --check` propre ; tous les fichiers livrés en UTF-8 sans BOM, LF, sans espace final ; aucun `.patch_tmp` laissé ; 3,3 Go libres.
+- **Revues indépendantes** (sous-agents en lecture seule, ces tranches) : **A (sécurité)** 0 BLOCKER, 1 MAJOR sur la proposition (portée forgée), 2 MINOR (`ADMITTED_INVENTORY_CHANGED` manquant ; atomicité) — tous traités ; **B
+  (science)** 0 BLOCKER, 2 MAJOR sur la proposition (filtrage par chaînes ; marqueur de persistance) et corrections de wording — traités dans la proposition, mécanisme non implémenté ; aucun chemin vers un
+  faux FRESH trouvé par l'une ou l'autre.
+
+### 57.7 Statuts individuels
+
+| Composant | Statut | Preuve / réserve |
+|---|---|---|
+| B3 v3 (additif) | **READY FOR COMMIT** pour le code livré | tests publiés de B3 verts, mutation 34/34, digests v2 dérivés indépendamment ; les durcissements [R*] de B3 (orphelin A0) restent « à confirmer » (point 1 de l'ADR) |
+| B5 | **READY FOR COMMIT** | mutation 68/70, A0 refusant flottants et tailles à la publication ; points [R*] 2, 5, 6 à confirmer |
+| B6 (lecture / lignée / phases) | **READY FOR COMMIT** pour le code livré | 468 verts au rejeu ; points [R*] 3, 4, 7 à confirmer ; témoin d'admission non authentifié (dépendance E3-D / E3-J) |
+| F1 (identité de B3 après l'`ADMISSION`) | **SPEC BLOCKED** | mécanisme (ii) et trois décisions en attente (57.1) |
+| F5 (hash d'épinglage) | **PROPOSITION**, non adoptée | B6 conserve la forme provisoire |
+| ADR 23.31 | **READY FOR COMMIT** comme document local, avec « Points à confirmer » | D2/D3 conformes ; [R*] non approuvés comme règles |
+| B6 publication des déclarations / attestations | **DEPENDENCY BLOCKED** | E3-C (primitive de publication par lien) absent ; ni inventé ni remplacé par `O_EXCL` |
+
+### 57.8 Commits ISOLÉS proposés — périmètres vérifiés par rejeu (aucun exécuté ; index temporaire, jamais `git add .`)
+
+Rejeu hors dépôt dans des snapshots (`git archive HEAD` + fichiers des commits 1..k, pytest à chaque étape) : chaque commit passe SEUL. Le premier rejeu a trouvé une erreur de découpage (B5 seul échouait à cause d'un test
+d'intégration important B6) ; corrigée par le déplacement de ce test (57.3).
+
+| # | Message proposé | Fichiers | Rejeu (résultat) |
+|---|---|---|---|
+| 1 | `docs(gate-v): amend ADR 0025 with 23.31 and record the F1/F5 proposal` | `docs/adr/0025-gate-v-validation-policy-v1.md` (SEULEMENT 23.31, deux notes de renvoi, « Conséquences »), `docs/adr/0025-proposal-E3B-F1-F5-PROPOSED.md` | 149 passed (tests de B3 publiés) |
+| 2 | `feat(gate-v): bump E3-B3 to v3 with the exposure tree and orphan A0 rule` | `gate_v_exposure_interpreters.py` | 1 286 passed, 4 skipped |
+| 3 | `feat(gate-v): add E3-B5 exposure inventory persistence` | `gate_v_exposure_store.py`, `tests/gate_v_exposure_support.py`, `tests/test_gate_v_exposure_store.py`, `tests/test_gate_v_exposure_integration.py` | 340 passed, 2 skipped |
+| 4 | `feat(gate-v): add E3-B6 declaration reading and lineage loader` | `gate_v_exposure_declarations.py`, `tests/test_gate_v_exposure_declarations.py`, `tests/test_gate_v_exposure_attestation_phases.py` | 468 passed, 2 skipped |
+| 5 | `docs(handoff): record E3-B5/B6 lock and the F1/F5 gate` | `AI_HANDOFF.md` : **uniquement le hunk d'insertion final** (sections §54 à §57, insérées après le §53) | 468 passed après les 5 |
+
+Pour le commit 5, `AI_HANDOFF.md` du dépôt de travail contient aussi des hunks étrangers (§48 à §50, retouches de §51 : hunks en tête de fichier) : ils sont exclus. `CONTEXT.md` est exclu.
+Exclure aussi : M1, PARAM-1, CAT-1, ADR 0016/0026/0027, `requirements-api.txt`, `=1.12.0`, les trois fichiers pré-indexés. Ordre : 1 → 2 → 3 → 4 → 5. Toute publication exige votre autorisation distincte.
+
+### 57.9 Décisions encore nécessaires
+
+1. **F1** : adopter le mécanisme (ii) et ses exigences ; sort d'un slot antérieur au slot épinglé altéré après l'`ADMISSION` ; acceptation des autres écritures locales postérieures qui annulent l'exécution.
+2. **F5** : hash de contenu du record (recommandé, amende 23.10 / 23.29.3) ou SHA-256 du fichier ; à coordonner avec E3-D (référence de l'`ADMISSION`) et E3-E (jeu de clés).
+3. **ADR 23.31 « Points à confirmer »** (7 points, 57.4).
+4. Héritées inchangées : Q-3, Q-5, couche d'adaptation des identités, `ClosingRecord` final, preuve des racines dérivées (E3-J), E3-C avant la publication de B6.
+
+### 57.10 Verdict
+
+`B3 ADDITIVE READY FOR COMMIT` · `B5 READY FOR COMMIT` · `B6 READ-ONLY READY FOR COMMIT` · `F1 SPEC BLOCKED` · `F5 PROPOSITION (non adoptée)` · `B6 PUBLICATION DEPENDENCY BLOCKED`.
+La phase E3-B n'est **pas** déclarée terminée : tous les tests passent, mais F1 reste bloqué par une décision normative et la publication de B6 dépend d'E3-C. `REAL` = DISABLED / NOT QUALIFIED. `GATE V` = NON PASSÉE.
+`FINAL_HOLDOUT` = NON ACCÉDÉ. Aucun commit, aucun push.
+
+---
+
+## 58. `AF-V-07` — E3-B : gel final et préparation des commits — note de clôture (2026-10-19) — complète le §57 et PRÉVAUT sur lui pour tout ce qui suit
+
+Checkpoint inchangé : `HEAD` = `origin/master` = `2b25354a7139d4080f5a8c1f0bb06e22203718dc`, divergence 0/0, branche `master`. **Aucun commit, aucun push, aucun indexage.** Index réel inchangé (empreinte
+complète `8b78a333b37710b5987d1e535c8487e797984df193dc80362efd946ed9670e6f`, les trois fichiers pré-indexés AGENTS.md, ADR 0016 et skills-usage.md). Aucun développement B3 / B5 / B6 recommencé,
+aucun mécanisme F1 implémenté, aucune formule d'attestation modifiée. Les changements de cette tranche sont de la documentation et des commentaires de B6. `REAL` = DISABLED / NOT QUALIFIED.
+`GATE V` = NON PASSÉE. `FINAL_HOLDOUT` = NON ACCÉDÉ.
+
+### 58.1 Orientations F1 formalisées (conception pour E3-D / E3-J ; NON normatives, NON implémentées ; F1 reste `SPEC BLOCKED` pour le code)
+
+Consignées dans `docs/adr/0025-proposal-E3B-F1-F5-PROPOSED.md`, section 0 : vue de recalcul pure hors de B3 ; preuve d'`ADMISSION` autoritative obligatoire (aucun témoin forgé ou non authentifié ne vaut admission) ;
+vérification du slot épinglé et de sa chronologie par l'enregistrement `ADMISSION` (jamais par une date de fichier) ; seules les attestations prouvées postérieures ET non épinglées peuvent être neutralisées, pour le
+seul calcul scientifique ; anomalies consignées dans l'audit ; altération du slot épinglé ou d'un slot historique antérieur = blocage ; fichiers inconnus, déclarations altérées, ruptures de chaîne = blocage ; aucun
+marqueur de vue persistable ni contaminant pour une identité ; atomicité de lecture et protection contre les changements concurrents obligatoires. Les trois questions du §57.1 sont tranchées comme orientations
+(slot antérieur altéré : annule ; autres écritures locales postérieures : annulent). Conditions de refus **avant et après Claim / `CONSUMPTION`**, avec la distinction « refus de sécurité » / « changement d'exposition
+scientifique » : section 4 de la proposition, en n'utilisant que les états de l'ADR (`ADMITTED_STALE`, `EXECUTION_VOID_EXPOSURE_CHANGED`, `EXECUTION_VOID_<cause>`, refus de l'admission remplacée). Le nom de la cause de
+sécurité d'un `EXECUTION_VOID_<cause>` reste à fixer par E3-J : il n'est pas inventé.
+
+### 58.2 F5 formalisée (proposition de conception)
+
+SHA-256 du JSON canonique compact UTF-8 d'un record normatif validé, sans autoréférence (la préimage exclut la seule clé du hash). Champs exacts, préimage et schéma : avec E3-E ; référence de l'`ADMISSION` : avec E3-D.
+L'adoption comme règle amendera 23.10 / 23.29.3. `AttestationPin` de B6 reste provisoire et non authentifié ; aucune formule d'attestation dans B6.
+
+### 58.3 Les sept règles de l'ADR 23.31 — statut au 2026-10-19 (détail dans l'ADR, « Statut au 2026-10-19 »)
+
+| # | Règle | Conformité aux orientations | Point à isoler |
+|---|---|---|---|
+| 1 | A0 non épinglé corrompu par contenu = orphelin ; structure et E/S non neutralisées | conforme | nuance : `TOO_LARGE` (A0 plus gros que la limite de lecture) est traité comme illisible par son contenu ; un fichier qui a grandi depuis le listage = refus |
+| 2 | aucun flottant | conforme | — |
+| 3 | contrôle du slot épinglé après l'`ADMISSION`, sans résoudre F1 | conforme | `ADMITTED_CHAIN_NOT_TERMINAL` / `ADMITTED_INVENTORY_CHANGED` vont au-delà du seul contrôle du slot (changement d'exposition) : à confirmer ; les étiquettes « sans effet » / « non relu » sont informatives |
+| 4 | référence à un A0 illisible : refus | conforme dans le résultat (refus) | **isolé** : B6 refuse toute occurrence du hash, plus large qu'une « référence contractuelle », faute de schéma d'E3-E ; à restreindre aux champs contractuels une fois E3-E fixé |
+| 5 | plafonds 128 Mio non qualifiés pour `REAL` | conforme | — |
+| 6 | historique B3 v2 / v3 explicite, sans requalification | conforme | — |
+| 7 | étiquette de déclaration `v1` conservée seulement si aucune donnée v1 et aucune migration | conforme, condition **vérifiée** | aucun JSON ni fichier `declaration_*` / `attestation_*` / `inventory_*` portant ou relevant de l'étiquette dans le dépôt de travail ; B6 n'a aucun chemin de publication ; si une déclaration v1 existait, elle serait refusée (`SCHEMA`) et une migration serait requise |
+
+Aucune contradiction démontrée avec une clause acceptée n'est apparue ; les points isolés ci-dessus sont des durcissements ou des élargissements fail-closed, signalés. Aucune clause historique n'est réécrite
+(diff de l'ADR : 4 hunks, 2 lignes d'origine prolongées d'une note, conservées verbatim).
+
+### 58.4 Contrôle précommit des cinq périmètres (lecture seule ; rejeu dans des snapshots hors dépôt)
+
+| # | Commit proposé | Fichiers (empreinte SHA-256, 16 premiers caractères) | Tests du snapshot |
+|---|---|---|---|
+| 1 | `docs(gate-v): amend ADR 0025 with 23.31 and record the F1/F5 proposal` | `docs/adr/0025-gate-v-validation-policy-v1.md` (`eeabc81fef677563`, 4 hunks : 23.31, notes 23.29.1 et 23.30.4, « Conséquences »), `docs/adr/0025-proposal-E3B-F1-F5-PROPOSED.md` (`9ae968d2609c27a3`) | 149 passed |
+| 2 | `feat(gate-v): bump E3-B3 to v3 with the exposure tree and orphan A0 rule` | `gate_v_exposure_interpreters.py` (`bbadef47f84a4308`) | 1 286 passed, 4 skipped |
+| 3 | `feat(gate-v): add E3-B5 exposure inventory persistence` | `gate_v_exposure_store.py` (`19a51da9eb754fa1`), `tests/gate_v_exposure_support.py` (`356dbb1405b40f55`), `tests/test_gate_v_exposure_store.py` (`1316282e4d5ba354`), `tests/test_gate_v_exposure_integration.py` (`2127aa1801c63ec4`) | 340 passed, 2 skipped |
+| 4 | `feat(gate-v): add E3-B6 declaration reading and lineage loader` | `gate_v_exposure_declarations.py` (`891699a98510faea`), `tests/test_gate_v_exposure_declarations.py` (`c90cf9a759d505a5`), `tests/test_gate_v_exposure_attestation_phases.py` (`2b3815b73464172b`) | 468 passed, 2 skipped |
+| 5 | `docs(handoff): record E3-B5/B6 lock, the F1/F5 gate and the freeze` | `AI_HANDOFF.md` : **uniquement le bloc d'insertion final §54 à §58**, après le §53 | 468 passed, 2 skipped après les 5 |
+
+Vérifications (script de contrôle hors dépôt) : aucun fichier dans deux commits ; aucun fichier du lot n'est un des trois pré-indexés ni `CONTEXT.md` ; **aucun fichier modifié ou non suivi n'échappe au classement**
+(les étrangers sont M1, PARAM-1, CAT-1, ADR 0026 / 0027, matrice commune, spec UX, `requirements-api.txt`, `=1.12.0`) ; index et empreinte inchangés ; pour le commit 5, `HEAD` est un préfixe strict du fichier obtenu
+et le bloc ajouté ne contient que les titres §54 à §58 : les sections locales étrangères §48, §49 et §50 (lignes 3387, 3441, 3504 du fichier de travail) et les retouches de §51 restent **hors** du commit ; `CONTEXT.md`
+(dernier hunk, termes glossaire) est exclu en entier. Ordre et dépendances : 1 → 2 → 3 → 4 → 5, chacun passe seul. E3-A, B1, B2, B4, `atomic_json_store` : `git diff HEAD` vide.
+
+### 58.5 Résultats réellement disponibles
+
+- **Suite complète** (dernière exécution, §57.6) : **5 704 passed, 11 skipped, 0 failed**, sur les fichiers définitifs de code et de tests. Depuis : (a) documentation (ADR, proposition, handoff) ; (b) des COMMENTAIRES de B6
+  (`IgnoredKind`) : l'AST de B6 est identique à celui de la copie de mutation précédente ; B3 et B5 sont identiques octet pour octet aux copies de mutation. **La suite complète n'a pas été rejouée** (aucun code fonctionnel
+  modifié) ; les cinq snapshots l'ont été après le dernier changement : 149, 1 286, 340, 468, puis 468 après les cinq commits.
+- Mutation (§57.6) : B3 34/34, B5 68/70, B6 128/131 (survivants équivalents justifiés), mutants du nouveau refus 4/4 tués.
+- Compatibilité : matrice B3 v2 / v3 (§56.4) inchangée ; digests v2 dérivés indépendamment ; v2 jamais plus permissive que v3 ; aucun artefact historique réécrit.
+- Preuve d'intégrité du fichier de tests restauré : §57.5.
+
+### 58.6 Dépendances restantes
+
+- **E3-C** : primitive de publication par lien (`tmp + fsync + os.link + fsync`) : sans elle, aucune déclaration ni attestation ne peut être publiée (B6 reste en lecture seule).
+- **E3-D** : registre ; enregistrement `ADMISSION` portant la référence d'attestation et le plus haut `seq` observé à sa publication ; atomicité « épinglé = plus haut `seq` » ; autorité des enregistrements propres.
+- **E3-E** : schéma de l'attestation, champs contractuels (pour restreindre le refus de la règle 4), préimage du hash de contenu, évaluation des épinglages.
+- **E3-J** : orchestrateur ; appel de B6 avant et après l'`ADMISSION` ; portée issue du registre ; vue de recalcul post-`ADMISSION` (F1) avec marqueur non persistable ; étage propre exact ; classement des refus typés de B6
+  (sécurité / changement d'exposition) et nom des causes `EXECUTION_VOID_<cause>` de sécurité ; valeurs de 23.24 en `REAL`.
+- Hérités inchangés : Q-3, Q-5, couche d'adaptation des identités, `ClosingRecord` final, preuve des racines dérivées.
+
+### 58.7 Verdict
+
+**`E3-B COMMIT PACKAGE READY`** — au sens strict : cinq périmètres explicites, indépendants, ordonnés, testés un à un dans des snapshots et sans fichier étranger. Statuts : `B3 ADDITIVE READY FOR COMMIT` ·
+`B5 READY FOR COMMIT` · `B6 READ-ONLY READY FOR COMMIT` · `F1 SPEC BLOCKED` (pour le code) · `F5 PROPOSITION DE CONCEPTION` · `B6 PUBLICATION DEPENDENCY BLOCKED`. **E3-B n'est pas déclaré intégralement terminé.**
+Aucun commit ni push sans votre autorisation explicite. `REAL` = DISABLED / NOT QUALIFIED. `GATE V` = NON PASSÉE. `FINAL_HOLDOUT` = NON ACCÉDÉ.
+
+---
+
+## 59. `AF-V-07` — E3-B : note de publication (2026-10-19) — complète le §58 ; l'autorisation ci-dessous remplace sa dernière phrase « sans votre autorisation »
+
+L'utilisateur a autorisé explicitement, par une mission distincte, la création et la publication en fast-forward des cinq commits isolés du §58.4 (aucun nouveau développement), sous conditions de périmètre, de
+tests, d'index préexistant et de sécurité. Les commits ont été construits par un **index temporaire indépendant** (l'index réel et ses trois fichiers pré-indexés n'ont jamais été absorbés), chacun testé sur l'arbre
+exact avant d'être créé :
+
+| # | SHA | Parent | Fichiers | Tests de l'arbre |
+|---|---|---|---|---|
+| 1 | `56ed7f579654a432a11fa42c93910ef9814a39ef` | `2b25354` (checkpoint) | ADR 0025 (§23.31), proposition F1/F5 | 149 passed |
+| 2 | `e75e709a3b9c62348e868426476796ae982291b8` | `56ed7f5` | `gate_v_exposure_interpreters.py` (B3 v3) | 1 286 passed, 4 skipped |
+| 3 | `65fab26703161638fb57b4b2409c132285bfc637` | `e75e709` | B5, support de tests, tests du store et d'intégration | 340 passed, 2 skipped |
+| 4 | `46dfb3414ed2594e0741f8d860b0c8350c32ffbd` | `65fab26` | B6 lecture / lignée, ses tests, tests de caractérisation F1 | 468 passed, 2 skipped |
+| 5 | (ce commit) | `46dfb34` | `AI_HANDOFF.md` : sections §54 à §59 uniquement | 468 passed, 2 skipped |
+
+Le commit 5 contient cette note : il ne peut pas porter son propre SHA ni le résultat du `push`, qui se lisent dans `git log` et sur `origin/master`. Les statuts restent : B3 v3, B5 et B6 en lecture seule publiés
+**si et seulement si** `origin/master` contient ces commits (à vérifier dans Git) ; F1 `SPEC BLOCKED` ; F5 `PROPOSED` ; publication de B6 `DEPENDENCY BLOCKED` (E3-C) ; `GATE V` NON PASSÉE ; `REAL` = DISABLED / NOT
+QUALIFIED ; `FINAL_HOLDOUT` NON ACCÉDÉ. Les sections locales étrangères du handoff (§48 à §50, retouches de §51) et `CONTEXT.md` restent hors de tous les commits. Prochaine mission : conception et
+implémentation d'E3-C, sous une autorisation distincte.
