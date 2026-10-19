@@ -4,7 +4,8 @@ gate_v_exposure_interpreters.py — AF-V-07 Slice E3-B3 : interprètes de source
 Contrat : ADR 0025 Décision 23 (23.3, 23.11 étape 1, 23.13, 23.27.1 à 23.27.3) ; design E3-B (AI_HANDOFF.md §44.1, §45) ;
 préconditions B3 consignées par B2 (§47, docstring de `gate_v_exposure_scan.ExposureScan`). Version 2 : addendum 23.30 approuvé
 par l'utilisateur (ADR 0025 §23.30) — fenêtre accessible au calcul et asymétrie des preuves (Q-6), identité d'un plan = identifiant +
-empreinte recalculée (Q-7), absence de rapport avec W établie pour sortir de l'ensemble pertinent (Q-8).
+empreinte recalculée (Q-7), absence de rapport avec W établie pour sortir de l'ensemble pertinent (Q-8). Version 3 (ADR 0025 23.31.2,
+approuvée le 2026-10-18) : structure `exposure/` d'E3-B reconnue dans la table de campagne, A0 illisible par son contenu = orphelin.
 
 Responsabilité de B3, et elle seule : posséder les tables FERMÉES de sources, appeler lui-même le scanner strict de B2, relier
 chaque observation à sa règle par `rule_tag`, interpréter les contenus acceptés en `ExposureFinding` (E3-A) et rendre explicite tout
@@ -27,6 +28,7 @@ from enum import Enum
 from typing import Optional
 
 from gate_v_exposure_scan import (
+    EXPOSURE_TEMP_ORPHAN_PATTERN,
     AuditRoot,
     EntryClass,
     ExposureScan,
@@ -51,7 +53,9 @@ from gate_v_final_holdout_protocol import (
     normalize_utc_instant,
 )
 
-B3_SEMANTICS_VERSION = "gate_v_exposure_interpreters_v2"
+B3_SEMANTICS_VERSION = "gate_v_exposure_interpreters_v3"
+# Historique des versions (ADR 0025 23.31.2) : v2 = B3 publié au commit 41fe58d ; v3 = structure `exposure/` reconnue dans la table de
+# campagne et A0 illisible par son CONTENU traité en orphelin (23.29.1). Les formules d'E3-A sont inchangées d'une version à l'autre.
 
 
 class RootLayout(str, Enum):
@@ -139,12 +143,39 @@ _RESULTS_RULES = (
 
 TAG_CAMPAIGN_PLAN = "campaign.plan"
 TAG_CAMPAIGN_CLAIM = "campaign.claim"
+TAG_EXPOSURE_DIR = "campaign.exposure.dir"
+TAG_EXPOSURE_INVENTORY = "campaign.exposure.inventory"
+TAG_EXPOSURE_ORPHAN = "campaign.exposure.orphan"
+TAG_EXPOSURE_CHAIN = "campaign.exposure.chain"
+TAG_EXPOSURE_DECLARATION = "campaign.exposure.declaration"
+TAG_EXPOSURE_ATTESTATION = "campaign.exposure.attestation"
+TAG_EXPOSURE_CHAIN_ORPHAN = "campaign.exposure.chain_orphan"
 
-# Dossier de campagne : seuls l'ancre et le Claim d'E2 (`final_holdout_access_claim.json`, Décision 9) sont interprétés ; tout autre
-# fichier (manifeste, validations, walk-forward, `exposure/`) reste INCONNU donc UNRESOLVED tant que son interprète n'existe pas.
+# Structure `<campaign_dir>/exposure/` d'E3-B (ADR 0025 23.29.1) : CONNUE, donc ni source inconnue ni incomplétude. Ce sont des
+# artefacts INFORMATIFS lus strictement : leur contenu est vérifié par B5 (A0) et B6 (déclarations, lignée), jamais par B3. Noms exacts :
+# aucun joker ; les anciens chemins (`exposure/declaration_<seq>.json`, `exposure/attestation.json`) et tout autre nom restent inconnus.
+_A0_FILE = SegmentPattern(r"inventory_[0-9a-f]{64}\.json")
+_INVENTORY_DIR = SegmentPattern(r"[0-9a-f]{64}")
+_DECLARATION_FILE = SegmentPattern(r"declaration_[0-9]{4}\.json")
+_ATTESTATION_FILE = SegmentPattern(r"attestation_[0-9]{4}\.json")
+_PUBLICATION_ORPHAN = SegmentPattern(EXPOSURE_TEMP_ORPHAN_PATTERN)
+_EXPOSURE_RULES = (
+    SourceRule(("exposure",), EntryClass.STRUCTURAL_DIRECTORY, tag=TAG_EXPOSURE_DIR),
+    SourceRule(("exposure", _A0_FILE), EntryClass.INFORMATIVE_JSON, JsonKind.OBJECT, tag=TAG_EXPOSURE_INVENTORY),
+    SourceRule(("exposure", _PUBLICATION_ORPHAN), EntryClass.TEMP_ORPHAN_FILE, tag=TAG_EXPOSURE_ORPHAN),
+    SourceRule(("exposure", _INVENTORY_DIR), EntryClass.STRUCTURAL_DIRECTORY, tag=TAG_EXPOSURE_CHAIN),
+    SourceRule(("exposure", _INVENTORY_DIR, _DECLARATION_FILE), EntryClass.INFORMATIVE_JSON, JsonKind.OBJECT, tag=TAG_EXPOSURE_DECLARATION),
+    SourceRule(("exposure", _INVENTORY_DIR, _ATTESTATION_FILE), EntryClass.INFORMATIVE_JSON, JsonKind.OBJECT, tag=TAG_EXPOSURE_ATTESTATION),
+    SourceRule(("exposure", _INVENTORY_DIR, _PUBLICATION_ORPHAN), EntryClass.TEMP_ORPHAN_FILE, tag=TAG_EXPOSURE_CHAIN_ORPHAN),
+)
+
+# Dossier de campagne : seuls l'ancre, le Claim d'E2 (`final_holdout_access_claim.json`, Décision 9) et la structure `exposure/` (connue,
+# informative) sont reconnus ; tout autre fichier (manifeste, validations, walk-forward) reste INCONNU donc UNRESOLVED tant que son
+# interprète n'existe pas. Les deux premières règles sont celles du B3 publié, inchangées et dans le même ordre.
 _CAMPAIGN_RULES = (
     SourceRule(("plan.json",), EntryClass.INFORMATIVE_JSON, JsonKind.OBJECT, tag=TAG_CAMPAIGN_PLAN),
     SourceRule(("final_holdout_access_claim.json",), EntryClass.EXPOSING_JSON, JsonKind.OBJECT, tag=TAG_CAMPAIGN_CLAIM),
+    *_EXPOSURE_RULES,
 )
 
 # Répertoire d'un plan configuré comme racine d'audit (« répertoires d'événements des plans », 23.11 étape 1).
@@ -158,6 +189,21 @@ _TABLES = {RootLayout.RESULTS: _RESULTS_RULES, RootLayout.CAMPAIGN_DIR: _CAMPAIG
            RootLayout.SPLIT_PLAN_DIR: _SPLIT_PLAN_DIR_RULES}
 # Fichier-ancre exigé à la RACINE d'une disposition (B2 n'observe jamais une absence).
 _ROOT_ANCHORS = {RootLayout.CAMPAIGN_DIR: "plan.json", RootLayout.SPLIT_PLAN_DIR: "split_plan.json"}
+
+
+# `rules_digest` de la table appliquée par chaque version CONNUE de B3, par disposition (ADR 0025 23.31.2, 23.31.6) : valeurs FIGÉES, jamais
+# recalculées ici (la formule appartient à B2). v2 : mesurées sur le B3 publié (41fe58d) ; v3 : tables courantes, un test vérifie qu'elles
+# égalent le digest d'un scan réel. Un A0 dont un épinglage de scan diverge de la version qu'il enregistre est refusé par B5.
+KNOWN_B3_VERSIONS = ("gate_v_exposure_interpreters_v2", "gate_v_exposure_interpreters_v3")
+_V2, _V3 = KNOWN_B3_VERSIONS
+B3_RULES_DIGESTS = (                                              # (version, disposition, rules_digest) : immuable
+    (_V2, RootLayout.RESULTS, "9014a865e7c5c4fea0ec7fc4cbcd3e8d76357a51693c339981e50f523ae51960"),
+    (_V2, RootLayout.CAMPAIGN_DIR, "cb94f97f1b2c53f8839f90547b3ad619e5a3a64dacfb857071554d329a6a6fa7"),
+    (_V2, RootLayout.SPLIT_PLAN_DIR, "e98082afc0482e2afdce61884f0da5f264a943defd666ca4aedd8b75ec217f29"),
+    (_V3, RootLayout.RESULTS, "9014a865e7c5c4fea0ec7fc4cbcd3e8d76357a51693c339981e50f523ae51960"),
+    (_V3, RootLayout.CAMPAIGN_DIR, "7cc0cb309210f43cc0e6e00a2a220483196fdc3ff1d7e285aff758313de2e04f"),
+    (_V3, RootLayout.SPLIT_PLAN_DIR, "e98082afc0482e2afdce61884f0da5f264a943defd666ca4aedd8b75ec217f29"),
+)
 
 
 def source_rules(layout: RootLayout) -> tuple:
@@ -531,7 +577,8 @@ _INTERPRETERS = {TAG_JOB_CONFIG: _interpret_job, TAG_SPLIT_EVENT: _interpret_eve
 # illisible n'établit pas qu'il s'agit d'un OOS : sa nature reste inconnue.
 _FALLBACK_KINDS = {TAG_JOB_CONFIG: SourceKind.JOB_EXECUTION, TAG_SPLIT_EVENT: SourceKind.HOLDOUT_ACCESS_EVENT,
                    TAG_VALIDATION_RUN: SourceKind.UNKNOWN_SOURCE, TAG_CAMPAIGN_CLAIM: SourceKind.FINAL_HOLDOUT_CLAIM}
-_INFORMATIVE_TAGS = frozenset({TAG_SPLIT_PLAN, TAG_EXPERIMENT, TAG_CAMPAIGN_PLAN, TAG_JOB_MANIFEST})
+_INFORMATIVE_TAGS = frozenset({TAG_SPLIT_PLAN, TAG_EXPERIMENT, TAG_CAMPAIGN_PLAN, TAG_JOB_MANIFEST, TAG_EXPOSURE_INVENTORY,
+                               TAG_EXPOSURE_DECLARATION, TAG_EXPOSURE_ATTESTATION})
 _EXPERIMENT_KEYS = frozenset({"created_at", "experiment_id", "hypothesis"})   # `research_run.Experiment` (job_store)
 
 
@@ -560,6 +607,13 @@ _ANOMALY_CAUSES = {
                     UnresolvedCause.UNKNOWN_SOURCE_TYPE),
 }
 _UNKNOWN_ENTRY_ANOMALIES = frozenset({SourceAnomaly.UNKNOWN_FILE, SourceAnomaly.UNKNOWN_DIRECTORY, SourceAnomaly.UNKNOWN_TEMP_FILE})
+# Anomalies de CONTENU d'un `inventory_<hash>.json` : illisible, tronqué, non objet, trop gros (ADR 0025 23.29.1). Un A0 n'est jamais une
+# source exposante : sa lecture ratée ne cache aucune exposition. Non épinglé, c'est un orphelin (l'observation et son anomalie restent dans
+# le scan en mémoire, NON persistées ; B6 le consigne à la relecture) et non une incomplétude ; l'épinglage (attestation, `ADMISSION`) est connu de B6 et d'E3-J, jamais de B3, qui
+# n'en fait donc aucune preuve. Une entrée de nature fausse (répertoire, lien) ou une erreur d'E/S reste non résolue, comme avant.
+_ORPHAN_A0_ANOMALIES = frozenset({SourceAnomaly.INVALID_JSON, SourceAnomaly.DUPLICATE_KEY, SourceAnomaly.NON_FINITE, SourceAnomaly.BOM,
+                                  SourceAnomaly.NOT_UTF8, SourceAnomaly.LONE_SURROGATE, SourceAnomaly.DEPTH_EXCEEDED,
+                                  SourceAnomaly.TOO_LARGE, SourceAnomaly.UNEXPECTED_JSON_TYPE})
 
 class IncompleteReason(str, Enum):
     """Code d'une raison d'incomplétude ; la raison complète est « CODE:<label>/<chemin> » (ou « CODE:<label> »)."""
@@ -701,6 +755,8 @@ def _bind(observation, context: _Context, findings: list, evidence: list, reason
     tag = observation.rule_tag
     if observation.anomaly is not None:
         unknown = observation.anomaly in _UNKNOWN_ENTRY_ANOMALIES
+        if tag == TAG_EXPOSURE_INVENTORY and observation.anomaly in _ORPHAN_A0_ANOMALIES:
+            return False
         if tag in _INFORMATIVE_TAGS:
             reasons.append(f"{REASON_INFORMATIVE_UNRESOLVED}:{_location(observation)}")
             return False
