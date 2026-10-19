@@ -3163,7 +3163,8 @@ réécrites, hors notes additives ; la présente table les signale (des notes de
   `declaration_id` (`compute_declaration_id`, **inchangé**), `prev_declaration_content_hash` (nul si et seulement si `seq` = 1),
   `carried_from` (nul sauf pour `seq` = 1 d'une chaîne non racine, 23.29.2), `created_at` (injecté, jamais lu d'une horloge par le
   cœur) et `declaration_content_hash` = SHA-256 du JSON canonique (20.3) de l'enveloppe **sans** ce champ, `created_at` inclus.
-  Le `declaration_id` d'E3-A n'inclut pas l'enveloppe : seul `declaration_content_hash` la couvre.
+  Le `declaration_id` d'E3-A n'inclut pas l'enveloppe : seul `declaration_content_hash` la couvre. *(Note de renvoi : jeu de clés
+  complété par `campaign_id` et concordance de campagne exigée à la lecture, 23.31.1.)*
 - **Aucune suppression, aucun remplacement, aucune réécriture** d'un fichier existant. Les déclarations ne peuvent que durcir
   (23.11 étape 2) ; **aucune rétractation n'existe dans cette version** (une `RESERVATION` n'est jamais libérée, 23.10, donc une autre
   campagne ne peut pas reprendre la même fenêtre) : toute correction d'une exposition déclarée à tort relèverait d'une décision
@@ -3529,7 +3530,8 @@ détection.
   - Les effets de 23.30.3 sur `static_sources_digest` et `inventory_id` sont ceux que le code publié d'E3-A calcule déjà ; ils sont
     caractérisés par des tests de B3, sans modifier E3-A. Les refus qui en découlent relèvent d'E3-D et d'E3-J.
 - **B1, B2** (publiés) : inchangés.
-- **B3** : version `gate_v_exposure_interpreters_v2`. Aucune v1 n'a été publiée ni persistée : aucune migration.
+- **B3** : version `gate_v_exposure_interpreters_v2`. Aucune v1 n'a été publiée ni persistée : aucune migration. *(Note de renvoi : B3
+  passe en `gate_v_exposure_interpreters_v3` le 2026-10-18, la v2 restant un état publié distinct, 23.31.2 ; lecture historique, 23.31.6.)*
 - **B4** (assemblage) : les compteurs de 23.27.5 ne dépendent pas des fenêtres et ne changent pas. B4 ne reclasse rien, ne compte jamais
   avec le relevé des preuves et le transmet tel quel. `static_sources_digest` reste `{source_id, content_hash}` de l'ensemble
   pertinent ; le `content_hash` d'un finding de job reste celui de `config_used.json`.
@@ -3603,6 +3605,170 @@ détection.
 21. À la charge d'E3-D et d'E3-J : `RESERVATION` refusée tant que l'ensemble pertinent contient une source d'exécution non résolue ; source
     ajoutée, retirée ou modifiée après la `RESERVATION` : `RESERVATION_STALE` ou `ADMITTED_STALE` ; configuration des racines d'audit
     épinglée dans l'attestation.
+
+### 23.31 — Addendum E3-B5/B6 (2026-10-18) : liaison des déclarations à la campagne (D2), version 3 de B3 (D3), lecture historique et niveau de preuve des épinglages
+
+**Statut.** Amendement normatif ciblé. Les changements de contrat **D2** et **D3** ont été approuvés explicitement par l'utilisateur le
+2026-10-18 (mission « E3-B5/B6 final contract lock »). Les sous-sections 23.31.3 à 23.31.6 précisent l'application de 23.29.1, 23.29.3,
+23.29.4, 23.24 et 23.30.4 au code de B5/B6 et le **niveau de preuve** qu'il atteint, mais **certaines de leurs conséquences sont des
+durcissements fail-closed qui n'ont PAS été approuvés comme changements normatifs** : la mission du 2026-10-18 les a demandés comme exigences de
+mise en œuvre (D1, D4 à D7), sans les approuver comme règles. Elles sont marquées **[R*]** ci-dessous et listées sous « Points à confirmer ». Elles
+n'affaiblissent aucune garde (elles refusent plus, jamais moins) ; tant qu'elles ne sont pas confirmées, elles ne sont pas des règles de l'ADR.
+Rien n'est rétroactif : aucune déclaration ni attestation n'a jamais été publiée (la publication dépend d'E3-C, absent,
+23.29.4) et aucun A0 n'a été persisté hors des fixtures de test. E3-A (`7f30d0752465b755e8c08460e8ffb4ac13ff1d47`), B1, B2 et B4 sont
+**inchangés** : API, identités, formules, et en particulier `ExposureDeclaration`, `compute_declaration_id`, `DeclarationSet`,
+`compute_exposure_inventory_id`. Les clauses d'origine ne sont pas réécrites ; des notes de renvoi sont ajoutées en 23.29.1 et 23.30.4.
+`REAL` reste désactivé et non qualifié, `GATE V` non passée, `FINAL_HOLDOUT` non accédé.
+
+Sur les seuls points de la table ci-dessous, **23.31 prévaut** en cas de divergence avec la clause d'origine (même convention que 23.29) ; les
+mentions **[N]** sont les seuls changements normatifs approuvés (D2, D3) ; les mentions **[R*]** précisent l'application d'une règle existante mais
+comportent des durcissements à confirmer (liste « Points à confirmer » ci-dessous).
+
+| Clause d'origine | Traitement | Nature |
+|---|---|---|
+| 23.29.1, « Enveloppe persistée d'une déclaration » (jeu de clés) | complétée par `campaign_id` (23.31.1) ; `declaration_id` inchangé | [N] (D2) |
+| 23.29.1 / 23.29.2, validité d'un répertoire et lignée | complétées : concordance de `campaign_id` de chaque déclaration de chaque chaîne (23.31.1) | [N] (D2) |
+| 23.30.4, « B3 : version `gate_v_exposure_interpreters_v2` » | B3 passe en `gate_v_exposure_interpreters_v3` (23.31.2) ; v2 reste un état publié distinct | [N] (D3) |
+| 23.29.1, « sauf s'il est épinglé par une attestation ou une `ADMISSION` » | précisée : niveau de preuve d'un épinglage avant E3-E (23.31.3) ; une citation d'un A0 illisible est une référence non résolue, refusée | [R*] |
+| 23.29.3 / 23.29.4, lecture des attestations | précisées : lecture stricte sans flottant ; lecture après l'`ADMISSION` limitée à l'attestation épinglée, refus si elle n'est pas dans la chaîne terminale ou si l'inventaire courant n'est plus le sien (23.31.4) ; conflit F1 consigné, non résolu | [R*] |
+| 23.24, limite mémoire du chargeur | précisée : plafonds de B5/B6 = gardes `SYNTHETIC` provisoires, jamais un défaut `REAL` (23.31.5) | [R*] |
+| 23.27.3 / 23.30.4, versions de règles persistées dans l'A0 | précisées : lecture historique intègre ≠ requalification ; version inconnue ou digest incohérent refusés (23.31.6) | [R*] |
+
+**Points à confirmer (aucune règle de cette liste n'est approuvée comme changement normatif).**
+1. *Orphelin A0* (23.31.2, 23.31.3) : une anomalie de contenu d'un `inventory_<hash>.json` ne rend plus la racine incomplète (alternative écartée : B3
+   fail-closed, B6 lève l'incomplétude).
+2. *Aucun flottant* (23.31.4) : tout nombre à fraction ou exposant est refusé dans A0, déclarations et attestations (23.29.4 dit « sans flottant » et
+   refuse les valeurs non finies ; le journal du §55.7 notait « flottants tolérés »).
+3. *Lecture après l'`ADMISSION`* (23.31.4) : seul le slot épinglé est lu ; « postérieur » = `seq` supérieur dans la même chaîne ; refus
+   `ADMITTED_CHAIN_NOT_TERMINAL` et `ADMITTED_INVENTORY_CHANGED` ; la structure et la densité des noms de slots restent strictes dans les deux phases.
+4. *Référence non résolue* (23.31.3) : toute occurrence (casse ignorée) du hash d'un A0 illisible dans une attestation pertinente refuse
+   (`A0_PIN_UNRESOLVED`).
+5. *Plafonds* (23.31.5) : 100 000 entrées, 128 Mio cumulés (la mission citait 512 Mio ; le §55 l'avait déjà réduit), 16 Mio par fichier, profondeur 32.
+6. *Versions de règles* (23.31.6) : versions de B3 connues {v2, v3}, `rules_digest` vérifié contre la version enregistrée, lecture historique d'un A0 v2.
+7. *Étiquette de version de l'enveloppe* (23.31.1) : `gate_v_exposure_declaration_v1` est conservée alors que le jeu de clés change (aucune déclaration
+   n'a jamais été publiée) ; un A0 d'une autre campagne est écarté pour la règle « un A0 existe avant la première déclaration ».
+
+**Statut au 2026-10-19** (orientations de l'utilisateur ; conformité vérifiée sur le code, les tests et les fichiers du dépôt ; aucune clause historique réécrite) :
+1. *Conforme.* Un A0 non épinglé corrompu par son contenu est un orphelin consigné ; une erreur d'E/S, un lien, un fichier non régulier ou un fichier qui a grandi depuis le listage
+   sont des refus. Nuance : un A0 plus gros que la limite de lecture (`TOO_LARGE`) est traité comme illisible par son contenu (orphelin, refus s'il est épinglé), conformément à
+   « illisible ou tronqué » (23.29.1) ; B5 ne peut d'ailleurs pas en publier.
+2. *Conforme.* Aucun flottant.
+3. *Conforme* pour le contrôle du slot épinglé, sans prétendre résoudre F1 (limite consignée en 23.31.4). Les étiquettes de B6 « sans effet » / « non relu » sont INFORMATIVES : elles ne
+   neutralisent rien et ne prouvent pas la chronologie. Les refus `ADMITTED_CHAIN_NOT_TERMINAL` et `ADMITTED_INVENTORY_CHANGED` vont au-delà du seul contrôle du slot épinglé (changement
+   d'exposition, 23.29.3) : à confirmer.
+4. *Point isolé.* B6 refuse toute occurrence du hash d'un A0 illisible dans une attestation pertinente : c'est plus large qu'une « référence contractuelle », faute de schéma d'attestation
+   (E3-E) qui désigne les champs contractuels. À restreindre à ces champs quand E3-E les aura fixés ; d'ici là, le refus plus large est le choix fail-closed.
+5. *Conforme.* Plafonds (dont 128 Mio) : gardes non qualifiées pour `REAL` (`OPERATIONAL_LIMITS_QUALIFIED_FOR_REAL = False`).
+6. *Conforme.* Historique B3 v2 / v3 explicite (23.31.2), lecture historique sans requalification, aucun artefact réécrit.
+7. *Conforme, sous la condition vérifiée le 2026-10-19* : aucun fichier ni donnée portant l'étiquette v1 de déclaration n'existe (recherche dans le dépôt de travail), B6 n'a aucun chemin de
+   publication (E3-C absent), donc aucune migration n'est nécessaire. Si une déclaration v1 d'un ancien jeu de clés existait, elle serait refusée (`SCHEMA`) et la conservation de l'étiquette ne
+   tiendrait plus : une migration serait alors requise.
+
+Les orientations de CONCEPTION retenues pour F1 et F5 (vue post-`ADMISSION` pure hors de B3, preuve d'`ADMISSION` autoritative, hash de contenu du record) sont consignées, non normatives et non
+implémentées, dans `docs/adr/0025-proposal-E3B-F1-F5-PROPOSED.md`, section 0 ; les conditions de refus avant et après Claim / `CONSUMPTION` en section 4.
+
+#### 23.31.1 — `campaign_id` dans l'enveloppe persistée d'une déclaration (D2)
+
+- **Enveloppe** (version `gate_v_exposure_declaration_v1`, valeur de `EXPOSURE_DECLARATION_SEMANTICS_VERSION` d'E3-A, inchangée) : les clés de
+  23.29.1 **plus** `campaign_id`, soit `version`, `campaign_id`, `declaration`, `declaration_id`, `prev_declaration_content_hash`,
+  `carried_from`, `created_at`, `declaration_content_hash`. `campaign_id` est une chaîne non vide (même règle que
+  `OwnCampaignContext.current_campaign_id`). Il est **couvert par `declaration_content_hash`** (recette inchangée : SHA-256 du JSON canonique
+  de l'enveloppe sans ce champ) et **n'entre pas** dans `declaration_id` ni dans le modèle `ExposureDeclaration` d'E3-A. La chaîne de
+  version n'est pas modifiée parce qu'elle appartient à E3-A ; le jeu de clés amendé est le seul publiable, et une enveloppe à l'ancien jeu
+  de clés est refusée (`SCHEMA`) : aucune n'a pu être publiée.
+- **Lecture stricte** : la relecture d'une déclaration exige la campagne attendue ; un `campaign_id` différent est refusé
+  (`CAMPAIGN_MISMATCH`). Le chargeur de lignée l'exige pour **chaque déclaration de chaque chaîne**, terminale ou historique ; la campagne
+  attendue est celle de l'appelant (contexte A0 autorisé), et les A0 retenus pour la règle « un A0 de même `inventory_id` existe avant la
+  première déclaration » sont ceux dont le contexte propre validé porte cette campagne (les autres sont écartés et consignés).
+- **Continuité** : `carried_from` est inchangé ; `tip_declaration_content_hash` couvrant désormais `campaign_id`, l'épinglage d'une chaîne
+  à la précédente lie aussi leurs campagnes. Les séquences, le report cumulatif, le `t_sel` et la formule de `declaration_lineage_digest`
+  sont inchangés.
+- **Portée de la garantie** : le champ révèle une **copie** de déclaration ou de chaîne entre campagnes, y compris entre deux campagnes de même
+  `W` et de même `inventory_id`. Une intégrité SHA-256 **recalculable sans secret** ne prouve pas l'authenticité : un acteur qui réécrit
+  `campaign_id` et recalcule les hashs (et les `carried_from` des chaînes suivantes) n'est pas détecté. E3-B ne revendique aucune liaison
+  cryptographique à une campagne ; une protection contre la falsification volontaire exigerait une signature ou un témoin externe et
+  relèverait d'une décision ultérieure (Human Gate, protection du répertoire, 23.29.2 « Limites »).
+
+#### 23.31.2 — Version 3 de B3 (D3)
+
+- `B3_SEMANTICS_VERSION` = `gate_v_exposure_interpreters_v3`. La v2 est l'état publié au commit `41fe58d` ; elle reste un état **distinct**
+  et identifiable, jamais réécrit.
+- **Différences v2 → v3** : (1) la table `CAMPAIGN_DIR` reconnaît la structure `exposure/` de 23.29.1 (sept règles ajoutées après les deux
+  règles publiées, inchangées) ; (2) une anomalie de **contenu** d'un `inventory_<hash>.json` (JSON invalide ou tronqué, clé dupliquée,
+  constante non finie, BOM, UTF-8 invalide, substitut isolé, profondeur, taille, type non objet) est un orphelin et ne rend plus la racine
+  incomplète (23.29.1) ; une entrée de nature fausse, une erreur d'E/S, une déclaration ou une attestation illisible restent non résolues.
+- **`rules_digest` par disposition** (valeurs mesurées ; une table inchangée garde son digest) : `RESULTS` =
+  `9014a865e7c5c4fea0ec7fc4cbcd3e8d76357a51693c339981e50f523ae51960` et `SPLIT_PLAN_DIR` =
+  `e98082afc0482e2afdce61884f0da5f264a943defd666ca4aedd8b75ec217f29` en v2 comme en v3 ; `CAMPAIGN_DIR` =
+  `cb94f97f1b2c53f8839f90547b3ad619e5a3a64dacfb857071554d329a6a6fa7` en v2, `7cc0cb309210f43cc0e6e00a2a220483196fdc3ff1d7e285aff758313de2e04f` en v3.
+- **Effets** : formules d'E3-A inchangées. B4 ne lit pas la version de B3 et la transmet. B5 persiste la version effectivement appliquée dans
+  `rules_versions.b3_interpreters` et les `rules_digest` dans `scan_pins`. Une campagne sans `exposure/` a les mêmes findings et le même
+  `inventory_id` en v2 et en v3 ; seul le `rules_digest` de `CAMPAIGN_DIR` diffère. Une campagne avec `exposure/` était incomplète en v2
+  (entrée inconnue) : son `inventory_id` v2 et son `inventory_id` v3 diffèrent, ce qui est le comportement attendu d'un changement
+  d'interprétation, jamais une requalification d'un artefact v2.
+
+#### 23.31.3 — Niveau de preuve d'un épinglage d'A0 avant E3-E (D1, D6)
+
+- **D1 confirmé** : seules les anomalies de contenu d'un A0 en font un orphelin consigné (B3 v3 et B6) ; une erreur d'E/S, d'instabilité ou
+  de structure est un refus.
+- **Épinglage prouvable par B6** : seulement celui que fournit l'appelant pour une `ADMISSION` (couche autoritative E3-D/E3-J). B6 vérifie que
+  chaque hash fourni désigne un A0 présent, lisible et de la campagne attendue ; sinon refus (`PINNED_A0_UNREADABLE`, `PINNED_A0_MISSING`,
+  `CAMPAIGN_MISMATCH`).
+- **Attestations** : avant le schéma d'E3-E, **aucun champ d'attestation n'est contractuel** pour B6. Une fenêtre de 64 hexadécimaux
+  (casse ignorée) égale au hash d'un A0 illisible, à n'importe quelle place d'une attestation pertinente, est une **référence potentielle
+  non résolue** : jamais une preuve d'épinglage, jamais une preuve d'absence d'épinglage. Le chargeur de lignée remettant un
+  `DeclarationSet` à la classification, ce cas non résolu est **refusé** (`A0_PIN_UNRESOLVED`). Un hash cité qui ne désigne aucun A0
+  illisible ne produit rien (aucune conclusion).
+- **Orphelin sans citation détectée** : consigné, avec la mention que son épinglage par attestation **n'est pas évalué** ; ce n'est pas une
+  preuve qu'il n'est pas épinglé. Le résultat du chargeur déclare toujours que les épinglages d'attestation ne sont pas évalués ; B6 ne
+  déclare jamais un épinglage entièrement vérifié. E3-J relit l'A0 épinglé par son hash : absent ou illisible, il refuse.
+
+#### 23.31.4 — Lecture des attestations par B6 (D4)
+
+- Lecture stricte de 23.29.4, appliquée à chaque slot lu : UTF-8 sans BOM, JSON strict, objet, **aucun nombre flottant** (fraction ou
+  exposant), point fixe d'octets du sérialiseur normatif unique. Le schéma n'étant pas fixé (E3-E), les champs inconnus ne sont pas
+  contrôlés ; B6 ne prouve que les octets et ne revendique jamais la validité d'une attestation.
+- **Avant l'`ADMISSION`** : tous les slots de toutes les chaînes sont lus ; un slot invalide refuse la lignée ; le slot candidat est le plus
+  haut de la chaîne terminale, sans repli (23.29.3).
+- **Après l'`ADMISSION`** : l'appelant fournit l'attestation épinglée. **Forme PROVISOIRE de B6, non normative** : `inventory_id`, `seq` et
+  SHA-256 des octets du fichier (lecture littérale de « fichier épinglé par hash », 23.29.3, indépendante de tout schéma) ; la formule normative
+  de l'épinglage (nature du record, préimage, version, référence portée par l'`ADMISSION`) n'est PAS fixée ici : elle relève d'E3-D et d'E3-E
+  et fait l'objet d'une proposition séparée, non adoptée (`docs/adr/0025-proposal-E3B-F1-F5-PROPOSED.md`, F5). B6 relit strictement **ce seul
+  slot** : absent = refus, octets différents = refus (« remplacée », 23.10, 23.29.3). Les autres slots sont identifiés et consignés sans être
+  interprétés : un slot de `seq` supérieur au slot épinglé, dans la même chaîne, est **postérieur** (déduction de 23.29.3 : avant l'`ADMISSION`,
+  l'attestation valide est le slot de plus haut `seq`) et n'a aucun effet ; tout autre slot (antérieur, ou d'une autre chaîne) est consigné
+  **non relu**. Aucune date n'est utilisée : « postérieur » suppose une `ADMISSION` conforme, que B6 ne peut pas authentifier. Seule l'attestation
+  épinglée sert à la recherche de références de 23.31.3. La structure (`exposure/`, noms, liens, fichiers réguliers, déclarations, **densité des
+  noms de slots**, aucun slot n'étant jamais supprimé) reste lue strictement dans les deux phases. Si l'attestation épinglée n'est pas dans la
+  chaîne terminale, B6 refuse : après l'`ADMISSION`, un changement de chaîne terminale est un changement d'exposition (23.29.3, étape 13 de 23.17).
+- **Limite connue (F1), non résolue ici** : l'inventaire de B3 v3 lit chaque `attestation_<seq4>.json` d'une campagne scannée, et B3 ne reçoit
+  aucune information d'`ADMISSION`. Un slot illisible, même postérieur à l'`ADMISSION`, rend donc la racine incomplète et change `inventory_id`
+  (mais ni les findings, ni `static_sources_digest`, ni la projection) : l'étape 13 de 23.17 le verrait comme un changement scientifique, alors que
+  23.29.3 le déclare sans effet. L'échec est fermé (jamais un faux `FRESH`). Lever ce conflit exige une entrée autoritative dans le recalcul de B3
+  et un choix normatif : proposition exacte séparée, non adoptée ; F1 reste `SPEC BLOCKED`.
+
+#### 23.31.5 — Plafonds de B5/B6 (D5)
+
+Les plafonds de B5/B6 sont des **gardes de ressources provisoires pour les fixtures `SYNTHETIC`**, non normatives et **non qualifiées pour
+`REAL`** : 100 000 entrées listées sous `exposure/` (refus pendant le listage d'un répertoire) ; 128 Mio de taille cumulée : chaque
+fichier régulier est compté par `lstat` lors du listage de son répertoire, avant sa lecture, et n'est jamais lu au-delà de sa taille listée
+(un fichier qui a grandi depuis le listage est un refus pour instabilité) ; 16 Mio par fichier (refus avant lecture) ; profondeur JSON 32. Elles
+remplacent la « limite mémoire du chargeur » de 23.24 en `SYNTHETIC` seulement ; en `REAL`, une valeur de 23.24 absente refuse, jamais un
+défaut de B5/B6. B5/B6 n'ont aucun mode `REAL` ; E3-J devra fournir les valeurs de 23.24.
+
+#### 23.31.6 — Versions de règles et lecture historique d'un A0 (D7)
+
+- L'A0 persiste les versions effectivement appliquées (`rules_versions`) et, par disposition, le `rules_digest` de la table appliquée.
+  Relire un A0 vérifie que chaque version est **connue** et que chaque `rules_digest` est celui de la version de B3 enregistrée
+  (23.31.2) ; une version inconnue (`UNKNOWN_VERSION`) ou un digest incohérent (`RULES_DIGEST_MISMATCH`) refuse.
+- **Lecture historique intègre** : un A0 enregistré sous une version antérieure **connue** (B3 v2) est relu avec toutes les vérifications
+  d'intégrité (octets, hash, schéma, identités recalculées par E3-A, dont les formules ne dépendent pas de B3) et marqué comme **non
+  courant**. Ce n'est **pas** une qualification avec les règles courantes : celle-ci est le recalcul de l'A0 par E3-J (23.27.3), comparé par
+  `inventory_id` et digests. Aucun artefact n'est réécrit, renommé ou requalifié en silence ; les versions d'E3-A et de B4 n'ont qu'une
+  valeur connue.
+- Les informations d'audit (provenance des compteurs, relevé des preuves, notes, épinglages de scan, chemins locaux, versions, `created_at`)
+  sont couvertes par `inventory_content_hash` et n'entrent ni dans `inventory_id` ni dans `inventory_content_digest` (formules d'E3-A,
+  non recopiées).
 
 ## Conséquences
 
@@ -3690,3 +3856,9 @@ détection.
   restent **NON IMPLÉMENTÉS**. Aucune preuve d'exclusion recevable n'existe pour les jobs : une classe `FRESH` reste inatteignable tant
   qu'un job subsiste sous une racine auditée (23.30.3). Le mode `REAL` reste **désactivé et non qualifié**. Aucun accès `FINAL_HOLDOUT`
   nouveau, aucun Claim réel. `AF-V-07` = IN PROGRESS, `GATE V` NON PASSÉE, aucun Champion qualifié.
+- **Mise à jour (2026-10-18, additive, ne remplace rien de ce qui précède)** : l'**addendum 23.31** est intégré (D2 `campaign_id` dans
+  l'enveloppe de déclaration ; D3 B3 en version 3 ; niveau de preuve des épinglages, lecture des attestations avant et après l'`ADMISSION`,
+  plafonds `SYNTHETIC`, lecture historique des versions de règles), avec notes de renvoi dans 23.29.1 et 23.30.4. E3-B3 (v3), E3-B5 et la
+  partie lecture/vérification/lignée d'E3-B6 sont implémentés et testés **localement**, non commités ; la publication des déclarations et
+  des attestations reste **bloquée** par E3-C (absent). E3-A, B1, B2 et B4 sont inchangés. Le mode `REAL` reste **désactivé et non
+  qualifié**. Aucun accès `FINAL_HOLDOUT`, aucun Claim réel. `AF-V-07` = IN PROGRESS, `GATE V` NON PASSÉE, aucun Champion qualifié.
