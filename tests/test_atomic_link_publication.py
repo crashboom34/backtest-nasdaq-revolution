@@ -947,8 +947,9 @@ def test_reconfirmation_checks_the_expected_identity_when_given(tmp_path, descri
 
 def test_reconfirmation_refuses_a_slot_that_is_not_a_regular_file(tmp_path, descriptors):
     (tmp_path / "slot.json").mkdir()
-    with pytest.raises(store.SlotContentMismatchError):
+    with pytest.raises(store.SlotContentMismatchError) as refusal:
         confirm(tmp_path)
+    assert "fichier régulier" in str(refusal.value)                                    # refusé par le contrôle de type, pas par une erreur de lecture
 
 
 def test_a_failing_barrier_during_reconfirmation_stays_unconfirmed_and_touches_nothing(tmp_path, monkeypatch, descriptors):

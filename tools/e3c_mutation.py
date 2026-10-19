@@ -98,8 +98,6 @@ mut("pre-link problem ignored", "    if problem is not None:\n        dispositio
 mut("pre-link problem keeps temp", "    if problem is not None:\n        disposition, _ = _remove_own_temp(temp_path, temp_identity)", "    if problem is not None:\n        disposition = TempDisposition.REMOVED")
 
 # ── Lien ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
-mut("link follows symlinks", 'link_options = {"follow_symlinks": False} if os.link in os.supports_follow_symlinks else {}', "link_options = {}")
-mut("link always no-follow", 'link_options = {"follow_symlinks": False} if os.link in os.supports_follow_symlinks else {}', 'link_options = {"follow_symlinks": False}')
 mut("errno EPERM dropped", '("EPERM", "EXDEV", "ENOTSUP", "EOPNOTSUPP", "ENOSYS")', '("EXDEV", "ENOTSUP", "EOPNOTSUPP", "ENOSYS")')
 mut("errno EXDEV dropped", '("EPERM", "EXDEV", "ENOTSUP", "EOPNOTSUPP", "ENOSYS")', '("EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS")')
 mut("errno ENOTSUP dropped", '("EPERM", "EXDEV", "ENOTSUP", "EOPNOTSUPP", "ENOSYS")', '("EPERM", "EXDEV", "EOPNOTSUPP", "ENOSYS")')
@@ -208,6 +206,16 @@ mut('ambiguous errno EIO dropped', '("EIO", "ESTALE", "ETIMEDOUT", "EINTR", "ECO
 mut('ambiguous errno ignored', '    if observed == _SLOT_UNOBSERVABLE and link_error.errno in _AMBIGUOUS_LINK_ERRNOS and not isinstance(link_error, FileExistsError):', '    if observed == _SLOT_UNOBSERVABLE and not isinstance(link_error, FileExistsError):')
 mut('unobservable never unconfirmed', '    if observed == _SLOT_UNOBSERVABLE and link_error.errno in _AMBIGUOUS_LINK_ERRNOS and not isinstance(link_error, FileExistsError):', '    if False:')
 mut('eexist unobservable becomes unconfirmed', '    if observed == _SLOT_UNOBSERVABLE and link_error.errno in _AMBIGUOUS_LINK_ERRNOS and not isinstance(link_error, FileExistsError):', '    if observed == _SLOT_UNOBSERVABLE and link_error.errno in _AMBIGUOUS_LINK_ERRNOS:')
+mut('flag ignores profile', 'return self.state is PublicationState.PUBLISHED_DURABLE and self.durability_profile is DurabilityProfile.POSIX_DIR_FSYNC', 'return self.state is PublicationState.PUBLISHED_DURABLE')
+mut('confirm inobservable is replay safe', 'raise SlotContentMismatchError(f"Le slot {target} est inobservable', 'raise PublicationNotStartedError(f"Le slot {target} est inobservable')
+mut('confirm unreadable is replay safe', 'raise SlotContentMismatchError(f"Le slot {target} existe mais est illisible', 'raise PublicationNotStartedError(f"Le slot {target} existe mais est illisible')
+mut('mismatch not binding', 'ni rejeu, ni suppression."""\n\n    slot_is_binding = True\n', 'ni rejeu, ni suppression."""\n\n    slot_is_binding = False\n')
+mut('reconfirm reliability ignores file fsync', '        return self.reason not in (UnconfirmedReason.DIRECTORY_FSYNC_FAILED, UnconfirmedReason.FILE_FSYNC_FAILED)', '        return self.reason is not UnconfirmedReason.DIRECTORY_FSYNC_FAILED')
+mut('reconfirm reliability always true', '        return self.reason not in (UnconfirmedReason.DIRECTORY_FSYNC_FAILED, UnconfirmedReason.FILE_FSYNC_FAILED)', '        return True')
+mut('reconfirm reliability inverted', '        return self.reason not in (UnconfirmedReason.DIRECTORY_FSYNC_FAILED, UnconfirmedReason.FILE_FSYNC_FAILED)', '        return self.reason in (UnconfirmedReason.DIRECTORY_FSYNC_FAILED, UnconfirmedReason.FILE_FSYNC_FAILED)')
+mut('link option not applied', 'os.link(str(temp_path), str(target), **_LINK_OPTIONS)', 'os.link(str(temp_path), str(target))')
+mut('link always no-follow', '_LINK_OPTIONS = {"follow_symlinks": False} if os.link in os.supports_follow_symlinks else {}', '_LINK_OPTIONS = {"follow_symlinks": False}')
+mut('link follows symlinks', '_LINK_OPTIONS = {"follow_symlinks": False} if os.link in os.supports_follow_symlinks else {}', '_LINK_OPTIONS = {}')
 
 
 def main() -> int:
