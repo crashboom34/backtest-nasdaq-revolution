@@ -4814,3 +4814,225 @@ Les comptes de sortie du sous-agent B peuvent être sous-estimés (états partie
 
 ### 63.13 Prochaines étapes (ordre)
 1. Décider des deux commits du §63.9 (autorisation explicite) puis du nettoyage des deux branches temporaires distantes. 2. Amendement d'ADR F1/F5 (forme du hash d'attestation, observation du plus haut slot) avant E3-E. 3. E3-E (engagement, preuve de temps, attestation, autorisation, témoin de tête), puis E3-J (orchestrateur et vue F1) qui ajoutera la publication vérifiée de `RESERVATION` / `ADMISSION`. 4. Décider les valeurs normatives en suspens (23.24 : nombre de tentatives, plafonds de lecture). 5. Qualification REAL (volume, `fsync` réels, coupure d'alimentation) hors de cette mission.
+
+## 64. `AF-V-07` — E3-E : « design gate » (F1/F5, contrats, plan TDD) — **`E3-E CONTRACT READY FOR USER ACCEPTANCE`** (périmètre : acceptation des décisions N1–N20 ; **F1 reste `SPEC BLOCKED`**) (2026-10-20) — complète le §63
+
+**Statut maintenu : `REAL` = DISABLED / NOT QUALIFIED ; `GATE V` = NON PASSÉE ; `FINAL_HOLDOUT` = NON ACCÉDÉ ; F1 = SPEC BLOCKED ; F5 = PROPOSED ; E3-E = documents seulement, aucun code ; E3-J et E3-F = non implémentés.** Mission de **conception** : aucun commit, aucun push, aucun code de production. Toute règle ci-dessous est **PROPOSÉE** et non normative.
+
+### 64.1 Git et état de publication (rectificatif de formulations historiques)
+`master` local = `origin/master` = `ecc7e8d0ec47cbde2c89ab10cc765d3d80a5748c` (inchangé pendant la mission). Index réel inchangé : `git diff --cached` conserve l'empreinte `8b78a333b37710b5987d1e535c8487e797984df193dc80362efd946ed9670e6f` (AGENTS.md, ADR 0016, docs/agents/skills-usage.md préindexés). Travaux étrangers préservés (M1, PARAM-1, CAT-1, ADR 0026/0027, `CONTEXT.md`, hunks locaux §48–§51 de ce fichier, `app_corrupted_backup.py`, résultats historiques).
+**Les deux commits E3-D ont été PUBLIÉS** (`d19cd395eb49527b4c1619210766bc4d944586ff`, parent `d82647970d5525b1d3200eb25d22d76d44f9cd54`, 16 fichiers ; `ecc7e8d0ec47cbde2c89ab10cc765d3d80a5748c`, parent `d19cd39`, `AI_HANDOFF.md` +79/−0 = §62.13 + §63), fast-forward du 2026-10-20 ~08:2x. **Les formulations « non commité », « aucun commit, aucun push » et « rien n'a été commité » des §62.13, §63 (en-tête, 63.1, 63.9) et §63.13 (point 1) décrivent l'état ANTÉRIEUR à cette publication** ; le §63.9 et le §63.13 sont donc périmés sur ce point. Les branches distantes `e3c-linux-validation-20261019` et `e3d-linux-validation-20261019` existent toujours (suppression refusée précédemment, non tentée ici). Nouveaux fichiers NON SUIVIS de cette mission (6, sous `docs/adr/`) : voir 64.2.
+
+### 64.2 Livrables (tous `NON NORMATIF`, `NON ADOPTÉ`)
+| Fichier | Rôle | Lignes | SHA-256 (12) |
+|---|---|---|---|
+| `0025-proposal-E3E-23.32-ATTESTATION-F1-F5-PROPOSED.md` | proposition d'addendum ADR § 23.32 (hash F5, schéma d'attestation, F1, vue post-ADMISSION, autorisation, compatibilité, limites) | 258 | `10dc03d10e5a` |
+| `0025-proposal-E3E-CONTRACT-SPEC-PROPOSED.md` | spécification E3-E : tranches, échelle des garanties G1–G6, matrice de statuts, 7 fiches d'artefacts, matrice de dépendances E3-D/E3-E/E3-J, invariants | 198 | `c1ca1b16c2e6` |
+| `0025-proposal-E3E-TDD-PLAN-AND-RED-MATRIX-PROPOSED.md` | plan TDD (tranches S-0…S-13) et matrice RED R-01…R-67 | 146 | `4cb1e3fa01e5` |
+| `0025-proposal-E3E-DECISIONS-PENDING.md` | décisions N1–N20 à approuver, valeurs opérationnelles 23.24 non inventées, contradictions C-1…C-23 | 65 | `c5b64888c71e` |
+| `0025-proposal-E3E-REVIEWS.md` | rapport de trois revues indépendantes et traitement | 73 | `6f1b6b00bea2` |
+| `0025-proposal-E3E-HASH-VECTORS.json` | vecteurs V1–V9 (script stdlib sans import du dépôt, deux exécutions identiques, recoupés avec la recette d'E3-A) | 145 | `b695902b4cf8` |
+
+### 64.3 Décisions de conception retenues dans la proposition (aucune adoptée)
+- **F5** : hash de contenu du record (SHA-256 du JSON canonique compact, UTF-8, `ensure_ascii=False`, sans la seule clé de hash) ; attestation à **32 clés** exactes dont 5 ajoutées après les revues (`time_proof_type`, `registry_mode`, `anchor_margin_seconds`, `s0_max_time_utc`, `chronology_facts_digest`) ; autorisation à 20 clés ; textes NFC, catégories Unicode `Cc Cf Cs Co Zl Zp` interdites ; **E3-D inchangé** (la référence passe par `attestation_hash` + `attestation_observation` de 7 clés, 386 octets).
+- **F1** : « postérieur **à l'observation** » (jamais « à l'ADMISSION ») ; `history_digest` des octets des slots `1..pinned` ; **garde pré-Claim `PCG`** (option A, plus stricte que la lettre de 23.29.3) ; reprise = candidat reconstruit avec l'observation recopiée + `find_reusable_record` + `PCG`, et après le Claim lecture autoritative + tableau des slots postérieurs ; vue de recalcul qui **passe par B4** (orientation du 2026-10-19), avec `incomplete_causes` structuré (B3 v4).
+- **Chronologie** : `ReservationTimeProof` sur la `RESERVATION` seulement ; tous les champs auto-déclarés de la preuve sont **recalculés** depuis la preuve brute (`R-REPLAY`) ; aucune autorité de temps ni marge inventées ; modèle et états seulement, vérificateurs RFC 3161 / OpenTimestamps **BLOCKED**.
+- **Séparation** : attestation ≠ autorisation ≠ ADMISSION ≠ Claim ≠ CONSUMPTION ≠ ReadIntent ≠ lecture ; un hash n'est jamais une autorisation ; E3-E ne publie jamais de `RESERVATION`/`ADMISSION`/`REBIND`/`CONSUMPTION`.
+
+### 64.4 Contradictions et défauts relevés (détail : DECISIONS-PENDING § 3 ; REVIEWS)
+**Prérequis dur C-2** : le tableau fermé de B3 v3 ne reconnaît que `plan.json`, le Claim et `exposure/` — tout fichier E3-E posé à la racine de la campagne rend l'inventaire incomplet **dès la `RESERVATION`** → **B3 v4 additif obligatoire** (N8). **C-16 (défaut latent entre modules publiés)** : `RegistryRecordFact.seq >= 1` (`gate_v_exposure_inventory.py:163`) alors que le registre d'E3-D numérote depuis 0 → la première `RESERVATION` ne peut pas devenir un finding (décision utilisateur). **Erreurs de ma propre première rédaction, corrigées après les revues** : argument « fenêtre sans droit conféré » faux (A1) ; noms normatifs de l'ADR 23.13 renommés à tort (B3) ; vue F1 « pure sur E3-A sans B4 » irréalisable (B2) ; faits d'entrée de la classification sans origine (B1).
+
+### 64.5 Revues
+Trois relectures indépendantes en lecture seule (sécurité/temporalité ; science/reproductibilité/compatibilité ; re-revue de la révision 2). **La révision 3 n'a pas été relue** par un quatrième relecteur. Non exécuté : suites de tests, Linux/`REAL`, sérialisation B5 avec un champ B3 additionnel. Détail : `0025-proposal-E3E-REVIEWS.md`.
+
+### 64.6 Plan d'implémentation exact (à n'engager qu'après acceptation)
+S-0 décisions N1–N20 → S-0b correction C-16 (si approuvée) → S-1 vecteurs indépendants → S-2 attestation (modèle, hash, relecture) → S-3a vérification interne → S-4 autorisation → S-5 B3 v4 → S-6 E3-C `TempNaming` → **S-7 F1 (SPEC BLOCKED)** → S-8 engagement → S-9 preuve de temps (modèle) → S-10 attachment/nullité → S-11 témoin → S-3b → S-12 rapport de prérequis → S-13 revue finale/mutation/Linux. Chemin critique sans F1 ni temps réel : S-1 → S-2 → S-3a → S-4.
+
+### 64.7 Décisions de l'utilisateur requises (extrait ; liste complète : DECISIONS-PENDING)
+N1 recette F5 · N2 schéma 32 clés · N3 référence dans l'ADMISSION sans toucher E3-D · **N4 garde pré-Claim (A) ou lettre de 23.29.3 (B)** · N5 `history_digest` · N6 périmètre de neutralisation · N7 reprise · N8 B3 v4 · N9 singletons par lien (E3-C additif) · N10 autorisation (slots, déclarative) · N11 `SYNTHETIC_FIXTURE` · N12 `REVOCATION_UNKNOWN` · N13 jamais de défaut de temps · N14 nullité · N15 périmètre du témoin de tête · N16 `created_at` seul · N17 frontière E3-F · N18 décimaux · **N19 mécanisme de la vue F1** · N20 faits de chronologie épinglés · et **C-16**.
+
+### 64.8 Temps, consommation et coût (mesurés sur les journaux réels de session et de sous-agents, jusqu'au gel du handoff)
+| Indicateur | Valeur |
+|---|---|
+| Début | 2026-10-20 08:44:52 UTC+02:00 (heure de la première commande de la mission) |
+| Gel de ce handoff | 2026-10-20 09:38:04 UTC+02:00 : **53 min 12 s** écoulées (la rédaction du rapport final s'y ajoute) |
+| Modèle principal | `claude-sonnet-5-5` : 66 messages, entrée 138, sortie 262 431, cache lu 25 344 977, cache écrit (1 h) 406 457 → 6,79 USD |
+| Sous-agents (3, `claude-sonnet-5-5`) | revue A (`ecc:security-reviewer`) : entrée 40, sortie 13 669, cache lu 2 454 757, cache écrit (5 min) 204 864 → 0,89 USD ; revue B (`general-purpose`) : entrée 96, sortie 21 463, cache lu 11 213 928, écrit 359 287 → 2,23 USD ; re-revue C (`general-purpose`) : entrée 72, sortie 2 808, cache lu 6 423 867, écrit 238 599 → 1,27 USD |
+| Équivalent API estimé | **11,18 USD → ≈ 9,96 €** à 1,1225 USD/EUR (principal ≈ 6,04 €, sous-agents ≈ 3,92 €) ; ESTIMATION théorique, pas une dépense facturée |
+| Tarifs | Sonnet 5.5 : entrée 2 $, sortie 10 $, lecture de cache 0,10 $, écriture 5 min 2,50 $, écriture 1 h 4 $ par million de tokens — **relevés le 2026-10-19 (§63.11), non revérifiés pendant cette mission** |
+| Taux USD/EUR | 1,1225 (BCE, 19 octobre 2026 ; **non rafraîchi**) |
+| Coût cloud | aucun (aucun run Actions lancé, aucune ressource distante créée ou modifiée) |
+| Coût réellement facturé | inconnu (abonnement ; non vérifiable depuis la session) |
+
+Méthode : journaux `.jsonl` de la session et de chaque sous-agent, dédoublonnage par identifiant de message (maximum de chaque compteur), fenêtre depuis le début de mission. Les journaux de sous-agents sont dans `subagents/` de la session (les fichiers `.output` des tâches sont vides). **Cette section doit figurer dans tous les handoffs et rapports de mission AlphaForge.**
+
+### 64.9 Compétences et agents réellement utilisés
+`development-orchestrator` (politique systématique du dépôt) et `caveman` (lite) ; trois agents indépendants en lecture seule (`ecc:security-reviewer`, `general-purpose` ×2) ; scripts stdlib du scratchpad (vecteurs, patchs documentaires). **Non invoqués** : `domain-modeling`, `codebase-design`, `tdd` (aucun code), `code-review`, `ecc:contract-first`, `/speckit-*` (dépôt non initialisé pour Spec Kit). Indisponible : aucun. Garde `GateGuard` : première écriture/édition de chaque fichier refusée puis acceptée après exposé des faits.
+
+## 65. `AF-V-07` — E3-E : audit final indépendant de la révision 3, matrice N1–N20, propositions révisées (R4 → R6) — **`E3-E R3 INDEPENDENTLY REVIEWED — READY FOR NORMATIVE ACCEPTANCE`** (au sens strict de la mission : propositions suffisamment cohérentes pour être **soumises** à l'utilisateur ; **ce n'est PAS une adoption de N1–N20**) (2026-10-20) — complète le §64 et le PRÉVAUT sur lui pour le plan, N4, N7, N9, N10, N18 et N19
+
+**Statut maintenu : `REAL` = DISABLED / NOT QUALIFIED ; `GATE V` = NON PASSÉE ; `FINAL_HOLDOUT` = NON ACCÉDÉ ; F1 = SPEC BLOCKED ; F5 = PROPOSED ; E3-J, E3-F, E3-Q = non spécifiés ; aucun code, aucun commit, aucun push.** Aucune valeur opérationnelle de 23.24 n'est adoptée.
+**Qualifications obligatoires du verdict** : (1) la **révision 3 telle qu'écrite n'était PAS soumissible** (revues D et E) : elle a été réécrite en révisions 4, 5 puis 6 ; (2) **l'admission de bout en bout en SYNTHETIC n'est pas démontrée** : un dossier de campagne V2 réel contient des fichiers (`manifest.json`, `validations/…`, `technical_failure.json`, `manifest.update.lock`) et des `ValidationRun` WF/MC/PS (Q-2) que B3 v3/v4 minimal ne résout pas (C-29) ; (3) F1 reste SPEC BLOCKED tant que E3-J (détection locale du Claim/`ReadIntent`) n'existe pas ; (4) **la révision 6 (nettoyage textuel après la dernière revue) n'a pas été relue** par un septième relecteur (contrôles mécaniques seulement) ; (5) les vérificateurs de temps réels et l'attachment réel restent BLOCKED (23.24, E3-F).
+
+### 65.1 Git, disque et incident
+`master` local = `origin/master` = `ecc7e8d0ec47cbde2c89ab10cc765d3d80a5748c` (inchangé). Index réel inchangé : `git diff --cached` conserve l'empreinte `8b78a333b37710b5987d1e535c8487e797984df193dc80362efd946ed9670e6f` (AGENTS.md, ADR 0016, docs/agents/skills-usage.md). Travaux étrangers préservés. **Incident disque** : au précheck, **860 Mo libres** (< 2 Go imposés) ; aucune écriture n'a été faite pendant ce temps (analyses en lecture seule, agents de revue seuls) ; l'espace est remonté à ~2,9 Go (cause non identifiée : la mesure de `.venv`/temp n'a pas abouti dans le délai ; `~/.claude/projects` 402 Mo, temp de session 204 Mo, `.git` 23 Mo, `results` 6 Mo) ; il valait ~2,56 Go en fin de mission. Valeur volatile : **vérifier avant toute écriture**. Fichiers E3-E : 7 non suivis sous `docs/adr/` (§ 65.2).
+
+### 65.2 Livrables (tous `NON NORMATIF`, `NON ADOPTÉ`)
+| Fichier | Rôle | Lignes | SHA-256 (12) |
+|---|---|---|---|
+| `0025-proposal-E3E-23.32-ATTESTATION-F1-F5-PROPOSED.md` | **proposition consolidée d'ADR § 23.32** (schéma à 32 clés, hash F5, recontrôle pré-Claim, reprise, vue F1, autorisation, décimaux, compatibilité, **amendements explicites** 23.32.11) | 205 | `16fb10ae69af` |
+| `0025-proposal-E3E-N1-N20-FINAL-MATRIX.md` | **matrice finale N1–N20 + C-16** (tableaux A et B, lots d'acceptation, décisions bloquantes, plan TDD, périmètres de commits) | 83 | `069beb2c902f` |
+| `0025-proposal-E3E-CONTRACT-SPEC-PROPOSED.md` | spécification E3-E (tranches, garanties G1–G6, fiches d'artefacts, dépendances E3-D/E3-E/E3-J) | 193 | `ec5766c35403` |
+| `0025-proposal-E3E-TDD-PLAN-AND-RED-MATRIX-PROPOSED.md` | plan TDD (S-0…S-13, S-0b, S-5a/b) et matrice RED R-01…R-81 | 160 | `47b97989bb7c` |
+| `0025-proposal-E3E-DECISIONS-PENDING.md` | contradictions C-1…C-36, valeurs 23.24 non adoptées | 51 | `37c4ff83429d` |
+| `0025-proposal-E3E-REVIEWS.md` | rapport des **six** revues indépendantes et traitement | 127 | `934c9794e9e4` |
+| `0025-proposal-E3E-HASH-VECTORS.json` | vecteurs V1–V10 (stdlib sans import du dépôt, recoupés avec E3-A ; V10 décimaux, 20 000 doubles) | 216 | `a70ef83b7b52` |
+
+### 65.3 Décisions de la proposition (aucune adoptée) — changements par rapport au §64
+- **N4** : option **C** (étape 11 bis : recontrôle pré-Claim des *faits* sur les artefacts épinglés + slot épinglé + `history_digest` + durabilité ; slots postérieurs sans effet ; 23.29.3 et 23.10 « Crash avant le Claim » non amendés ; **amendements** : 23.17 additif, **23.27.3** (« seuls » trois contrôles), **23.10 étape 8 / 23.18** (`ADMITTED_STALE` étendu, état dérivé non persisté)). **Ma recommandation initiale (option A, garde bloquante) est abandonnée** : elle ne protégeait pas mieux (ne couvrait que les attestations, créait un état hors 23.18 et un levier de gel). Précondition ajoutée : **aucun Claim ni `ReadIntent` local** (le registre ne voit pas le Claim : `campaign_state` ne couvre que la `CONSUMPTION`).
+- **N7** : la reprise **continue** l'ADMISSION autoritative (`read_authoritative_admission`), sans reconstruire de candidat ; si une ADMISSION existe, toute nouvelle tentative passe par la reprise.
+- **N9** : `TempNaming.EXPOSURE` **réutilisé** (B2 impose ce motif d'orphelin) ; **E3-C n'est pas modifié** ; tranche E3-E0b supprimée.
+- **N10** : chaîne de slots `acquisition_authorization_<seq4>.json` avec contrat complet (candidat = plus haut slot sans repli, ré-autorisation, immutabilité, pas de révocation en V1, péremption « terminale » avant / « épinglée par hash » après, aucune voie implicite) ; amende le nom de fichier de 23.13.
+- **N18** : décimaux en chaînes canoniques **typées par champ** (`{"decimal": …}` / entiers JSON) ; grammaire sans `-0`, identité aller-retour `canon(float(s)) == s` ; le sérialiseur d'E3-C refuse les flottants ; limite sur les hashs hérités (`repr` Python).
+- **N19** : `recompute_post_admission_view` relit le registre, **relance B3**, passe par B4 à l'intérieur et **ne renvoie que des scalaires** ; marqueur B3/B5 = option N19b ; **écarts déclarés** aux orientations du 2026-10-19 (« pure » → sans effet de bord ; étage « fourni » → « dérivé ») ; extension de la neutralisation aux autorisations **retirée**.
+- **C-16** : `RegistryRecordFact.seq >= 0` (un test publié à amender) ; pas de décalage +1.
+- **B3 v4 minimal (S-5a)** : règles informatives pour les noms E3-E + orphelin racine, `rules_digest` v4, v2/v3 lisibles, **aucun champ ajouté** ; **distinct de F1**.
+
+### 65.4 Erreurs de ma propre rédaction corrigées après revues indépendantes
+Option A de N4 (argument de sécurité inexact) ; reprise « candidat + observation recopiée » non exécutable ; `incomplete_causes` inutile (révision 2) ; durabilité des artefacts épinglés non exigée ; alternative « nombres JSON » impossible ; `campaign_state == ADMITTED` censé exclure un Claim ; péremption d'autorisation rétablissant la garde abandonnée ; « 23.27.3 impose déjà ces contrôles » ; `"-0"` accepté par la grammaire ; extension non déclarée de la neutralisation aux autorisations ; promesse de « bout en bout » non qualifiée. Détail : REVIEWS § 5–6.
+
+### 65.5 Revues (D, E, F de cette mission ; A, B, C du §64)
+D (4e relecteur, révision 3 complète) : « non soumissible telle quelle » → R4. E (delta R4) : architecture correcte, 3 élevés + moyens → R5. F (delta final R5) : **aucun bloquant ni élevé**, 5 moyens + dérives → R6. Vecteurs V1–V10 recalculés indépendamment par plusieurs relecteurs ; assertions de code vérifiées par nous (sérialiseur sans flottant, motif d'orphelin imposé par B2, labels de racine uniques, `campaign_state`, « seuls » de 23.27.3, Q-2).
+
+### 65.6 Décisions réellement bloquantes (informations exactes manquantes)
+Aucune des 21 décisions n'est indécidable à partir des contrats existants. BLOCKED : (1) valeurs de 23.24 (marge, autorité de temps et outil, liste de confiance, tolérance OpenTimestamps, support du témoin, plafonds, tentatives) ; (2) E3-J (détection locale du Claim/`ReadIntent`, dérivation d'étage, fournisseur de marge et `max(time)`, cause `EXECUTION_VOID_<cause>`, `ClosingView`) ; (3) E3-F (contrat de l'`IngestionRecord`) et E3-Q (rapport de qualification) ; (4) signature détachée avant `REAL` ; (5) mesure de `rules_digest` v4 ; (6) **décision Q-2 et règles d'interprétation du manifeste de campagne et de ses fichiers annexes (C-29)**.
+
+### 65.7 Plan TDD ordonné (détail : plan, matrice § 5)
+S-0 décisions → **S-0b (C-16)** → S-1 vecteurs → S-2 attestation → S-3a → S-4 autorisation → **S-5a (B3 v4 minimal, condition nécessaire mais non suffisante, C-29)** → S-7 F1 (après N4, N6, N7, N19) → S-8 engagement (N18) → S-9 → S-10 → S-11 → S-3b → S-12 → S-13. **§64.6 est périmé** sur ce plan (S-5 omis ; E3-E0b supprimée).
+
+### 65.8 Périmètres de commits documentaires FUTURS (aucun n'est autorisé ni effectué)
+D1 : les 7 fichiers `docs/adr/0025-proposal-E3E-*` seuls. D2 : `AI_HANDOFF.md` seul, purement additif (version de `HEAD` + §64 + §65), sans les hunks locaux étrangers §48–§51 ni `CONTEXT.md`. D3 : intégration dans `docs/adr/0025-gate-v-validation-policy-v1.md` (23.32 + amendements de 23.32.11) **seulement après acceptation** de la matrice. Méthode : index temporaire, jamais `git add .`/`-A`, empreinte d'index `8b78a333…6e6f` préservée.
+
+### 65.9 Temps, consommation et coût (mesurés sur les journaux réels, jusqu'au gel du handoff)
+| Indicateur | Valeur |
+|---|---|
+| Début | 2026-10-20 13:40:41 UTC+02:00 (première commande de la mission) |
+| Gel de ce handoff | 2026-10-20 14:59:47 UTC+02:00 : **1 h 19 min 06 s** écoulées (le rapport final s'y ajoute) |
+| Modèle principal | `claude-sonnet-5-5` : 65 messages, entrée 138, sortie 203 798, cache lu 46 187 491, cache écrit (1 h) 839 927 → 10,02 USD (mesuré à 14:58) |
+| Agents (3, `claude-sonnet-5-5`) | D (`general-purpose`, ≈ 21 min 24 s) : entrée 92, sortie 17 494, cache lu 11 648 466, écrit (5 min) 392 023 → 2,32 USD ; E (≈ 12 min 30 s) : entrée 92, sortie 11 112, cache lu 10 084 027, écrit 312 977 → 1,90 USD ; F (≈ 10 min 54 s) : entrée 64, sortie 2 868, cache lu 5 450 479, écrit 253 662 → 1,21 USD |
+| Équivalent API estimé | **15,45 USD → ≈ 13,76 €** à 1,1225 USD/EUR (principal ≈ 8,92 €, agents ≈ 4,84 €) ; ESTIMATION théorique, pas une dépense facturée |
+| Tarifs | Sonnet 5.5 : entrée 2 $, sortie 10 $, lecture de cache 0,10 $, écriture 5 min 2,50 $, écriture 1 h 4 $ par million de tokens — **relevés le 2026-10-19 (§63.11), non revérifiés pendant cette mission** |
+| Taux USD/EUR | 1,1225 (BCE, 19 octobre 2026 ; **non rafraîchi**) |
+| Coût cloud | aucun |
+| Coût réellement facturé | inconnu (abonnement ; non vérifiable) |
+
+Méthode : journaux `.jsonl` de session et d'agents (`subagents/`), dédoublonnage par identifiant de message, fenêtre depuis le début de mission. Les mesures du principal portent jusqu'à 14:58 (les derniers messages ne sont pas inclus). **Cette section doit figurer dans tous les handoffs et rapports de mission AlphaForge.**
+
+### 65.10 Compétences et agents réellement utilisés
+`development-orchestrator` (politique systématique) ; trois agents indépendants en lecture seule (`general-purpose` ×3) ; scripts stdlib du scratchpad (vecteurs, patchs documentaires). `caveman` : déjà actif dans la session (non réinvoqué). **Non invoqués** : `domain-modeling`, `codebase-design`, `tdd` (aucun code), `code-review`, `/speckit-*` (dépôt non initialisé). Garde `GateGuard` : première écriture/édition de chaque fichier refusée puis acceptée après exposé des faits.
+
+## 66. `AF-V-07` — E3-E S-0 : tentative de clôture de Q-2 et couverture B3 v4 du dossier de campagne V2 — **`E3-E S-0 BLOCKED — EXACT REMAINING DECISIONS`** (2026-10-24) — complète le §65 ; **Q-2 n'est PAS close**
+
+### 66.1 Git, disque
+`HEAD` = `ecc7e8d0ec47cbde2c89ab10cc765d3d80a5748c` (checkpoint attendu) ; trois fichiers stagés inchangés (`AGENTS.md`, ADR 0016, `docs/agents/skills-usage.md`) ; aucun commit, push, code de production ni suppression de branche. Le disque a oscillé (≈ 0,9 Go → 3,3 Go libres) à cause d'une session Codex étrangère : aucune écriture sous 2 Go, aucun fichier étranger effacé ; les écritures de cette mission (1 proposition + ce §66) ont eu lieu à ≈ 3,3 Go.
+
+### 66.2 Constat démontré (B3 v3 réel, fixtures synthétiques)
+Dans un dossier de campagne `CAMPAIGN_DIR`, `manifest.json`, `manifest.update.lock`, `technical_failure.json` et `validations/` donnent chacun `UNKNOWN_ENTRY` + un finding `UNKNOWN_SOURCE` et `complete=False` ; `plan.json` seul est complet. `validations/` n'est jamais descendu. Tout dossier V2 réel est donc `UNDETERMINED`. Script : scratchpad `q2_demo.py`.
+
+### 66.3 Livrable
+`docs/adr/0025-proposal-E3E-Q2-B3V4-CAMPAIGN-COVERAGE-PROPOSED.md` (R7, delta de R6, NON NORMATIF) : classification par famille de fichiers, règles B3 v4 (manifest informatif ; verrou et sentinelle `INERT_FILE` ; `validations/` structurel), matrice par étage, décisions Q2-D1 (K0/K1/K2), Q2-D2 (emplacement du fichier OOS), Q2-D3 (sentinelle), impact N8 et C-29, premier lot TDD, commits proposés D1 (8 fichiers), D2, D3.
+
+### 66.4 Résultat de la relecture indépendante
+La première variante (K2 : « fenêtre disjointe ⇒ aucun finding ») a été **REJETÉE** : contredit 23.30.1 (preuve d'exclusion exigée) ; perd le hash dans `inventory_id` et A0 ; borne basse erronée ; portée trop large. Recommandation retenue : **K1** (`SourceKind` additif d'E3-A + preuve d'exclusion explicite amendant 23.30.1, borne haute `max(effective_test_end) > ws`, MC/PS dérivés de leur source dans la même racine). La forme corrigée n'a PAS été relue une seconde fois ; aucune révision n'est figée. L'exclusion de WF/MC/PS de `E` n'est pas démontrée par l'ADR 23.3 (« toute exécution ou lecture ») : hypothèse retirée.
+
+### 66.5 Décisions restantes
+Q2-D1, Q2-D2, Q2-D3 ; valeurs 23.24 ; E3-F, E3-J, E3-Q ; signature détachée avant `REAL` ; mesure de `rules_digest` v4 (S-5a). N1–N7, N9–N20 et C-16 : inchangées ; N8 et C-29 modifiées par le delta R7. `REAL` = DISABLED / NOT QUALIFIED ; GATE V = NON PASSÉE ; FINAL_HOLDOUT = NON ACCÉDÉ.
+
+### 66.6 Compétences et agents utilisés
+`development-orchestrator` (politique systématique, invoqué au début de la mission) ; un agent indépendant `general-purpose` en lecture seule ; script du scratchpad. Non invoqués : `domain-modeling`, `codebase-design`, `tdd` (aucun code), `code-review`, `/speckit-*` (dépôt non initialisé).
+
+---
+
+## 67. `AF-V-07` — E3-E S-0 : contrat Q-2 final (Q2-D1, Q2-D2, Q2-D3) — **`Q-2 CONTRACT READY FOR USER ACCEPTANCE`** au sens strict : contrat précis, corrigé et relu, **soumis** à l'utilisateur (2026-10-24) ; **ce n'est PAS une adoption** et l'admission de bout en bout reste **non démontrée** — complète le §66 et le remplace pour Q2-D1/D2/D3
+
+### 67.1 Git, empreintes
+`HEAD` = `origin/master` = `ecc7e8d0ec47cbde2c89ab10cc765d3d80a5748c` ; aucun commit, push, code de production ni modification d'E3-A/B3/moteurs. Fichiers indexés protégés inchangés. Nouvelle empreinte vérifiable (l'ancienne `8b78a333…6e6f` n'est pas reproductible avec la méthode connue) : `sha256(git diff --cached --raw --no-abbrev)` = `1abfc53f…3c78`, `sha256(git ls-files -s)` = `766ea770…a7f6`.
+
+### 67.2 Livrable
+`docs/adr/0025-proposal-E3E-Q2-FINAL-CONTRACT-PROPOSED.md` (R8, PROPOSED) remplace les sections Q2-D1/D2/D3 de R7. Expériences sur le vrai moteur B2/B3 avec table candidate patchée en mémoire (scratchpad `q2_candidate.py`).
+
+### 67.3 Décisions proposées
+- **Q2-D2** : deux familles de chemins non unifiées — preuves pré-holdout V2 `validations/gate_v_v2_<64hex>_{walk_forward|monte_carlo|parameter_stability_fold_NNN}/validation_run.json` (D4/D5 ne font que charger ; aucun écrivain V2) et OOS final `validations/oos_<32hex>.json` (ADR 23.13, aucun producteur). Un motif large `_ID_DIR` provoque `AMBIGUOUS_SOURCE_TABLE` (scan entier refusé) : motif étroit obligatoire. Aucun amendement ADR.
+- **Q2-D1** : K1 conservateur en deux étages. Étage 1 (adoptable, E3-A inchangé) : structure reconnue, WF/MC/PS = `UNKNOWN_SOURCE`/`WINDOW_UNKNOWN` (absence non établie), UNDETERMINED, `RESERVATION` refusée, aucun progrès d'atteignabilité. Étage 2 (décision distincte) : preuve d'exclusion liée au run, avec prérequis PR-1..PR-5 et deux `SourceKind` additifs. `max(effective_test_end) > ws` rejeté comme critère ; P1 par fold.
+- **Q2-D3** : option C (aucune règle pour `manifest.update.lock` et `technical_failure.json` : comportement v3 conservé, finding `UNKNOWN_SOURCE`). Options A (INERT) et B (raison sans finding) rejetées. D5 ne couvre que la campagne courante. Dépendance : admission BLOCKED jusqu'à E3-J RED R-Q2-15.
+- `manifest.json` : `INFORMATIVE_JSON` strict (17 clés, version, `campaign_id`, cinq champs réservés nuls) ; `RESERVATION` et `ADMISSION` exigeraient aussi `inventory.complete` (RED R-Q2-18).
+
+### 67.4 Relecture indépendante
+Relecteur neuf : ACCEPT WITH FIXES, puis confirmation ACCEPT WITH FIXES (4 corrections mineures F1-F4 appliquées, non re-relues). Défauts initiaux D1-D6 corrigés. Aucun faux FRESH, exposition neutralisée ni disparition de run/hash trouvé pour l'Étage 1 avec l'option C.
+
+### 67.5 Restant
+Décisions Q2-D1/D2/D3 ; Étage 2 ; amendement `complete` pour RESERVATION ; tests publiés à amender avec B3 v4 (liste en section 6 du R8) ; valeurs 23.24 ; E3-F, E3-J, E3-Q ; `rules_digest` v4 non calculé. `REAL` = DISABLED / NOT QUALIFIED ; GATE V = NON PASSÉE ; FINAL_HOLDOUT = NON ACCÉDÉ.
+
+---
+
+## 68. `AF-V-07` — Q-2 Étage 1 : B3 v4, garde `complete`, C-16 — **`Q-2 STAGE 1 IMPLEMENTED & TESTED — E3-E STILL BLOCKED`** (2026-10-24) — complète le §67 ; **aucun commit, aucun push**
+
+### 68.1 Git et empreintes
+`HEAD` = `origin/master` = `ecc7e8d0ec47cbde2c89ab10cc765d3d80a5748c`. Index inchangé avant/après : `sha256(git diff --cached --raw --no-abbrev)` = `1abfc53f…3c78`, `sha256(git ls-files -s)` = `766ea770…a7f6` (trois fichiers indexés protégés intacts). Aucune modification d'E3-A, B2, B5, B6, E3-C, E3-D, D4/D5, `walk_forward`, `monte_carlo`, `parameter_stability`, moteurs ou stratégies. `REAL` = DISABLED / NOT QUALIFIED ; `GATE V` = NON PASSÉE ; `FINAL_HOLDOUT` = NON ACCÉDÉ.
+
+### 68.2 Décisions ACCEPTED par l'utilisateur (2026-10-24, périmètre limité)
+Q2-D1 K1 Étage 1 ; Q2-D2 deux familles de chemins ; Q2-D3 option C ; amendement 23.10 `inventory.complete` ; C-16 `seq = 0`. **Non acceptés** : N1–N20 en bloc, K1 Étage 2, le reste d'E3-E.
+
+### 68.3 Fichiers réellement modifiés ou créés
+Modifiés : `gate_v_exposure_interpreters.py` (B3 v4), `gate_v_exposure_inventory.py` (C-16, une condition), `docs/adr/0025-gate-v-validation-policy-v1.md` (section 23.33 + renvoi dans 23.10), `AI_HANDOFF.md` (§66–§68), tests amendés avec justification : `test_gate_v_exposure_interpreters.py`, `test_gate_v_exposure_integration.py`, `test_gate_v_exposure_store.py`, `test_gate_v_exposure_inventory.py`. Créés (non suivis) : `gate_v_inventory_preconditions.py`, `tests/test_gate_v_exposure_interpreters_v4.py`, `tests/test_gate_v_inventory_preconditions.py`, `docs/adr/0025-proposal-E3E-Q2-STAGE2-DESIGN-PROPOSED.md` ; R7 et R8 conservés.
+
+### 68.4 Statuts (IMPLEMENTED / TESTED / DOCUMENTED / ACCEPTED / BLOCKED)
+- **C-16** : IMPLEMENTED, TESTED, ACCEPTED. RED observé (3 échecs) puis GREEN ; `seq=-1`, booléens refusés ; identités de référence `seq >= 1` mesurées AVANT le changement (`inventory_id` `f19a7b12…9005`, `inventory_content_digest` `dc5c5e48…b491`) et inchangées.
+- **B3 v4** : IMPLEMENTED, TESTED, ACCEPTED. Version `gate_v_exposure_interpreters_v4` ; v2 et v3 connues, digests figés ; table `CAMPAIGN_DIR` v3 conservée en tête (digest `7cc0cb30…e04f` reproductible). Digests v4 mesurés sur un scan réel : `RESULTS` `9014a865…1960` et `SPLIT_PLAN_DIR` `e98082af…7f29` inchangés, `CAMPAIGN_DIR` `9c05f8b068ac86d321c0d9889df0f3c0f1e015fdd8b17d208479554b1badb43b` (indépendant des plafonds de scan). `manifest.json` informatif à schéma strict ; arbre `validations/` à motif étroit ; WF/MC/PS = `UNKNOWN_SOURCE`/`WINDOW_UNKNOWN`, jamais `NO_OVERLAP` ; verrou et sentinelle sans règle (inconnus bloquants, dont campagne étrangère) ; `oos_<32hex>.json` et artefacts E3-E sans norme acceptée ou producteur restent inconnus ; collision de motifs `AMBIGUOUS_SOURCE_TABLE` démontrée sur un scan réel.
+- **Garde `complete`** : IMPLEMENTED (validateur pur `inventory_precondition_refusals`), TESTED, ACCEPTED ; **NON opérationnelle de bout en bout (BLOCKED)** : E3-D n'a aucun écrivain public de RESERVATION/ADMISSION (un test l'atteste et échouera si un tel écrivain apparaît), E3-J n'existe pas ; quatre contrats différés `skip` (écrivain RESERVATION, écrivain ADMISSION, vérification d'`inventory_content_digest` et des sept contrôles de 23.27.4, D5 + rechecks sentinelle/verrou R-Q2-15). Le validateur ne retourne que des refus et n'ouvre aucun droit.
+- **K1 Étage 2** : DOCUMENTED (contrat de conception séparé avec vecteurs V1–V3 recalculables), **non accepté, non implémenté (BLOCKED)** : prérequis orchestrateur V2, `RunDataCoverage`, F3 raffiné, deux `SourceKind` additifs, E3-J.
+- **Atteignabilité** : FRESH reste inatteignable pour un dossier V2 réel ; admission de bout en bout NON démontrée.
+
+### 68.5 Tests
+Ciblés : C-16 (5 nouveaux), B3 v4 (114 cas), validateur (17 cas + 4 contrats différés). Revue-fix : nouveau test sur un enregistrement propre exposant non absorbé, prouvé RED sur le module d'avant correction. Amendés (justifiés dans les tests) : `manifest.json {"x":1}` → `anything.json` ; égalités de version `v3` → `v4` ; test de digests campagne étendu à v2/v3/v4 (6 paires version/digest refusées, lecture historique v2 et v3) ; `seq=0 ValueError` → `seq=-1` plus `seq=False`. Régression large AVANT les corrections de revue : 4348 passés, 46 skipped, 0 échec (654 s, 28 fichiers E3-A/B/C/D, D4/D5, claim, atomic). Après corrections : 2091 passés, 5 skipped sur les 13 fichiers concernés. Mutation ciblée : 23 mutants sur 23 tués (manifeste, motif, digests, versions, garde, C-16). Dépendance Linux/POSIX : aucune introduite ; le test de lien symbolique s'est exécuté sous Windows.
+
+### 68.6 Revue indépendante
+Relecteur neuf, lecture seule : ACCEPT WITH FIXES, aucun défaut bloquant ni faux FRESH. Corrections appliquées : validateur plus strict (Claim/CONSUMPTION/READ_INTENT propres non absorbés), références `23.32.13` → `23.33`, constante OOS réellement utilisée par le test, renvoi dans 23.10, précision de 23.33.2. Gap noté non traité : l'ADMISSION ne vérifie pas le pin `inventory_content_digest` de 23.27.4 (hors du périmètre accepté de 23.33.5).
+
+### 68.7 Limites scientifiques
+Étage 1 sans progrès d'atteignabilité ; un `manifest.json` non conforme ne donne qu'une raison (le validateur `complete` et le pin `inventory_id` portent la protection) ; B3 n'est pas aussi strict que D2 (cohérence statut/marqueurs, recomposition de `campaign_id`) ; un dossier étranger à sentinelle ou verrou bloque durablement sans procédure de récupération ; aucun artefact E3-E racine reconnu (N8 non adopté).
+
+### 68.8 Commits proposés (NON créés)
+D1 documents : les 7 `0025-proposal-E3E-*` + R7 + R8 + Stage 2 (10 fichiers). D2 code C-16 + tests inventaire. D3 B3 v4 + tests (interpréteurs, v4, intégration, store) + ADR 23.33. D4 validateur + tests. D5 handoff §64–§68 seul. Jamais `git add .`/`-A` ; index temporaire ; empreintes ci-dessus à comparer.
+
+### 68.9 Skills
+`development-orchestrator`, `caveman` (lite), `tdd` invoqués ; un relecteur indépendant `general-purpose` (lecture seule). Non invoqués : `code-review` (remplacé par la revue agent ciblée), `domain-modeling`, `codebase-design`, `/speckit-*`.
+
+---
+
+## 69. `AF-V-07` — Q-2 Étape 1 : audit final et publication (2026-10-24) — **`Q-2 STAGE 1 PUBLISHED — E3-E STILL BLOCKED`** — complète le §68 (dont les mentions « aucun commit, aucun push » sont historiques)
+
+### 69.1 Publication
+Les cinq commits sont publiés en fast-forward normal sur `origin/master`, parent attendu `ecc7e8d0ec47cbde2c89ab10cc765d3d80a5748c` ; construits par index temporaire (jamais `git add .`/`-A`, aucun reset, rebase, amend, stash ni force push) :
+| Commit | SHA | Périmètre |
+|---|---|---|
+| D1 | `7fc397a9d73be3b29f3b2f59ba92e8a0fc9df64c` | dix documents de proposition E3-E (statuts PROPOSED/BLOCKED conservés) |
+| D2 | `dcf618708ca56b183c2348d085b9390db1ca465c` | C-16 : `RegistryRecordFact.seq >= 0` + tests |
+| D3 | `059c87cdf6f0ee5267fdfd43b4382e78f62bbe5d` | B3 v4 + tests v4 + 5 tests historiques amendés + ADR 0025 §23.33 et renvoi dans §23.10 |
+| D4 | `13175f5ed6420518124e0d9ca308552706fad9c4` | validateur pur `gate_v_inventory_preconditions.py` + tests |
+| D5 | ce commit | handoff §64–§69, additif (sans les hunks étrangers §48–§51 ni `CONTEXT.md`) |
+Le SHA de D5 ne peut pas figurer dans son propre contenu : il est consigné dans le rapport de mission et vérifiable par `git log`.
+
+### 69.2 Statuts
+- **ACCEPTED** (utilisateur, 2026-10-24) : Q2-D1 Étage 1, Q2-D2, Q2-D3 option C, amendement 23.10 `inventory.complete`, C-16. **Non accepté** : N1–N20 en bloc, K1 Étage 2, reste d'E3-E.
+- **IMPLEMENTED + TESTED + PUBLISHED** : C-16 ; B3 `gate_v_exposure_interpreters_v4` (digest `CAMPAIGN_DIR` `9c05f8b068ac86d321c0d9889df0f3c0f1e015fdd8b17d208479554b1badb43b`, `RESULTS` et `SPLIT_PLAN_DIR` inchangés, v2/v3 lisibles) ; validateur pur `inventory_precondition_refusals`.
+- **DOCUMENTED + PUBLISHED, non accepté** : proposition R7, contrat R8, contrat de conception K1 Étage 2.
+- **BLOCKED** : garde `complete` non opérationnelle de bout en bout (aucun écrivain public de RESERVATION/ADMISSION dans E3-D, E3-J absent, quatre contrats E3-J différés en `skip`) ; K1 Étage 2 ; F1 ; vérification d'`inventory_content_digest` et des sept contrôles d'ADMISSION de 23.27.4 (obligation E3-J ; le validateur ne les remplace pas) ; FRESH inatteignable pour une campagne V2 réelle ; admission de bout en bout non démontrée.
+
+### 69.3 Vérifications finales
+Régression large sur le code définitif (32 fichiers E3-A/B/C/D, D4/D5, claim, campagne) : 4840 passés, 47 skipped, 0 échec (les skips sont POSIX/Linux préexistants et les quatre contrats différés E3-J). Chaque blob des commits égale le fichier du worktree. Arbres exacts : D2 179 passés ; D3 2075 passés, 2 skipped ; D4 2205 passés, 6 skipped. Mutation ciblée sur le code final : 23 mutants sur 23 tués. `git diff-tree --check` propre sur les quatre commits. Aucun secret ni gros artefact. Revue indépendante (ACCEPT WITH FIXES, corrections appliquées) puis revue finale ciblée du delta restant.
+
+### 69.4 Limites
+Les validations WF/MC/PS restent `UNKNOWN_SOURCE` sans preuve d'exclusion ; `REAL` = DISABLED / NOT QUALIFIED ; `GATE V` = NON PASSÉE ; `FINAL_HOLDOUT` = NON ACCÉDÉ. Une primitive technique testée n'est pas une qualification scientifique. Branches distantes temporaires `e3c-linux-validation-20261019` et `e3d-linux-validation-20261019` : non supprimées.
+
+---
