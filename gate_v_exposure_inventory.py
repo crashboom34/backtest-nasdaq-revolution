@@ -160,8 +160,8 @@ class RegistryRecordFact:
     def __post_init__(self) -> None:
         if type(self.seq) is not int:
             raise TypeError("seq doit être exactement un int.")
-        if self.seq < 1:
-            raise ValueError("seq doit être un entier >= 1.")
+        if self.seq < 0:
+            raise ValueError("seq doit être un entier >= 0 (le registre E3-D numérote ses slots depuis 0, C-16).")
         if type(self.kind) is not SourceKind:
             raise TypeError("kind doit être un SourceKind.")
         if self.kind not in _REGISTRY_LABELS:

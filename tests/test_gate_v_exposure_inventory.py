@@ -744,7 +744,9 @@ def test_an_incomplete_b3_interpretation_makes_the_classification_undetermined_n
 
 
 @pytest.mark.parametrize("changes, error", [
-    (dict(seq=0), ValueError), (dict(seq=True), TypeError), (dict(seq="1"), TypeError),
+    # C-16 (accepté par l'utilisateur le 2026-10-24) : `seq=0` est désormais VALIDE (le registre E3-D numérote ses slots depuis 0, la
+    # première RESERVATION doit pouvoir devenir un finding) ; l'ancien cas `dict(seq=0), ValueError` est remplacé par `seq=-1`.
+    (dict(seq=-1), ValueError), (dict(seq=True), TypeError), (dict(seq=False), TypeError), (dict(seq="1"), TypeError),
     (dict(kind=SourceKind.JOB_EXECUTION), ValueError), (dict(kind="CONSUMPTION"), TypeError),
     (dict(campaign_id=""), ValueError), (dict(campaign_id=3), TypeError),
     (dict(content_hash="abc"), ValueError), (dict(content_hash="A" * 64), ValueError), (dict(content_hash=5), TypeError),
@@ -759,6 +761,41 @@ def test_registry_record_fact_rejects_invalid_values_with_the_repo_error_convent
     values.update(changes)
     with pytest.raises(error):
         b4.RegistryRecordFact(**values)
+
+
+# ── C-16 : le registre E3-D numérote ses slots depuis 0 ; `RegistryRecordFact.seq` n'est jamais décalé ────────────────────
+
+def test_c16_seq_zero_is_a_valid_registry_record_fact_and_is_never_shifted():
+    fact = rec(0, RES, "camp_a")
+    assert fact.seq == 0 and type(fact.seq) is int
+
+
+def test_c16_the_first_registry_record_becomes_an_identifiable_finding_without_shifting_the_sequence(tmp_path):
+    assembly = assemble(interpret(tmp_path), reg=registry([rec(0, RES, "camp_a")]))
+    finding = by_id(assembly, "registry.reservation:reg_main/000000")
+    assert finding.source_kind is RES and finding.status is SourceStatus.RESOLVED and finding.overlap is OverlapVerdict.OVERLAPS
+    assert (finding.campaign_id, finding.content_hash) == ("camp_a", h("record-0"))
+    assert not [source_id for source_id in ids(assembly) if source_id.endswith("/000001")]    # aucun décalage artificiel
+
+
+def test_c16_higher_ranks_keep_their_identifiers_when_seq_zero_is_present(tmp_path):
+    reg = registry([rec(0, RES, "camp_a"), rec(1, ADM, "camp_a"), rec(2, CONS, "camp_a")])
+    assembly = assemble(interpret(tmp_path), reg=reg)
+    assert {"registry.reservation:reg_main/000000", "registry.admission:reg_main/000001", "registry.consumption:reg_main/000002"} <= set(ids(assembly))
+    assert by_id(assembly, "registry.admission:reg_main/000001").content_hash == h("record-1")
+
+
+def test_c16_a_duplicated_seq_zero_is_still_refused():
+    with pytest.raises(ValueError):
+        registry([rec(0, RES, "camp_a"), rec(0, ADM, "camp_a")])
+
+
+def test_c16_historical_identities_for_records_with_seq_ge_1_are_unchanged(tmp_path):
+    """Valeurs mesurées sur le code AVANT C-16 (HEAD ecc7e8d, deux mesures identiques) : le changement ne touche que la validation de `seq`,
+    jamais le format `{seq:06d}` ni les formules d'identité d'E3-A."""
+    assembly = assemble(interpret(tmp_path), reg=registry([rec(1, RES, "camp_a"), rec(2, ADM, "camp_a")]))
+    assert assembly.inventory_id == "f19a7b1296a3c1e4a776d8c27779ad4aa9ba155b298b86f3bf2d9cceab339005"
+    assert assembly.inventory_content_digest == "dc5c5e4819bfd21891357ce98d0669ac8ce2272cb5f4b068a313df7a5512b491"
 
 
 def test_registry_record_fact_normalizes_its_window():
