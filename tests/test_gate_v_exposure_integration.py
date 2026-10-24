@@ -157,9 +157,10 @@ PUBLISHED_V2_DIGESTS = {                                     # mesurés sur `git
 }
 
 
-def test_b3_is_version_3_since_the_exposure_tree_and_the_orphan_a0_rule():
-    """D3 (ADR 0025 23.31.2) : un changement d'interprétation change la version ; la v2 reste un état publié distinct."""
-    assert b3.B3_SEMANTICS_VERSION == "gate_v_exposure_interpreters_v3"
+def test_b3_is_version_4_since_the_v2_campaign_directory_rules():
+    """D3 (ADR 0025 23.31.2) : un changement d'interprétation change la version ; v2 et v3 restent des états publiés distincts.
+    Amendé avec B3 v4 (Q-2, K1 Étage 1, accepté le 2026-10-24) : l'égalité `== v3` devient `== v4`."""
+    assert b3.B3_SEMANTICS_VERSION == "gate_v_exposure_interpreters_v4"
 
 
 def known_rules_digests(version: str) -> dict:
@@ -167,7 +168,8 @@ def known_rules_digests(version: str) -> dict:
 
 
 def test_the_known_b3_versions_pin_the_rules_digest_of_each_layout_and_differ_only_on_the_campaign_table():
-    assert b3.KNOWN_B3_VERSIONS == ("gate_v_exposure_interpreters_v2", "gate_v_exposure_interpreters_v3")
+    # Amendé avec B3 v4 (accepté le 2026-10-24) : v4 s'ajoute à la fin ; v2 et v3 restent connues avec leurs digests figés.
+    assert b3.KNOWN_B3_VERSIONS == ("gate_v_exposure_interpreters_v2", "gate_v_exposure_interpreters_v3", "gate_v_exposure_interpreters_v4")
     assert type(b3.B3_RULES_DIGESTS) is tuple and {version for version, _, _ in b3.B3_RULES_DIGESTS} == set(b3.KNOWN_B3_VERSIONS)
     assert len({(version, layout) for version, layout, _ in b3.B3_RULES_DIGESTS}) == len(b3.B3_RULES_DIGESTS)   # une valeur par couple
     assert known_rules_digests("gate_v_exposure_interpreters_v2") == PUBLISHED_V2_DIGESTS

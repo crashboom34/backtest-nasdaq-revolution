@@ -2256,7 +2256,7 @@ admission d'un autre `campaign_id` ; une fenêtre illisible bloque tout.
    - types de campagne (`RESERVATION`, `ADMISSION`, `CONSUMPTION`) : unicité par campagne (ci-dessus) ; absence de
      recouvrement avec les enregistrements d'autres campagnes ;
    - `RESERVATION` : engagement valide ; `static_sources_digest` recalculé et ensemble pertinent vide ; aucune
-     attestation à ce stade ;
+     attestation à ce stade ; *(Précisé par 23.33.5 : `inventory.complete` doit aussi être vrai, un ensemble pertinent vide ne suffit jamais si l'inventaire est incomplet ; vaut aussi pour l'`ADMISSION`.)* ;
    - `ADMISSION` : une `RESERVATION` de la **même** campagne, du même `commitment_content_hash` et de la même
      fenêtre existe, est durable, et aucune `ADMISSION` de cette campagne n'existe (une admission sémantiquement identique
      est réutilisée par relecture sans publication ; une admission différente donne un refus) ; la `ReservationTimeProof` vise
@@ -3769,6 +3769,80 @@ défaut de B5/B6. B5/B6 n'ont aucun mode `REAL` ; E3-J devra fournir les valeurs
 - Les informations d'audit (provenance des compteurs, relevé des preuves, notes, épinglages de scan, chemins locaux, versions, `created_at`)
   sont couvertes par `inventory_content_hash` et n'entrent ni dans `inventory_id` ni dans `inventory_content_digest` (formules d'E3-A,
   non recopiées).
+
+### 23.33 — Addendum Q-2 (2026-10-24) : dossier de campagne V2, version 4 de B3 (K1 Étage 1), garde `complete` et numérotation du registre (C-16)
+
+**Statut.** Décisions **explicitement acceptées par l'utilisateur le 2026-10-24** et limitées à leurs conséquences techniques directes : Q2-D1 (K1 Étage 1,
+conservateur, sans preuve d'exclusion présumée), Q2-D2 (deux familles de chemins, motifs stricts), Q2-D3 (option C : verrou et sentinelle conservés comme
+sources inconnues bloquantes), amendement de 23.10 (`inventory.complete`) et C-16 (`seq = 0`). Cet addendum **n'adopte ni N1 à N20, ni l'Étage 2 de K1, ni
+le reste d'E3-E**. La numérotation 23.32 reste réservée à la proposition E3-E consolidée, non adoptée. Les documents de conception
+`0025-proposal-E3E-Q2-B3V4-CAMPAIGN-COVERAGE-PROPOSED.md` (R7) et `0025-proposal-E3E-Q2-FINAL-CONTRACT-PROPOSED.md` (R8, prioritaire sur R7) sont conservés
+pour la traçabilité. `REAL` reste désactivé et non qualifié, `GATE V` non passée, `FINAL_HOLDOUT` non accédé.
+
+#### 23.33.1 — Deux familles de chemins `validations/` (Q2-D2)
+
+| Famille | Chemin | Producteur / lecteur | Nature |
+|---|---|---|---|
+| Preuves pré-holdout V2 (WF, MC, PS) | `validations/<run_id>/validation_run.json`, `run_id` = `gate_v_v2_<64 hex>_walk_forward`, `…_monte_carlo` ou `…_parameter_stability_fold_NNN` | identifiants de `gate_v_v2_validation_run_id` ; D4/D5 les **chargent seulement**, par référence du Manifest ; aucun écrivain V2 n'existe | avant Claim, aucune donnée du holdout |
+| `ValidationRun` OOS finale (23.13) | `validations/oos_<32 hex>.json` (fichier) | aucun producteur ni lecteur (E3-J, étape 17) | après Claim, exposante |
+
+Les deux familles ne sont **pas** unifiées. Une table de sources ne doit jamais faire correspondre un même chemin à deux règles : B2 apparie par **nom** et
+refuse tout le scan (`AMBIGUOUS_SOURCE_TABLE`) ; le motif large `_ID_DIR`, qui admet le point, apparierait `oos_<hex>.json`. En disposition
+`CAMPAIGN_DIR`, la règle des répertoires de run utilise donc le motif étroit des identifiants V2 ci-dessus. La règle du fichier OOS finale n'est ajoutée
+qu'avec son producteur (motif disjoint `oos_[0-9a-f]{32}\.json`) ; d'ici là ce fichier est une entrée inconnue bloquante.
+
+#### 23.33.2 — Validations pré-holdout WF/MC/PS : K1 Étage 1
+
+B3 reconnaît la **structure** et conserve pour WF, MC et PS le verdict existant : `UNKNOWN_SOURCE`, `UNRESOLVED`, `WINDOW_UNKNOWN`, soit **absence d'exposition non
+établie** (23.30.1 : aucune preuve d'exclusion n'existe à ce jour). Aucune date de fold n'est une preuve d'exclusion ni d'établissement à cet étage ; la
+condition `max(effective_test_end) > ws` n'est pas un critère. Chaque run reste identifiable (`source_id`), haché (`content_hash`, donc dans `inventory_id`
+et dans `static_sources_digest`) et noté (`non_oos_validations`, lorsque son `validation_type` est lisible) ; il ne peut disparaître sans modifier ces identités. La classe est `UNDETERMINED`, jamais
+`FRESH`, et la `RESERVATION` reste refusée (ensemble pertinent non vide). La comptabilité des essais est inchangée (vues fournies par l'appelant).
+**Limite** : cet étage ne fait progresser aucune atteignabilité de `FRESH` ; l'admission de bout en bout d'un dossier V2 réel reste **non démontrée**.
+Le statut de l'Étage 2 (preuve d'exclusion liée au run, `SourceKind` additionnels) est **séparé** et non accepté : voir le contrat de conception
+`0025-proposal-E3E-Q2-STAGE2-DESIGN-PROPOSED.md`.
+
+#### 23.33.3 — `manifest.json` : source informative à schéma strict
+
+B3 lit `manifest.json` (absent légal avant la création D4) et exige : ensemble exact des 17 clés de `GateVCampaignManifestV2`, version
+`gate_v_campaign_manifest_v2`, types exacts (booléens et entiers distincts), `campaign_id` de forme V2 égal au nom du dossier, et les cinq champs réservés
+`FINAL_HOLDOUT` à `null`. Un manifeste V1 ou de forme inconnue est refusé. Un manifeste invalide rend l'inventaire **incomplet** (raison
+`INFORMATIVE_UNRESOLVED`, sans finding). Le contenu n'étant pas une source d'identité, une simple révision ne modifie ni `inventory_id` ni le digest : D5
+(8 bis) la détecte.
+
+#### 23.33.4 — Verrou et sentinelle (option C)
+
+`manifest.update.lock` et `technical_failure.json` n'ont **aucune règle** dans B3 : ils restent des entrées inconnues (finding `UNKNOWN_SOURCE`, `complete =
+False`), bloquantes pour toute campagne, propre ou étrangère, dans tous leurs états (présent, vide, tronqué, illisible, répertoire ; un lien refuse le
+scan). Ils ne sont jamais ouverts, ignorés, réparés ni supprimés. Les INERT sans raison et la raison sans finding sont rejetés (D5 ne couvre que la campagne
+courante). **Coût consigné** : un dossier étranger en échec technique bloque durablement les inventaires qui le scannent ; aucune récupération n'est définie
+pour une racine étrangère. **Dépendance** : l'admission reste bloquée tant qu'E3-J n'a pas démontré qu'il appelle D5 en P4 et à l'étape 7, revérifie sentinelle
+et verrou aux étapes 13 et 14 bis, ne poursuit pas sans le Manifest vérifié par D5 et refuse toute classification `FRESH` si l'un d'eux existe.
+
+#### 23.33.5 — Garde `inventory.complete` (amendement de 23.10)
+
+Une `RESERVATION` ou une `ADMISSION` n'est recevable que si `inventory.complete == True`. Un ensemble pertinent vide ne suffit jamais si `complete` est faux.
+Conditions cumulatives, non exhaustives : ensemble pertinent satisfaisant 23.10 et 23.27.1, lecture stricte du registre, `inventory_id` et
+`static_sources_digest` égaux à ceux épinglés (admission), absence de source inconnue ou non résolue, concurrence de slots, et toutes les préconditions
+propres à l'opération. La part inventaire est vérifiée par le validateur pur `gate_v_inventory_preconditions.inventory_precondition_refusals`, qui ne
+retourne que des refus et n'ouvre aucun droit. **Statut** : E3-D n'a pas d'écrivain public de RESERVATION/ADMISSION et E3-J n'existe pas ; la garde n'est
+**pas opérationnelle de bout en bout** (contrats différés testés). Le validateur **ne remplace pas** les sept vérifications préalables de l'`ADMISSION` (23.27.4) : `inventory_content_digest`, attestation valide,
+autorisation valide, déclarations inchangées, preuve de temps, projection de recouvrement et chaîne du registre lue strictement restent des obligations
+d'E3-J, testées en contrats différés ; une liste de refus vide n'est jamais une admission.
+
+#### 23.33.6 — Numérotation du registre (C-16)
+
+`RegistryRecordFact.seq` accepte `0` (le registre E3-D numérote ses slots depuis 0) ; `-1`, les booléens et les non-entiers restent refusés. Aucun décalage :
+`source_id` = `registry.<type>:<registry_id>/<seq:06d>` est inchangé pour tout `seq >= 1`.
+
+#### 23.33.7 — Compatibilité et versions
+
+B3 passe en `gate_v_exposure_interpreters_v4`. v2 et v3 restent connues et lisibles avec leurs `rules_digest` figés ; la table `CAMPAIGN_DIR` de la v3 est
+conservée à l'identique et en tête de la v4 (son digest reste reproductible). `RESULTS` et `SPLIT_PLAN_DIR` sont identiques à v3. Digests v4 (mesurés sur un
+scan réel de la table implémentée) : `RESULTS` `9014a865e7c5c4fea0ec7fc4cbcd3e8d76357a51693c339981e50f523ae51960`, `CAMPAIGN_DIR` `9c05f8b068ac86d321c0d9889df0f3c0f1e015fdd8b17d208479554b1badb43b`,
+`SPLIT_PLAN_DIR` `e98082afc0482e2afdce61884f0da5f264a943defd666ca4aedd8b75ec217f29`. E3-A est inchangé (formules, énumérations, identités). Restent inconnus et bloquants : `oos_<32 hex>.json`,
+`read_intent.json`, `data_receipt.json`, `final_holdout_closing_record.json`, les artefacts E3-E sans norme acceptée ou sans producteur, les sorties du runner
+V1 et les temporaires d'écriture atomique.
 
 ## Conséquences
 

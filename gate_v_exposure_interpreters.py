@@ -53,9 +53,11 @@ from gate_v_final_holdout_protocol import (
     normalize_utc_instant,
 )
 
-B3_SEMANTICS_VERSION = "gate_v_exposure_interpreters_v3"
+B3_SEMANTICS_VERSION = "gate_v_exposure_interpreters_v4"
 # Historique des versions (ADR 0025 23.31.2) : v2 = B3 publié au commit 41fe58d ; v3 = structure `exposure/` reconnue dans la table de
-# campagne et A0 illisible par son CONTENU traité en orphelin (23.29.1). Les formules d'E3-A sont inchangées d'une version à l'autre.
+# campagne et A0 illisible par son CONTENU traité en orphelin (23.29.1) ; v4 = dossier de campagne V2 réel (Q-2, K1 Étage 1, accepté le
+# 2026-10-24) : `manifest.json` informatif à schéma strict et arbre `validations/` pré-holdout reconnu à motif étroit, verdict WF/MC/PS
+# INCHANGÉ (`UNKNOWN_SOURCE`, absence d'exposition non établie). Les formules d'E3-A sont inchangées d'une version à l'autre.
 
 
 class RootLayout(str, Enum):
@@ -143,6 +145,7 @@ _RESULTS_RULES = (
 
 TAG_CAMPAIGN_PLAN = "campaign.plan"
 TAG_CAMPAIGN_CLAIM = "campaign.claim"
+TAG_CAMPAIGN_MANIFEST = "campaign.manifest"
 TAG_EXPOSURE_DIR = "campaign.exposure.dir"
 TAG_EXPOSURE_INVENTORY = "campaign.exposure.inventory"
 TAG_EXPOSURE_ORPHAN = "campaign.exposure.orphan"
@@ -169,14 +172,78 @@ _EXPOSURE_RULES = (
     SourceRule(("exposure", _INVENTORY_DIR, _PUBLICATION_ORPHAN), EntryClass.TEMP_ORPHAN_FILE, tag=TAG_EXPOSURE_CHAIN_ORPHAN),
 )
 
-# Dossier de campagne : seuls l'ancre, le Claim d'E2 (`final_holdout_access_claim.json`, Décision 9) et la structure `exposure/` (connue,
-# informative) sont reconnus ; tout autre fichier (manifeste, validations, walk-forward) reste INCONNU donc UNRESOLVED tant que son
-# interprète n'existe pas. Les deux premières règles sont celles du B3 publié, inchangées et dans le même ordre.
-_CAMPAIGN_RULES = (
+# Dossier de campagne, table de la v3 (CONSERVÉE à l'identique et EN TÊTE de la table v4 : son digest historique reste reproductible) :
+# seuls l'ancre, le Claim d'E2 (`final_holdout_access_claim.json`, Décision 9) et la structure `exposure/` (connue, informative) sont
+# reconnus ; tout autre fichier reste INCONNU donc UNRESOLVED. Les deux premières règles sont celles du B3 publié (v2), même ordre.
+_CAMPAIGN_RULES_V3 = (
     SourceRule(("plan.json",), EntryClass.INFORMATIVE_JSON, JsonKind.OBJECT, tag=TAG_CAMPAIGN_PLAN),
     SourceRule(("final_holdout_access_claim.json",), EntryClass.EXPOSING_JSON, JsonKind.OBJECT, tag=TAG_CAMPAIGN_CLAIM),
     *_EXPOSURE_RULES,
 )
+
+# Table v4 (Q-2, K1 Étage 1 ; ADR 0025 23.33.1 à 23.33.7, contrat R8 sections 2 et 5). AJOUTS à la table v3 :
+# - `manifest.json` : source INFORMATIVE à schéma strict (`_manifest_v2_conforms`) ; absent légal (avant la création D4) ;
+# - `validations/<run pré-holdout V2>/validation_run.json` : motif ÉTROIT fondé sur les identifiants réels de `gate_v_v2_validation_run_id`
+#   (`gate_v_v2_<64 hex>_{walk_forward|monte_carlo|parameter_stability_fold_NNN}`), JAMAIS `_ID_DIR` (qui admet le point et apparierait
+#   `oos_<32hex>.json`, d'où un scan refusé `AMBIGUOUS_SOURCE_TABLE`). Verdict WF/MC/PS inchangé : `UNKNOWN_SOURCE` (23.30.1, aucune preuve
+#   d'exclusion) ;
+# - RIEN pour `manifest.update.lock` ni `technical_failure.json` (option C) : entrées inconnues, finding `UNKNOWN_SOURCE`, bloquantes pour toute
+#   campagne, propre ou étrangère ;
+# - RIEN pour `validations/oos_<32hex>.json` (chemin FUTUR de la ValidationRun OOS finale, ADR 23.13, aucun producteur : `CAMPAIGN_OOS_FINAL_FILE`
+#   n'est qu'un motif réservé, testé disjoint) ni pour les artefacts E3-E sans norme acceptée ou sans producteur.
+_CAMPAIGN_RUN_DIR = SegmentPattern(r"gate_v_v2_[0-9a-f]{64}_(walk_forward|monte_carlo|parameter_stability_fold_[0-9]{3})")
+CAMPAIGN_OOS_FINAL_FILE = SegmentPattern(r"oos_[0-9a-f]{32}\.json")
+_CAMPAIGN_RULES = (
+    *_CAMPAIGN_RULES_V3,
+    SourceRule(("manifest.json",), EntryClass.INFORMATIVE_JSON, JsonKind.OBJECT, tag=TAG_CAMPAIGN_MANIFEST),
+    SourceRule(("validations",), EntryClass.STRUCTURAL_DIRECTORY, tag=TAG_VALIDATIONS),
+    SourceRule(("validations", _CAMPAIGN_RUN_DIR), EntryClass.STRUCTURAL_DIRECTORY, tag=TAG_VALIDATION_DIRECTORY),
+    SourceRule(("validations", _CAMPAIGN_RUN_DIR, "validation_run.json"), EntryClass.EXPOSING_JSON, JsonKind.OBJECT, tag=TAG_VALIDATION_RUN),
+)
+
+# Contrat de `manifest.json` (D2, `GateVCampaignManifestV2`, ADR 0025 21.4) recopié ici car B3 s'interdit d'importer les modules de campagne ;
+# un test compare ces constantes au type D2 (aucune dérive silencieuse). Les cinq derniers champs sont RÉSERVÉS FINAL_HOLDOUT (valeur imposée
+# `null` avant tout Claim) : un manifeste V1 ou un miroir post-Claim n'est jamais cru sur parole.
+MANIFEST_V2_VERSION = "gate_v_campaign_manifest_v2"
+MANIFEST_V2_KEYS = ("manifest_semantics_version", "campaign_id", "preregistration_id", "campaign_protocol_fingerprint", "manifest_revision",
+                    "status", "execution_started", "running", "technical_failure_reason", "walk_forward_validation_run_id",
+                    "monte_carlo_validation_run_id", "parameter_stability_validation_run_ids_by_fold", "final_holdout_claim_id",
+                    "final_holdout_claim_content_hash", "holdout_access_event_id", "holdout_access_event_content_hash",
+                    "oos_evidence_validation_run_id")
+MANIFEST_V2_RESERVED = MANIFEST_V2_KEYS[12:]
+MANIFEST_V2_STATUSES = ("READY_FOR_EXECUTION", "RUNNING", "EVIDENCE_INCOMPLETE", "EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT", "TECHNICAL_FAILURE")
+_CAMPAIGN_ID_V2_PREFIX = "gate_v_v2_"
+_HEX = frozenset("0123456789abcdef")
+
+
+def _is_hex64(value) -> bool:
+    return type(value) is str and len(value) == 64 and set(value) <= _HEX
+
+
+def _is_optional_text(value) -> bool:
+    return value is None or (type(value) is str and bool(value.strip()))
+
+
+def _manifest_v2_conforms(record: dict, directory_name: str) -> bool:
+    """Schéma STRICT du `manifest.json` d'une campagne V2 : ensemble exact des 17 clés, version exacte, types exacts (booléens et entiers
+    non confondus), `campaign_id` de forme V2 ET égal au nom du dossier, champs réservés `null`. Aucune lecture des preuves, aucune
+    recomposition du `campaign_id` (relève de D5, qui recharge le plan) : B3 refuse seulement ce qu'il peut établir seul."""
+    if set(record) != set(MANIFEST_V2_KEYS) or record["manifest_semantics_version"] != MANIFEST_V2_VERSION:
+        return False
+    campaign_id = record["campaign_id"]
+    if not (type(campaign_id) is str and campaign_id.startswith(_CAMPAIGN_ID_V2_PREFIX) and _is_hex64(campaign_id[len(_CAMPAIGN_ID_V2_PREFIX):])
+            and campaign_id == directory_name):
+        return False
+    revision = record["manifest_revision"]
+    by_fold = record["parameter_stability_validation_run_ids_by_fold"]
+    return (_is_hex64(record["preregistration_id"]) and _is_hex64(record["campaign_protocol_fingerprint"])
+            and type(revision) is int and revision >= 0
+            and type(record["status"]) is str and record["status"] in MANIFEST_V2_STATUSES
+            and type(record["execution_started"]) is bool and type(record["running"]) is bool
+            and _is_optional_text(record["technical_failure_reason"])
+            and _is_optional_text(record["walk_forward_validation_run_id"]) and _is_optional_text(record["monte_carlo_validation_run_id"])
+            and type(by_fold) is dict and all(_is_text(k) and _is_text(v) for k, v in by_fold.items())
+            and all(record[name] is None for name in MANIFEST_V2_RESERVED))
 
 # Répertoire d'un plan configuré comme racine d'audit (« répertoires d'événements des plans », 23.11 étape 1).
 _SPLIT_PLAN_DIR_RULES = (
@@ -194,8 +261,8 @@ _ROOT_ANCHORS = {RootLayout.CAMPAIGN_DIR: "plan.json", RootLayout.SPLIT_PLAN_DIR
 # `rules_digest` de la table appliquée par chaque version CONNUE de B3, par disposition (ADR 0025 23.31.2, 23.31.6) : valeurs FIGÉES, jamais
 # recalculées ici (la formule appartient à B2). v2 : mesurées sur le B3 publié (41fe58d) ; v3 : tables courantes, un test vérifie qu'elles
 # égalent le digest d'un scan réel. Un A0 dont un épinglage de scan diverge de la version qu'il enregistre est refusé par B5.
-KNOWN_B3_VERSIONS = ("gate_v_exposure_interpreters_v2", "gate_v_exposure_interpreters_v3")
-_V2, _V3 = KNOWN_B3_VERSIONS
+KNOWN_B3_VERSIONS = ("gate_v_exposure_interpreters_v2", "gate_v_exposure_interpreters_v3", "gate_v_exposure_interpreters_v4")
+_V2, _V3, _V4 = KNOWN_B3_VERSIONS
 B3_RULES_DIGESTS = (                                              # (version, disposition, rules_digest) : immuable
     (_V2, RootLayout.RESULTS, "9014a865e7c5c4fea0ec7fc4cbcd3e8d76357a51693c339981e50f523ae51960"),
     (_V2, RootLayout.CAMPAIGN_DIR, "cb94f97f1b2c53f8839f90547b3ad619e5a3a64dacfb857071554d329a6a6fa7"),
@@ -203,6 +270,11 @@ B3_RULES_DIGESTS = (                                              # (version, di
     (_V3, RootLayout.RESULTS, "9014a865e7c5c4fea0ec7fc4cbcd3e8d76357a51693c339981e50f523ae51960"),
     (_V3, RootLayout.CAMPAIGN_DIR, "7cc0cb309210f43cc0e6e00a2a220483196fdc3ff1d7e285aff758313de2e04f"),
     (_V3, RootLayout.SPLIT_PLAN_DIR, "e98082afc0482e2afdce61884f0da5f264a943defd666ca4aedd8b75ec217f29"),
+    # v4 : RESULTS et SPLIT_PLAN_DIR identiques à v3 (tables inchangées) ; CAMPAIGN_DIR mesuré par un scan réel de la table implémentée (2026-10-24,
+    # indépendant des plafonds de scan), un test le revérifie.
+    (_V4, RootLayout.RESULTS, "9014a865e7c5c4fea0ec7fc4cbcd3e8d76357a51693c339981e50f523ae51960"),
+    (_V4, RootLayout.CAMPAIGN_DIR, "9c05f8b068ac86d321c0d9889df0f3c0f1e015fdd8b17d208479554b1badb43b"),
+    (_V4, RootLayout.SPLIT_PLAN_DIR, "e98082afc0482e2afdce61884f0da5f264a943defd666ca4aedd8b75ec217f29"),
 )
 
 
@@ -578,7 +650,7 @@ _INTERPRETERS = {TAG_JOB_CONFIG: _interpret_job, TAG_SPLIT_EVENT: _interpret_eve
 _FALLBACK_KINDS = {TAG_JOB_CONFIG: SourceKind.JOB_EXECUTION, TAG_SPLIT_EVENT: SourceKind.HOLDOUT_ACCESS_EVENT,
                    TAG_VALIDATION_RUN: SourceKind.UNKNOWN_SOURCE, TAG_CAMPAIGN_CLAIM: SourceKind.FINAL_HOLDOUT_CLAIM}
 _INFORMATIVE_TAGS = frozenset({TAG_SPLIT_PLAN, TAG_EXPERIMENT, TAG_CAMPAIGN_PLAN, TAG_JOB_MANIFEST, TAG_EXPOSURE_INVENTORY,
-                               TAG_EXPOSURE_DECLARATION, TAG_EXPOSURE_ATTESTATION})
+                               TAG_EXPOSURE_DECLARATION, TAG_EXPOSURE_ATTESTATION, TAG_CAMPAIGN_MANIFEST})
 _EXPERIMENT_KEYS = frozenset({"created_at", "experiment_id", "hypothesis"})   # `research_run.Experiment` (job_store)
 
 
@@ -591,6 +663,8 @@ def _informative_ok(observation, context: _Context) -> bool:
     if observation.rule_tag == TAG_EXPERIMENT:
         record = observation.value
         return set(record) == _EXPERIMENT_KEYS and all(_is_text(record[k]) for k in ("created_at", "experiment_id"))
+    if observation.rule_tag == TAG_CAMPAIGN_MANIFEST:
+        return _manifest_v2_conforms(observation.value, context.root_names[observation.root_label])
     return True
 
 # ── Rattachement observation ↔ règle ─────────────────────────────────────────────────────────────────────────────

@@ -837,9 +837,10 @@ def test_an_unresolved_execution_finding_by_unknown_timezone_must_have_its_regis
 
 from tests.gate_v_exposure_support import write_json  # noqa: E402
 
-V2, V3 = "gate_v_exposure_interpreters_v2", "gate_v_exposure_interpreters_v3"
+V2, V3, V4 = "gate_v_exposure_interpreters_v2", "gate_v_exposure_interpreters_v3", "gate_v_exposure_interpreters_v4"
 CAMPAIGN_DIGEST_V2 = "cb94f97f1b2c53f8839f90547b3ad619e5a3a64dacfb857071554d329a6a6fa7"    # mesuré sur `git archive 41fe58d` (B3 v2 publié)
-CAMPAIGN_DIGEST_V3 = "7cc0cb309210f43cc0e6e00a2a220483196fdc3ff1d7e285aff758313de2e04f"    # table CAMPAIGN_DIR courante (23.31.2)
+CAMPAIGN_DIGEST_V3 = "7cc0cb309210f43cc0e6e00a2a220483196fdc3ff1d7e285aff758313de2e04f"    # table CAMPAIGN_DIR de la v3 (23.31.2), figée
+CAMPAIGN_DIGEST_V4 = "9c05f8b068ac86d321c0d9889df0f3c0f1e015fdd8b17d208479554b1badb43b"    # table CAMPAIGN_DIR courante (Q-2, 2026-10-24)
 
 
 def area(tmp_path, name: str) -> Path:
@@ -864,9 +865,10 @@ def relabel(version, digest=None):
     return mutate
 
 
-def test_a_new_a0_records_b3_v3_and_is_read_as_current(tmp_path):
+def test_a_new_a0_records_the_current_b3_version_and_is_read_as_current(tmp_path):
+    # Amendé avec B3 v4 (Q-2, accepté le 2026-10-24) : la version courante est v4 ; v2 et v3 sont couverts par les tests de lecture historique.
     a0 = store.load_exposure_inventory(publish(tmp_path))
-    assert a0.rules_versions.b3_interpreters == V3 == b3.B3_SEMANTICS_VERSION
+    assert a0.rules_versions.b3_interpreters == V4 == b3.B3_SEMANTICS_VERSION
     assert a0.rules_versions.is_current() is True
 
 
@@ -884,15 +886,18 @@ def test_a_recorded_rules_digest_that_is_not_the_one_of_the_recorded_b3_version_
     assert error.failure is store.StoreFailure.RULES_DIGEST_MISMATCH
 
 
-def test_the_campaign_rules_digest_tells_v2_from_v3_and_must_match_the_recorded_version(tmp_path):
+def test_the_campaign_rules_digest_tells_v2_v3_and_v4_apart_and_must_match_the_recorded_version(tmp_path):
+    # Amendé avec B3 v4 (Q-2, accepté le 2026-10-24) : la table courante est la v4 ; v2 et v3 restent des lectures historiques intègres,
+    # et toute étiquette de version associée au digest d'une autre version est refusée (RULES_DIGEST_MISMATCH).
     current = store.load_exposure_inventory(publish(area(tmp_path, "cur"), campaign_assembly(tmp_path)))
-    assert [(p.layout, p.rules_digest) for p in current.scan_pins] == [(b3.RootLayout.CAMPAIGN_DIR, CAMPAIGN_DIGEST_V3)]
-    v2_label_v3_table = forge(area(tmp_path, "a"), relabel(V2), assembly=campaign_assembly(tmp_path))
-    v3_label_v2_table = forge(area(tmp_path, "b"), relabel(V3, CAMPAIGN_DIGEST_V2), assembly=campaign_assembly(tmp_path))
-    for path in (v2_label_v3_table, v3_label_v2_table):
+    assert [(p.layout, p.rules_digest) for p in current.scan_pins] == [(b3.RootLayout.CAMPAIGN_DIR, CAMPAIGN_DIGEST_V4)]
+    mismatched = [(V2, None), (V3, None), (V3, CAMPAIGN_DIGEST_V2), (V4, CAMPAIGN_DIGEST_V3), (V4, CAMPAIGN_DIGEST_V2), (V2, CAMPAIGN_DIGEST_V4)]
+    for index, (version, digest) in enumerate(mismatched):
+        path = forge(area(tmp_path, f"m{index}"), relabel(version, digest), assembly=campaign_assembly(tmp_path))
         assert refused(path).failure is store.StoreFailure.RULES_DIGEST_MISMATCH
-    historical = store.load_exposure_inventory(forge(area(tmp_path, "c"), relabel(V2, CAMPAIGN_DIGEST_V2), assembly=campaign_assembly(tmp_path)))
-    assert historical.rules_versions.is_current() is False and historical.inventory_id == current.inventory_id
+    for index, (version, digest) in enumerate([(V2, CAMPAIGN_DIGEST_V2), (V3, CAMPAIGN_DIGEST_V3)]):
+        historical = store.load_exposure_inventory(forge(area(tmp_path, f"h{index}"), relabel(version, digest), assembly=campaign_assembly(tmp_path)))
+        assert historical.rules_versions.is_current() is False and historical.inventory_id == current.inventory_id
 
 
 @pytest.mark.parametrize("key", ["e3a_inventory", "e3a_classification", "b4_assembly"])

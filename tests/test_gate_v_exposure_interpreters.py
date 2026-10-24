@@ -894,10 +894,13 @@ def test_campaign_directory_must_be_anchored_by_its_plan(tmp_path, plan_campaign
 
 
 def test_unlisted_campaign_files_are_unknown_until_their_interpreters_exist(tmp_path):
+    # Amendé avec B3 v4 (Q-2, K1 Étage 1, accepté le 2026-10-24) : `manifest.json` est désormais une source INFORMATIVE à schéma strict ; ce nom
+    # ne sert donc plus d'exemple de fichier inconnu (voir `test_gate_v_exposure_interpreters_v4.py` pour son contrat). Un nom sans interprète
+    # reste inconnu, bloquant et fait d'un finding `UNKNOWN_SOURCE`, comme avant.
     campaign = make_campaign(tmp_path / "c")
-    write_json(campaign / "manifest.json", {"x": 1})
+    write_json(campaign / "anything.json", {"x": 1})
     result = interpret(results_root(with_plan(tmp_path)), campaign_root(campaign, "camp1"))
-    assert finding(result, "unknown:camp1/manifest.json").source_kind is SourceKind.UNKNOWN_SOURCE and result.complete is False
+    assert finding(result, "unknown:camp1/anything.json").source_kind is SourceKind.UNKNOWN_SOURCE and result.complete is False
 
 
 def test_campaign_root_nested_under_results_root_is_refused(tmp_path):
