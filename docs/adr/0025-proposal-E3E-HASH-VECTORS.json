@@ -1,0 +1,216 @@
+{
+  "V10_decimal": {
+    "canon": "refuser nan/inf ; t = format(Decimal(repr(x)), 'f') ; si '.' dans t : retirer les zéros de fin puis le point final ; refuser t == '-0'",
+    "envelope_of_json_number_ambiguity": "{\"initial_capital\": <valeur>} ; la forme decimal est {\"initial_capital\": {\"decimal\": \"10000\"}}",
+    "grammar": "0|-?[1-9][0-9]*|-?(0|[1-9][0-9]*)\\.[0-9]*[1-9]",
+    "invalid": [
+      "1.50",
+      "1e-5",
+      "+1",
+      "01",
+      "-0",
+      ".5",
+      "1.",
+      "0.10000000000000001",
+      "nan",
+      "inf",
+      "1_0",
+      " 1",
+      "",
+      "1,5",
+      "0x10",
+      "００１"
+    ],
+    "json_number_ambiguity": {
+      "decimal_string_hash": "332b4cc80af0e4c47d2705cdf27fb738906d2db6644e17e05cd78353f2322b1a",
+      "float_form_hash": "c95a5b8c8c423c3b8114afcadb995c6f2c321c0872dd7c721e3dcaa1c11267c4",
+      "int_form_hash": "e69ac500f69d087e555638d6de7062553fb7f841fd31975f5623cb43bcabde40"
+    },
+    "property_checked_random_finite_doubles": 20000,
+    "rule": "canonique si et seulement si la grammaire (fullmatch) ET canon_decimal_from_float(float(s)) == s",
+    "sampler": "random.Random(20261020).getrandbits(64) -> struct.unpack('>d', 8 octets big-endian) ; premiers 20000 doubles finis ; 0.0 normalisé",
+    "seed": 20261020,
+    "valid": [
+      {
+        "canonical": "0.5",
+        "float_repr": "0.5"
+      },
+      {
+        "canonical": "10000",
+        "float_repr": "10000.0"
+      },
+      {
+        "canonical": "0.00001",
+        "float_repr": "1e-05"
+      },
+      {
+        "canonical": "0.30000000000000004",
+        "float_repr": "0.30000000000000004"
+      },
+      {
+        "canonical": "10000000000000000",
+        "float_repr": "1e+16"
+      },
+      {
+        "canonical": "123456789.125",
+        "float_repr": "123456789.125"
+      },
+      {
+        "canonical": "0.0000001",
+        "float_repr": "1e-07"
+      },
+      {
+        "canonical": "0",
+        "float_repr": "0.0"
+      },
+      {
+        "canonical": "-2.5",
+        "float_repr": "-2.5"
+      }
+    ]
+  },
+  "V1_attestation": {
+    "attestation_content_hash": "f0f29b9be53578dd0ea1a3f9dcbdc3dd56d427a6c39700a18c92963b834e0747",
+    "canonical_preimage_utf8_len": 2010,
+    "record": {
+      "anchor_margin_seconds": 86400,
+      "attachment_content_hash": "7f5eec7607be6d8b8502c951dbb1d7a14720d6d38eccc77f3a310299b92723b0",
+      "attachment_id": "dec3d4f95031ade9758e4a7ee63dc81afdfe9fbb4d60c8ea9525afc537dfa8b8",
+      "attestation_content_hash": "f0f29b9be53578dd0ea1a3f9dcbdc3dd56d427a6c39700a18c92963b834e0747",
+      "attestation_seq": 1,
+      "attestor": "Alice Martin",
+      "campaign_id": "gate_v_v2_3dc260b2472062d9c57bd930b02f23831d917b8f3e3234b6d63964a53c31d3aa",
+      "chronology_facts_digest": "308e24b7cac43330e8f5fbb5856b22bf5cb7e4c7374c3a00afa116d89699e70e",
+      "chronology_level": "PROSPECTIVE_ANCHORED",
+      "classification": "FRESH_UNEXPOSED_DECLARED",
+      "classification_id": "9f0c8aa526579f4dbde02f70f4cdf635a22df7d844ce012de5791febea95e732",
+      "classification_rules_version": "gate_v_exposure_classification_v1",
+      "commitment_content_hash": "fea694f5d073a47f9a2297c9aef20d11fcc1d3f0c311ab965bb5674b8fae27dd",
+      "commitment_id": "f6d517c92198b262d5474d19a844f7e110691a5cf7f237b73e8ffeafaf1d389a",
+      "created_at": "2026-07-02T09:00:00.000000Z",
+      "declaration_lineage_digest": "6bf08af9452210511d547b6fc439d3ef949c5583ddd682ca63045dc29957ff54",
+      "declaration_tip_content_hash": "1d51ae4f49abce025ad0c7504a4f2c2cf3e986b1b176c9696adf02a3b0772743",
+      "declaration_tip_seq": 1,
+      "inventory_content_digest": "ab657a85aa0f4c17cd29ce7e90afce9ad702f93e5936460cd52d5fe45e3de384",
+      "inventory_content_hash": "1c5a0cd85c687672e179cfac7ff5e7b34c5f5b9cd8f455d4ed1c3a12a5fd48cb",
+      "inventory_id": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+      "overlap_projection_hash": "1b250ea199bec73d392caad39d1167d6edc43c81f20edead86eea52c52b94fc1",
+      "own_record_stage": "RESERVED",
+      "registry_id": "gate-v-registry-synthetic",
+      "registry_mode": "SYNTHETIC",
+      "registry_prefix_content_hash": "a481f79ec1136118fbbb0861889a7ab0948f4dfeddf84a641a3885b29611bf24",
+      "registry_prefix_seq": 0,
+      "s0_max_time_utc": "2026-03-31T23:57:00.000000Z",
+      "static_sources_digest": "74705b283467bf8a650ec40d18a62ce7e6002bb1d08afa776b46bcecbaa4b4ff",
+      "time_proof_content_hash": "27e070b6c9fe291a69e56347bd74aee28d98084f4a0464add691ee8ab003dce7",
+      "time_proof_type": "SYNTHETIC_FIXTURE",
+      "version": "gate_v_exposure_attestation_v1"
+    }
+  },
+  "V2_non_ascii_attestor": {
+    "COUNTER_VECTOR_ensure_ascii_true_hash": "339a38579b3e0d32199af47fbe0d7d80e1a0d26e8e4a7ff23e9abda55b9d0e58",
+    "COUNTER_VECTOR_nfd_attestor_hash": "b6ef45fdeb571695791962705bd181200bd3fc82c57e4fc7166e878c6345480c",
+    "attestation_content_hash": "6d3a77a54c184900fea379d25d2fa481fdf3fef8185c39d32169b2e9ba8e3d04",
+    "attestor": "Amélie Müller — 山田"
+  },
+  "V3_seq_and_order": {
+    "reversed_key_order_hash_equals_v1": true,
+    "seq2_attestation_content_hash": "83b8a36ba4ad4c34c2b135ebd935575ee7c58229712c1f77770751f2c29ca111"
+  },
+  "V4_self_reference": {
+    "hash_with_zero_placeholder_equals_v1": true
+  },
+  "V5_observation": {
+    "COUNTER_VECTOR_slot2_altered_bytes_utf8": "{\"synthetic\":\"slot-2!\"}\n",
+    "COUNTER_VECTOR_slot2_altered_history_digest": "424787848c7702655bf9c67ce0ed239350ccc3b8f6669ba5215802390e5e15fa",
+    "attestation_observation": {
+      "highest_seq_observed": 2,
+      "history_digest": "09fb4220105754e07593136fa813f33b57b6aa4ff19de781a58d614cada9cb37",
+      "inventory_id": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+      "pinned_file_sha256": "1c40e7d4844401e4ea2b865ea7a0250482b140bca27119a0e2b84881cc090275",
+      "pinned_seq": 2,
+      "slot_count": 2,
+      "version": "gate_v_attestation_observation_v1"
+    },
+    "history_digest": "09fb4220105754e07593136fa813f33b57b6aa4ff19de781a58d614cada9cb37",
+    "slot_files_sha256": [
+      {
+        "file_sha256": "be1b51671830302d5634dd76805c8b8f0e0710a715363a3f1fc10f11369b5785",
+        "seq": 1
+      },
+      {
+        "file_sha256": "1c40e7d4844401e4ea2b865ea7a0250482b140bca27119a0e2b84881cc090275",
+        "seq": 2
+      }
+    ]
+  },
+  "V6_authorization": {
+    "authorization_content_hash": "babeb2ffe13dbeeec014759aa27c2b7ce6356620f658d73275235c13873cd423",
+    "record": {
+      "attestation_content_hash": "f0f29b9be53578dd0ea1a3f9dcbdc3dd56d427a6c39700a18c92963b834e0747",
+      "attestation_inventory_id": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+      "attestation_seq": 1,
+      "authorization_content_hash": "babeb2ffe13dbeeec014759aa27c2b7ce6356620f658d73275235c13873cd423",
+      "authorization_seq": 1,
+      "authorizer": "Alice Martin",
+      "campaign_id": "gate_v_v2_3dc260b2472062d9c57bd930b02f23831d917b8f3e3234b6d63964a53c31d3aa",
+      "claim_id": "bb35582874c9b4ff26c119ae2f3f1c8a848e215f1860fd71d7c4c69818cf8edc",
+      "code_identity_hash": "ea9cc75b98f190440f7bb39db4728c5a50cef251b1ac1b553394c00299bf5791",
+      "commitment_content_hash": "fea694f5d073a47f9a2297c9aef20d11fcc1d3f0c311ab965bb5674b8fae27dd",
+      "commitment_id": "f6d517c92198b262d5474d19a844f7e110691a5cf7f237b73e8ffeafaf1d389a",
+      "created_at": "2026-07-02T09:30:00.000000Z",
+      "mode": "SYNTHETIC",
+      "overlap_projection_hash": "1b250ea199bec73d392caad39d1167d6edc43c81f20edead86eea52c52b94fc1",
+      "qualification_report_hash": null,
+      "registry_prefix_content_hash": "a481f79ec1136118fbbb0861889a7ab0948f4dfeddf84a641a3885b29611bf24",
+      "registry_prefix_seq": 0,
+      "version": "gate_v_acquisition_authorization_v1",
+      "window_end_utc": "2026-07-01T00:00:00.000000Z",
+      "window_start_utc": "2026-04-01T00:00:00.000000Z"
+    }
+  },
+  "V7_attachment_id": "dec3d4f95031ade9758e4a7ee63dc81afdfe9fbb4d60c8ea9525afc537dfa8b8",
+  "V7_attachment_id_inputs": {
+    "attachment_semantics_version": "gate_v_holdout_attachment_v1",
+    "commitment_id": "f6d517c92198b262d5474d19a844f7e110691a5cf7f237b73e8ffeafaf1d389a",
+    "holdout_snapshot_id": "local_csv:sha256:938ddb7fb9bc606310c23f7996294f1d04b1ab88c8dcbacb7e92143ccde96dbc",
+    "ingestion_record_content_hash": "f8296d0340646f5b161466342bd2112fe4087f030bb26634fad70b794e2add66",
+    "research_snapshot_id": "local_csv:sha256:ec18eac8d758b1eba52d3c10d39adc6dd9806472cb4ae069635d383d9086a513"
+  },
+  "V8_rfc3161_imprint": {
+    "COUNTER_VECTOR_sha256_of_hex_text": "e504b8aac6b8886e6cc742c5d5513eb7051b55db713d51c0fc5ce9d4ead9bef4",
+    "imprint_bytes_hex": "a481f79ec1136118fbbb0861889a7ab0948f4dfeddf84a641a3885b29611bf24",
+    "imprint_len": 32,
+    "reservation_content_hash": "a481f79ec1136118fbbb0861889a7ab0948f4dfeddf84a641a3885b29611bf24"
+  },
+  "V9_persisted_bytes": {
+    "attestation_slot_1_file_sha256": "ff9ce219e762368755fb71efa5c22050b826d9fbd78fde851d9e96603b5ea3c9",
+    "observation_for_single_slot_chain": {
+      "highest_seq_observed": 1,
+      "history_digest": "7f94e2d88b0c2f1ce0fcf390c48221e99e3066014e257489f161db6eb307ea4f",
+      "inventory_id": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+      "pinned_file_sha256": "ff9ce219e762368755fb71efa5c22050b826d9fbd78fde851d9e96603b5ea3c9",
+      "pinned_seq": 1,
+      "slot_count": 1,
+      "version": "gate_v_attestation_observation_v1"
+    },
+    "observation_normative_bytes_len": 386,
+    "persisted_len": 2234
+  },
+  "campaign_id": "gate_v_v2_3dc260b2472062d9c57bd930b02f23831d917b8f3e3234b6d63964a53c31d3aa",
+  "chronology_facts": {
+    "anchor_margin_seconds": 86400,
+    "commitment_t_sel_utc": "2026-03-15T00:00:00.000000Z",
+    "ingested_at_utc": "2026-07-01T06:00:00.000000Z",
+    "ingestion_range_matches": true,
+    "reservation_durable": true,
+    "s0_max_time_utc": "2026-03-31T23:57:00.000000Z",
+    "time_proof": {
+      "bound_utc": "2026-03-20T12:00:00.000000Z",
+      "status": "VALID",
+      "targets_own_reservation": true
+    }
+  },
+  "inventory_id": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+  "recipe": "sha256(json.dumps(obj, sort_keys=True, separators=(',',':'), ensure_ascii=False, allow_nan=False).encode('utf-8')), clé propre exclue de la préimage"
+}
