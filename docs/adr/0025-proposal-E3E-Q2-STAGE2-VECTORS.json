@@ -1,0 +1,424 @@
+{
+  "csv": {
+    "V1_close_equals_ws": "time,open,high,low,close,tick_volume,spread\n2025-12-31 23:51:00,100.10,100.30,100.00,100.20,7,180\n2025-12-31 23:54:00,100.20,100.40,100.10,100.30,9,180\n2025-12-31 23:57:00,100.30,100.50,100.20,100.40,11,180\n",
+    "V2_bar_inside_W": "time,open,high,low,close,tick_volume,spread\n2025-12-31 23:54:00,100.20,100.40,100.10,100.30,9,180\n2025-12-31 23:57:00,100.30,100.50,100.20,100.40,11,180\n2026-01-01 00:00:00,100.40,100.60,100.30,100.50,13,180\n",
+    "V3_last_bar_straddles_ws": "time,open,high,low,close,tick_volume,spread\n2025-12-31 23:52:00,100.10,100.30,100.00,100.20,7,180\n2025-12-31 23:55:00,100.20,100.40,100.10,100.30,9,180\n2025-12-31 23:58:00,100.30,100.50,100.20,100.40,11,180\n"
+  },
+  "frames": {
+    "V1_close_equals_ws": {
+      "dataset_snapshot_id": "local_csv:sha256:8d43f5576f03a0f39ab24409ae9d12152a8a49ab9d48e4af3f1e2e83b8d7dea6",
+      "expected_verdict_when_frame_equals_s0": "NO_OVERLAP_POSSIBLE",
+      "frame": {
+        "bar_duration_seconds": 180,
+        "columns": [
+          {
+            "kind": "time_us",
+            "name": "time"
+          },
+          {
+            "kind": "f64",
+            "name": "open"
+          },
+          {
+            "kind": "f64",
+            "name": "high"
+          },
+          {
+            "kind": "f64",
+            "name": "low"
+          },
+          {
+            "kind": "f64",
+            "name": "close"
+          },
+          {
+            "kind": "i64",
+            "name": "tick_volume"
+          },
+          {
+            "kind": "i64",
+            "name": "spread"
+          }
+        ],
+        "first_open_utc": "2025-12-31T23:51:00.000000Z",
+        "frame_digest_version": "gate_v_frame_digest_v1",
+        "frame_sha256": "cf582fa6884fc5ab0bfae6bd62b126c1ee669ca5ed74d110ce76ca4c475185c7",
+        "last_close_utc_exclusive": "2026-01-01T00:00:00.000000Z",
+        "last_open_utc": "2025-12-31T23:57:00.000000Z",
+        "row_count": 3,
+        "time_semantics": "naive_utc_declared"
+      },
+      "source_sha256": "8d43f5576f03a0f39ab24409ae9d12152a8a49ab9d48e4af3f1e2e83b8d7dea6",
+      "source_size_bytes": 207
+    },
+    "V2_bar_inside_W": {
+      "dataset_snapshot_id": "local_csv:sha256:7d4b35790084c947faa0a1fc465dbdffbedab8c281c613951ddeec911b3ffdc9",
+      "expected_verdict_when_frame_equals_s0": "OVERLAPS_P2_PRIME",
+      "frame": {
+        "bar_duration_seconds": 180,
+        "columns": [
+          {
+            "kind": "time_us",
+            "name": "time"
+          },
+          {
+            "kind": "f64",
+            "name": "open"
+          },
+          {
+            "kind": "f64",
+            "name": "high"
+          },
+          {
+            "kind": "f64",
+            "name": "low"
+          },
+          {
+            "kind": "f64",
+            "name": "close"
+          },
+          {
+            "kind": "i64",
+            "name": "tick_volume"
+          },
+          {
+            "kind": "i64",
+            "name": "spread"
+          }
+        ],
+        "first_open_utc": "2025-12-31T23:54:00.000000Z",
+        "frame_digest_version": "gate_v_frame_digest_v1",
+        "frame_sha256": "974c02e2a8c17ff3aaebad024481e7d35bb364bb481a47bad3c936df38381f4a",
+        "last_close_utc_exclusive": "2026-01-01T00:03:00.000000Z",
+        "last_open_utc": "2026-01-01T00:00:00.000000Z",
+        "row_count": 3,
+        "time_semantics": "naive_utc_declared"
+      },
+      "source_sha256": "7d4b35790084c947faa0a1fc465dbdffbedab8c281c613951ddeec911b3ffdc9",
+      "source_size_bytes": 208
+    },
+    "V3_last_bar_straddles_ws": {
+      "dataset_snapshot_id": "local_csv:sha256:51d0e06acd720cc1c90f938e935fea940271448d1c8ff0df35f818650c588486",
+      "expected_verdict_when_frame_equals_s0": "OVERLAPS_P2_PRIME",
+      "frame": {
+        "bar_duration_seconds": 180,
+        "columns": [
+          {
+            "kind": "time_us",
+            "name": "time"
+          },
+          {
+            "kind": "f64",
+            "name": "open"
+          },
+          {
+            "kind": "f64",
+            "name": "high"
+          },
+          {
+            "kind": "f64",
+            "name": "low"
+          },
+          {
+            "kind": "f64",
+            "name": "close"
+          },
+          {
+            "kind": "i64",
+            "name": "tick_volume"
+          },
+          {
+            "kind": "i64",
+            "name": "spread"
+          }
+        ],
+        "first_open_utc": "2025-12-31T23:52:00.000000Z",
+        "frame_digest_version": "gate_v_frame_digest_v1",
+        "frame_sha256": "3ea4ae8ea57b37dc9f74ce0c8ea3b2c2daa4b092c1effbeabc523a3095a0bb0d",
+        "last_close_utc_exclusive": "2026-01-01T00:01:00.000000Z",
+        "last_open_utc": "2025-12-31T23:58:00.000000Z",
+        "row_count": 3,
+        "time_semantics": "naive_utc_declared"
+      },
+      "source_sha256": "51d0e06acd720cc1c90f938e935fea940271448d1c8ff0df35f818650c588486",
+      "source_size_bytes": 207
+    }
+  },
+  "ids": {
+    "mc": "gate_v_v2_abababababababababababababababababababababababababababababababab_monte_carlo",
+    "wf": "gate_v_v2_abababababababababababababababababababababababababababababababab_walk_forward"
+  },
+  "k1s2_semantics_version": "gate_v_k1s2_v1",
+  "mc_chain": {
+    "coverage_record": {
+      "binding_kind": "DERIVED",
+      "coverage_semantics_version": "gate_v_run_data_coverage_v1",
+      "inputs": [
+        {
+          "origin": "DECLARATION_FILE",
+          "path": "external:split_plan",
+          "role": "split_plan",
+          "sha256": "f96caf5b6f186c088a8462631d92aa3a5be1ea6d0f57ce58938eeee8c2edefd8",
+          "size": 9
+        },
+        {
+          "origin": "DECLARATION_FILE",
+          "path": "plan.json",
+          "role": "campaign_plan",
+          "sha256": "eaef616b44d572692200d961950966f6c254cdf82564a83d2afe76a2ff9053e6",
+          "size": 28
+        },
+        {
+          "origin": "SIBLING_RUN",
+          "path": "validations/gate_v_v2_abababababababababababababababababababababababababababababababab_walk_forward/validation_run.json",
+          "role": "parent_validation_run",
+          "sha256": "9a257ab355585ff89e2a847c01f8fbb78beba4594846f9bccf5863d720bfcac4",
+          "size": 956
+        },
+        {
+          "origin": "PARENT_SEALED_OUTPUT",
+          "path": "walk_forward/folds/fold_000/oos_trades.csv",
+          "role": "oos_trades:000",
+          "sha256": "07c1e3c274ab091f88632afa41648704843b8d67265bebe78e8d5f5bc12e5fe4",
+          "size": 55
+        }
+      ],
+      "parent_run_record_sha256": "9a257ab355585ff89e2a847c01f8fbb78beba4594846f9bccf5863d720bfcac4",
+      "parent_seal_sha256": "570a679591c5578cdaef24cba3ecff36aa111c97e4931ca77909b405361beea5",
+      "parent_validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_walk_forward",
+      "validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_monte_carlo",
+      "validation_type": "monte_carlo"
+    },
+    "coverage_sha256": "23392b149496eccf6e2013d1eed4cdb4db6d9c79f4636f3921913ddeede680dd",
+    "evidence_hash": "4a2c743e3855a7a124f9edb1063a596d34133c25561ce54fd80a3ad81598dd42",
+    "expected_finding": {
+      "overlap": "NO_OVERLAP",
+      "source_kind": "VALIDATION_RUN_DERIVED",
+      "status": "RESOLVED",
+      "window_end_utc": "2026-01-01T00:00:00.000000Z",
+      "window_start_utc": "2025-12-31T23:51:00.000000Z"
+    },
+    "plan_json": "{\"campaign_id\":\"synthetic\"}\n",
+    "run_record": {
+      "completed_at": "2026-02-01T00:00:00+00:00",
+      "dataset_snapshot_id": "local_csv:sha256:8d43f5576f03a0f39ab24409ae9d12152a8a49ab9d48e4af3f1e2e83b8d7dea6",
+      "evidence": {
+        "note": "monte_carlo"
+      },
+      "research_run_id": "rr_synthetic",
+      "specification": {
+        "x": 1
+      },
+      "split_plan_id": "plan_synth",
+      "status": "completed",
+      "strategy_name": "synthetic",
+      "strategy_params": {},
+      "validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_monte_carlo",
+      "validation_type": "monte_carlo"
+    },
+    "run_record_sha256": "5ece0da0b2081c7ca521108601e7329b18bb3baf61000500a196d551c47d1669",
+    "seal_record": {
+      "coverage_sha256": "23392b149496eccf6e2013d1eed4cdb4db6d9c79f4636f3921913ddeede680dd",
+      "finalized_by_recovery": false,
+      "frame_sha256_after": null,
+      "output_artifacts": [],
+      "run_record_sha256": "5ece0da0b2081c7ca521108601e7329b18bb3baf61000500a196d551c47d1669",
+      "seal_semantics_version": "gate_v_run_seal_v1",
+      "sessions": [],
+      "validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_monte_carlo",
+      "validation_type": "monte_carlo"
+    },
+    "seal_sha256": "397d0349dbb2c304ba190e2723bb77f6001c2ae6928ee0fb57274e343aee5514",
+    "split_plan_json": "{\"sp\":1}\n"
+  },
+  "s0_frame_facts": {
+    "dataset_snapshot_id": "local_csv:sha256:8d43f5576f03a0f39ab24409ae9d12152a8a49ab9d48e4af3f1e2e83b8d7dea6",
+    "frame": {
+      "bar_duration_seconds": 180,
+      "columns": [
+        {
+          "kind": "time_us",
+          "name": "time"
+        },
+        {
+          "kind": "f64",
+          "name": "open"
+        },
+        {
+          "kind": "f64",
+          "name": "high"
+        },
+        {
+          "kind": "f64",
+          "name": "low"
+        },
+        {
+          "kind": "f64",
+          "name": "close"
+        },
+        {
+          "kind": "i64",
+          "name": "tick_volume"
+        },
+        {
+          "kind": "i64",
+          "name": "spread"
+        }
+      ],
+      "first_open_utc": "2025-12-31T23:51:00.000000Z",
+      "frame_digest_version": "gate_v_frame_digest_v1",
+      "frame_sha256": "cf582fa6884fc5ab0bfae6bd62b126c1ee669ca5ed74d110ce76ca4c475185c7",
+      "last_close_utc_exclusive": "2026-01-01T00:00:00.000000Z",
+      "last_open_utc": "2025-12-31T23:57:00.000000Z",
+      "row_count": 3,
+      "time_semantics": "naive_utc_declared"
+    },
+    "source_sha256": "8d43f5576f03a0f39ab24409ae9d12152a8a49ab9d48e4af3f1e2e83b8d7dea6",
+    "source_size_bytes": 207
+  },
+  "s0_frame_facts_sha256": "cdcdcde70f0316be82734b9d35027ddbb87f21e05ce9c53f58ae7c22de7cb6c3",
+  "wf_chain": {
+    "coverage_record": {
+      "binding_kind": "MARKET_DATA_FRAME",
+      "coverage_semantics_version": "gate_v_run_data_coverage_v1",
+      "dataset_snapshot_id": "local_csv:sha256:8d43f5576f03a0f39ab24409ae9d12152a8a49ab9d48e4af3f1e2e83b8d7dea6",
+      "frame": {
+        "bar_duration_seconds": 180,
+        "columns": [
+          {
+            "kind": "time_us",
+            "name": "time"
+          },
+          {
+            "kind": "f64",
+            "name": "open"
+          },
+          {
+            "kind": "f64",
+            "name": "high"
+          },
+          {
+            "kind": "f64",
+            "name": "low"
+          },
+          {
+            "kind": "f64",
+            "name": "close"
+          },
+          {
+            "kind": "i64",
+            "name": "tick_volume"
+          },
+          {
+            "kind": "i64",
+            "name": "spread"
+          }
+        ],
+        "first_open_utc": "2025-12-31T23:51:00.000000Z",
+        "frame_digest_version": "gate_v_frame_digest_v1",
+        "frame_sha256": "cf582fa6884fc5ab0bfae6bd62b126c1ee669ca5ed74d110ce76ca4c475185c7",
+        "last_close_utc_exclusive": "2026-01-01T00:00:00.000000Z",
+        "last_open_utc": "2025-12-31T23:57:00.000000Z",
+        "row_count": 3,
+        "time_semantics": "naive_utc_declared"
+      },
+      "loader_id": "gate_v_s0_frame_loader_v1",
+      "runtime": {
+        "numpy": "2.2.6",
+        "pandas": "3.0.3",
+        "python": "3.13.7"
+      },
+      "source_sha256": "8d43f5576f03a0f39ab24409ae9d12152a8a49ab9d48e4af3f1e2e83b8d7dea6",
+      "source_size_bytes": 207,
+      "validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_walk_forward"
+    },
+    "coverage_sha256": "5e8a1baad41741aec523377a4a366e3849f494a0e7a640f074b12e20c9bae10e",
+    "evidence_hash": "131f4b80d8f5dc0605fc1ab3e86d4477a79e753aa558bfc59e3ca4d019d74ff6",
+    "expected_finding": {
+      "overlap": "NO_OVERLAP",
+      "source_kind": "VALIDATION_RUN_PRE_HOLDOUT",
+      "status": "RESOLVED",
+      "window_end_utc": "2026-01-01T00:00:00.000000Z",
+      "window_start_utc": "2025-12-31T23:51:00.000000Z"
+    },
+    "outputs": {
+      "walk_forward/folds/fold_000/oos_trades.csv": "date_entree,resultat_net\n2025-09-02T10:00:00+02:00,1.5\n",
+      "walk_forward/manifest.json": "{\"m\":1}\n"
+    },
+    "run_record": {
+      "completed_at": "2026-02-01T00:00:00+00:00",
+      "dataset_snapshot_id": "local_csv:sha256:8d43f5576f03a0f39ab24409ae9d12152a8a49ab9d48e4af3f1e2e83b8d7dea6",
+      "evidence": {
+        "aggregate": {
+          "total_oos_trades": 3
+        },
+        "execution_status": "completed",
+        "fold_results": [
+          {
+            "definition": {
+              "effective_boundary": "2025-09-01T00:00:00+02:00",
+              "effective_test_end": "2025-10-01T00:00:00+02:00",
+              "fold_id": "fold_000",
+              "fold_index": 0,
+              "train_start": "2025-06-01T00:00:00+02:00"
+            },
+            "fold_id": "fold_000"
+          }
+        ]
+      },
+      "research_run_id": "rr_synthetic",
+      "specification": {
+        "x": 1
+      },
+      "split_plan_id": "plan_synth",
+      "status": "completed",
+      "strategy_name": "synthetic",
+      "strategy_params": {},
+      "validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_walk_forward",
+      "validation_type": "walk_forward"
+    },
+    "run_record_sha256": "9a257ab355585ff89e2a847c01f8fbb78beba4594846f9bccf5863d720bfcac4",
+    "seal_record": {
+      "coverage_sha256": "5e8a1baad41741aec523377a4a366e3849f494a0e7a640f074b12e20c9bae10e",
+      "finalized_by_recovery": false,
+      "frame_sha256_after": "cf582fa6884fc5ab0bfae6bd62b126c1ee669ca5ed74d110ce76ca4c475185c7",
+      "output_artifacts": [
+        {
+          "path": "walk_forward/folds/fold_000/oos_trades.csv",
+          "sha256": "07c1e3c274ab091f88632afa41648704843b8d67265bebe78e8d5f5bc12e5fe4",
+          "size": 55
+        },
+        {
+          "path": "walk_forward/manifest.json",
+          "sha256": "41cba73e77218b0a6ec1a55fa7a2c8823cfdde92ca33dfd3af54f49517a7352d",
+          "size": 8
+        }
+      ],
+      "run_record_sha256": "9a257ab355585ff89e2a847c01f8fbb78beba4594846f9bccf5863d720bfcac4",
+      "seal_semantics_version": "gate_v_run_seal_v1",
+      "sessions": [
+        {
+          "session_index": 1,
+          "session_sha256": "dc011a2adb4caab376fa3212d7a487e78be42b2775f92e6364bf647f33f88cad"
+        }
+      ],
+      "validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_walk_forward",
+      "validation_type": "walk_forward"
+    },
+    "seal_sha256": "570a679591c5578cdaef24cba3ecff36aa111c97e4931ca77909b405361beea5",
+    "session_record": {
+      "coverage_sha256": "5e8a1baad41741aec523377a4a366e3849f494a0e7a640f074b12e20c9bae10e",
+      "frame_row_count": 3,
+      "frame_sha256_before": "cf582fa6884fc5ab0bfae6bd62b126c1ee669ca5ed74d110ce76ca4c475185c7",
+      "resumed": false,
+      "session_index": 1,
+      "session_semantics_version": "gate_v_run_session_v1",
+      "validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_walk_forward"
+    },
+    "session_sha256": "dc011a2adb4caab376fa3212d7a487e78be42b2775f92e6364bf647f33f88cad"
+  },
+  "window": {
+    "we": "2026-04-01T00:00:00.000000Z",
+    "ws": "2026-01-01T00:00:00.000000Z"
+  }
+}

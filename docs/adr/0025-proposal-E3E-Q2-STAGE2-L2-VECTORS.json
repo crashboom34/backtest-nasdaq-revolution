@@ -1,0 +1,151 @@
+{
+  "base_chain_sha256": {
+    "coverage": "5e8a1baad41741aec523377a4a366e3849f494a0e7a640f074b12e20c9bae10e",
+    "run_record": "9a257ab355585ff89e2a847c01f8fbb78beba4594846f9bccf5863d720bfcac4",
+    "seal": "570a679591c5578cdaef24cba3ecff36aa111c97e4931ca77909b405361beea5",
+    "session": "dc011a2adb4caab376fa3212d7a487e78be42b2775f92e6364bf647f33f88cad"
+  },
+  "dependency_order": [
+    "coverage",
+    "session_k",
+    "run_record",
+    "seal"
+  ],
+  "l2_vectors_version": "gate_v_k1s2_l2_vectors_v1",
+  "note": "Recalcules par un programme independant (json + hashlib, sans importer gate_v_run_evidence_models) a partir de la chaine WF de VECTORS.json. Fixtures synthetiques.",
+  "parameter_stability_seal": {
+    "record": {
+      "coverage_sha256": "23392b149496eccf6e2013d1eed4cdb4db6d9c79f4636f3921913ddeede680dd",
+      "finalized_by_recovery": false,
+      "frame_sha256_after": null,
+      "output_artifacts": [],
+      "run_record_sha256": "5ece0da0b2081c7ca521108601e7329b18bb3baf61000500a196d551c47d1669",
+      "seal_semantics_version": "gate_v_run_seal_v1",
+      "sessions": [],
+      "validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_parameter_stability_fold_000",
+      "validation_type": "parameter_stability"
+    },
+    "sha256": "ce20290cc6e0a672afdc02ac8581ee10086bf6a42cd3805e5ebae76e4d3f5383"
+  },
+  "recovery_seal": {
+    "record": {
+      "coverage_sha256": "5e8a1baad41741aec523377a4a366e3849f494a0e7a640f074b12e20c9bae10e",
+      "finalized_by_recovery": true,
+      "frame_sha256_after": null,
+      "output_artifacts": [],
+      "run_record_sha256": "9a257ab355585ff89e2a847c01f8fbb78beba4594846f9bccf5863d720bfcac4",
+      "seal_semantics_version": "gate_v_run_seal_v1",
+      "sessions": [
+        {
+          "session_index": 1,
+          "session_sha256": "dc011a2adb4caab376fa3212d7a487e78be42b2775f92e6364bf647f33f88cad"
+        }
+      ],
+      "validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_walk_forward",
+      "validation_type": "walk_forward"
+    },
+    "sha256": "6b114fc9bc77579ac3d40150bfc3446bf4a98c17e66d4c88d240efcb59cbeb79"
+  },
+  "runtime_variant_coverage": {
+    "record": {
+      "binding_kind": "MARKET_DATA_FRAME",
+      "coverage_semantics_version": "gate_v_run_data_coverage_v1",
+      "dataset_snapshot_id": "local_csv:sha256:8d43f5576f03a0f39ab24409ae9d12152a8a49ab9d48e4af3f1e2e83b8d7dea6",
+      "frame": {
+        "bar_duration_seconds": 180,
+        "columns": [
+          {
+            "kind": "time_us",
+            "name": "time"
+          },
+          {
+            "kind": "f64",
+            "name": "open"
+          },
+          {
+            "kind": "f64",
+            "name": "high"
+          },
+          {
+            "kind": "f64",
+            "name": "low"
+          },
+          {
+            "kind": "f64",
+            "name": "close"
+          },
+          {
+            "kind": "i64",
+            "name": "tick_volume"
+          },
+          {
+            "kind": "i64",
+            "name": "spread"
+          }
+        ],
+        "first_open_utc": "2025-12-31T23:51:00.000000Z",
+        "frame_digest_version": "gate_v_frame_digest_v1",
+        "frame_sha256": "cf582fa6884fc5ab0bfae6bd62b126c1ee669ca5ed74d110ce76ca4c475185c7",
+        "last_close_utc_exclusive": "2026-01-01T00:00:00.000000Z",
+        "last_open_utc": "2025-12-31T23:57:00.000000Z",
+        "row_count": 3,
+        "time_semantics": "naive_utc_declared"
+      },
+      "loader_id": "gate_v_s0_frame_loader_v1",
+      "runtime": {
+        "numpy": "2.2.6",
+        "pandas": "3.0.3",
+        "python": "3.13.8"
+      },
+      "source_sha256": "8d43f5576f03a0f39ab24409ae9d12152a8a49ab9d48e4af3f1e2e83b8d7dea6",
+      "source_size_bytes": 207,
+      "validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_walk_forward"
+    },
+    "semantically_equal_to_base": true,
+    "sha256": "36d6a4db2c1d5487b15b4aa62d68191dd2e3703924c8a557d7893a51206427dd"
+  },
+  "two_sessions_chain": {
+    "seal_record": {
+      "coverage_sha256": "5e8a1baad41741aec523377a4a366e3849f494a0e7a640f074b12e20c9bae10e",
+      "finalized_by_recovery": false,
+      "frame_sha256_after": "cf582fa6884fc5ab0bfae6bd62b126c1ee669ca5ed74d110ce76ca4c475185c7",
+      "output_artifacts": [
+        {
+          "path": "walk_forward/folds/fold_000/oos_trades.csv",
+          "sha256": "07c1e3c274ab091f88632afa41648704843b8d67265bebe78e8d5f5bc12e5fe4",
+          "size": 55
+        },
+        {
+          "path": "walk_forward/manifest.json",
+          "sha256": "41cba73e77218b0a6ec1a55fa7a2c8823cfdde92ca33dfd3af54f49517a7352d",
+          "size": 8
+        }
+      ],
+      "run_record_sha256": "9a257ab355585ff89e2a847c01f8fbb78beba4594846f9bccf5863d720bfcac4",
+      "seal_semantics_version": "gate_v_run_seal_v1",
+      "sessions": [
+        {
+          "session_index": 1,
+          "session_sha256": "dc011a2adb4caab376fa3212d7a487e78be42b2775f92e6364bf647f33f88cad"
+        },
+        {
+          "session_index": 2,
+          "session_sha256": "62c28b3b3ec7f207116d8a302e332247cceb1d7b982a24a0ca00834fe88c1a52"
+        }
+      ],
+      "validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_walk_forward",
+      "validation_type": "walk_forward"
+    },
+    "seal_sha256": "a93aefaa3310474db8026ad96a77e47fef917ebaaef5681db4a175549282c826",
+    "session_2_record": {
+      "coverage_sha256": "5e8a1baad41741aec523377a4a366e3849f494a0e7a640f074b12e20c9bae10e",
+      "frame_row_count": 3,
+      "frame_sha256_before": "cf582fa6884fc5ab0bfae6bd62b126c1ee669ca5ed74d110ce76ca4c475185c7",
+      "resumed": true,
+      "session_index": 2,
+      "session_semantics_version": "gate_v_run_session_v1",
+      "validation_run_id": "gate_v_v2_abababababababababababababababababababababababababababababababab_walk_forward"
+    },
+    "session_2_sha256": "62c28b3b3ec7f207116d8a302e332247cceb1d7b982a24a0ca00834fe88c1a52"
+  }
+}
