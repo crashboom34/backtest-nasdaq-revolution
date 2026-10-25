@@ -7,6 +7,15 @@ lectures strictes), 23.29.5 (provenance des compteurs), 23.30.1 (relevé des pre
 Fichier : `<campaign_dir>/exposure/inventory_<inventory_content_hash>.json`, version `gate_v_exposure_inventory_v1`. Plusieurs A0 de
 même `inventory_id` coexistent (comptabilité, provenance ou `created_at` différents). Jamais d'écrasement ni de suppression.
 
+Deux FORMATS de persistance, distincts de la version scientifique d'E3-A (`version`, inchangée) et choisis par la présence de la clé
+`persistence_format` (jeux de clés fermés, aucun mélange) :
+- format 1 (HISTORIQUE, implicite, jamais écrit comme clé) : les 24 clés de `A0_RECORD_KEYS`, des pins de scan à 5 clés. Octets, hash et
+  relecture strictement inchangés ;
+- format 2 (`gate_v_exposure_a0_format_v2`) : ces 24 clés plus `persistence_format` ; chaque pin dont la table de règles comporte des règles
+  `HASHED_FILE` (déclarée dans `HASHED_RULES_DIGESTS`, vide aujourd'hui : aucune table B3 publiée n'en comporte) porte en plus `hash_limits`
+  (trois entiers stricts de `HashLimits`, ceux que le scanner a RÉELLEMENT appliqués) ; tout autre pin n'en porte jamais. Le producteur n'écrit
+  le format 2 que si un scan a appliqué des `hash_limits` ; sinon le format 1 est écrit à l'identique. Aucune formule d'identité d'E3-A ne change.
+
 Trois identités distinctes, aucune ne remplace l'autre :
 - `inventory_id` : identité SCIENTIFIQUE (E3-A) ; ni comptabilité, ni provenance, ni étage, ni horodatage ;
 - `inventory_content_digest` : `inventory_id` + les six compteurs (E3-A), sans provenance ;
@@ -64,7 +73,7 @@ from gate_v_exposure_inventory import (
     ExposureInventoryAssembly,
     TrialAccountingProvenance,
 )
-from gate_v_exposure_scan import ScanLimits, StrictJsonError, parse_strict_json
+from gate_v_exposure_scan import HashLimits, ScanLimits, StrictJsonError, parse_strict_json
 from gate_v_exposure_sources import normalize_window
 from gate_v_final_holdout_protocol import (
     EXPOSURE_CLASSIFICATION_RULES_VERSION,
@@ -94,6 +103,15 @@ A0_RECORD_KEYS = (
 _COUNTER_NAMES = ("research_runs", "strategies", "campaigns", "abandoned_reservations", "failed_ingestion_attempts", "void_commitments")
 _LIMIT_NAMES = ("max_roots", "max_entries", "max_depth", "max_json_bytes", "max_total_read_bytes", "max_json_depth",
                 "max_name_length", "max_path_length", "max_attempts")
+# Format de persistance (distinct de la version scientifique d'E3-A) : voir l'en-tête du module.
+A0_PERSISTENCE_FORMAT_V1 = "gate_v_exposure_a0_format_v1"      # format historique : IMPLICITE (aucune clé), étiquette de relecture seulement
+A0_PERSISTENCE_FORMAT_V2 = "gate_v_exposure_a0_format_v2"
+A0_RECORD_KEYS_V2 = A0_RECORD_KEYS + ("persistence_format",)
+HASH_LIMIT_NAMES = ("max_hashed_file_bytes", "max_total_hashed_bytes", "max_hashed_files")
+_PIN_KEYS = ("layout", "rules_digest", "limits", "hooks_used", "roots")
+# Triplets (version de B3, disposition, rules_digest) des tables de règles qui comportent des règles `HASHED_FILE`. VIDE : aucune table B3 publiée
+# (v2, v3, v4) n'en comporte. B3 v5 y inscrira ses tables ; un pin `hash_limits` est alors EXIGÉ pour elles et INTERDIT pour toute autre table.
+HASHED_RULES_DIGESTS = frozenset()
 
 
 class StoreFailure(str, Enum):
@@ -187,14 +205,23 @@ def _scan_pins(interpretation) -> list:
     pins = []
     for item in sorted(interpretation.scans, key=lambda scanned: scanned.layout.value):
         scan = item.scan
-        pins.append({
+        pin = {
             "layout": item.layout.value,
             "rules_digest": scan.rules_digest,
             "limits": {name: getattr(scan.limits, name) for name in _LIMIT_NAMES},
             "hooks_used": scan.hooks_used,
             "roots": [{"label": root.label, "resolved_path": root.path, "may_be_empty": root.may_be_empty}
                       for root in sorted(scan.roots, key=lambda scanned_root: scanned_root.label)],
-        })
+        }
+        hashed_table = (interpretation.semantics_version, item.layout, scan.rules_digest) in HASHED_RULES_DIGESTS
+        if hashed_table and scan.hash_limits is None:
+            raise ValueError(f"la table {item.layout.value} comporte des règles HASHED_FILE : le scan doit avoir appliqué des hash_limits (aucun plafond implicite).")
+        if not hashed_table and scan.hash_limits is not None:
+            raise ValueError(f"hash_limits appliqués à la table {item.layout.value}, qui ne comporte aucune règle HASHED_FILE connue : "
+                             "le pin ne serait pas relisible, et un plafond ne doit jamais être abandonné en silence.")
+        if scan.hash_limits is not None:
+            pin["hash_limits"] = {name: getattr(scan.hash_limits, name) for name in HASH_LIMIT_NAMES}   # les plafonds RÉELLEMENT appliqués par le scanner
+        pins.append(pin)
     return pins
 
 
@@ -207,6 +234,7 @@ def build_exposure_inventory_record(assembly: ExposureInventoryAssembly, *, crea
     created = _normalized_created_at(created_at)
     inventory, context, interpretation = assembly.inventory, assembly.own_context, assembly.interpretation
     provenance = assembly.accounting_provenance
+    scan_pins = _scan_pins(interpretation)
     record = {
         "version": EXPOSURE_INVENTORY_SEMANTICS_VERSION,
         "created_at": created,
@@ -233,7 +261,7 @@ def build_exposure_inventory_record(assembly: ExposureInventoryAssembly, *, crea
             "b3_interpreters": interpretation.semantics_version,
             "b4_assembly": assembly.semantics_version,
         },
-        "scan_pins": _scan_pins(interpretation),
+        "scan_pins": scan_pins,
         "plans": [{"source_id": p.source_id, "split_plan_id": p.split_plan_id, "fingerprint": p.fingerprint,
                    "dataset_snapshot_id": p.dataset_snapshot_id, "final_holdout_start_utc": p.final_holdout_start_utc,
                    "final_holdout_end_utc": p.final_holdout_end_utc, "content_hash": p.content_hash}
@@ -244,6 +272,8 @@ def build_exposure_inventory_record(assembly: ExposureInventoryAssembly, *, crea
                                "manifest_content_hash": e.manifest_content_hash}
                               for e in interpretation.exposure_evidence],
     }
+    if any("hash_limits" in pin for pin in scan_pins):
+        record["persistence_format"] = A0_PERSISTENCE_FORMAT_V2        # sinon : format 1, octets strictement identiques à l'historique
     record = _sorted_deep(record)
     record["inventory_content_hash"] = compute_inventory_content_hash(record)
     return _sorted_deep(record)
@@ -453,6 +483,7 @@ class ScanPin:
     limits: ScanLimits
     hooks_used: bool
     roots: tuple
+    hash_limits: Optional[HashLimits] = None       # format 2 seulement : plafonds des fichiers hachés appliqués par le scan (None : table sans règle HASHED_FILE)
 
 
 _RULES_KEYS = ("e3a_inventory", "e3a_classification", "b3_interpreters", "b4_assembly")
@@ -499,6 +530,7 @@ class PersistedExposureInventory:
     non_oos_validations: tuple
     exposure_evidence: tuple
     rules_versions: RulesVersions                 # versions effectivement appliquées ; `is_current()` faux = lecture historique
+    persistence_format: str = A0_PERSISTENCE_FORMAT_V1     # format de persistance relu (distinct de la version scientifique d'E3-A)
 
 
 class _Schema(Exception):
@@ -600,9 +632,14 @@ def _provenance(item, where: str) -> TrialAccountingProvenance:
                   **{name: _enum(CounterProvenance, item[name], where) for name in _COUNTER_NAMES})
 
 
-def _scan_pin(item, where: str) -> ScanPin:
-    item = _object(item, ("layout", "rules_digest", "limits", "hooks_used", "roots"), where)
+def _scan_pin(item, where: str, format_2: bool = False) -> ScanPin:
+    with_hash_limits = format_2 and type(item) is dict and "hash_limits" in item        # format 1 : jeu de clés fermé à 5 clés, aucun `hash_limits`
+    item = _object(item, _PIN_KEYS + (("hash_limits",) if with_hash_limits else ()), where)
     limits = _object(item["limits"], _LIMIT_NAMES, f"{where}.limits")
+    hash_limits = None
+    if with_hash_limits:                                  # trois entiers stricts (booléens, flottants, null, texte refusés par `HashLimits`)
+        hashed = _object(item["hash_limits"], HASH_LIMIT_NAMES, f"{where}.hash_limits")
+        hash_limits = _build(HashLimits, where=f"{where}.hash_limits", **hashed)
     roots = []
     for index, root in enumerate(_array(item["roots"], f"{where}.roots")):
         root = _object(root, ("label", "resolved_path", "may_be_empty"), f"{where}.roots[{index}]")
@@ -613,7 +650,7 @@ def _scan_pin(item, where: str) -> ScanPin:
     _need([r.label for r in roots] == sorted({r.label for r in roots}), f"{where}.roots doit être trié par label, sans doublon")
     _need(_flag(item["hooks_used"], f"{where}.hooks_used") is False, f"{where}.hooks_used : un scan avec ScanHooks n'est jamais persisté")
     return ScanPin(_enum(RootLayout, item["layout"], where), _hex(item["rules_digest"], f"{where}.rules_digest"),
-                   _build(ScanLimits, where=f"{where}.limits", **limits), False, tuple(roots))
+                   _build(ScanLimits, where=f"{where}.limits", **limits), False, tuple(roots), hash_limits)
 
 
 def _plan(item, where: str) -> PlanIndexEntry:
@@ -719,12 +756,18 @@ def _parse_record(record: dict, path: Path, raw: bytes) -> PersistedExposureInve
             EXPOSURE_INVENTORY_SEMANTICS_VERSION, EXPOSURE_CLASSIFICATION_RULES_VERSION, B4_SEMANTICS_VERSION) or (
             recorded.b3_interpreters not in KNOWN_B3_VERSIONS):
         raise ExposureStoreError(StoreFailure.UNKNOWN_VERSION, f"rules_versions inconnues : {versions}")
-    pins = tuple(_scan_pin(item, f"scan_pins[{index}]") for index, item in enumerate(_array(record["scan_pins"], "scan_pins")))
+    format_2 = "persistence_format" in record
+    pins = tuple(_scan_pin(item, f"scan_pins[{index}]", format_2) for index, item in enumerate(_array(record["scan_pins"], "scan_pins")))
     _need([pin.layout.value for pin in pins] == sorted({pin.layout.value for pin in pins}), "scan_pins doit être trié par disposition, sans doublon")
     for pin in pins:                                     # la table épinglée doit être celle de la version de B3 enregistrée (23.31.6)
         if _KNOWN_RULES_DIGESTS[(recorded.b3_interpreters, pin.layout)] != pin.rules_digest:
             raise ExposureStoreError(StoreFailure.RULES_DIGEST_MISMATCH,
                                      f"scan_pins {pin.layout.value} : rules_digest différent de la table de {recorded.b3_interpreters}")
+        hashed_table = (recorded.b3_interpreters, pin.layout, pin.rules_digest) in HASHED_RULES_DIGESTS
+        _need(hashed_table == (pin.hash_limits is not None),
+              f"scan_pins {pin.layout.value} : hash_limits "
+              + ("absents alors que la table comporte des règles HASHED_FILE" if hashed_table else "présents alors que la table n'en comporte aucune"))
+    _need(not format_2 or any(pin.hash_limits is not None for pin in pins), "format 2 sans aucun plafond de fichiers hachés : le format 1 s'applique")
     labels = {root.label for pin in pins for root in pin.roots}
     _need(set(derived) <= labels, "derived_root_labels : un label ne correspond à aucune racine scannée")
     _need(scanned_roots == tuple(sorted(labels - set(derived))), "scanned_roots doit être égal aux racines scannées moins les racines dérivées")
@@ -757,7 +800,8 @@ def _parse_record(record: dict, path: Path, raw: bytes) -> PersistedExposureInve
         inventory_content_digest=stored["inventory_content_digest"], static_sources_digest=stored["static_sources_digest"],
         overlap_projection_hash=stored["overlap_projection_hash"], registry_id=registry_id, registry_chain_head=chain_head,
         derived_root_labels=derived, scan_pins=pins, plans=plans, non_oos_validations=notes, exposure_evidence=evidence,
-        rules_versions=recorded)
+        rules_versions=recorded,
+        persistence_format=A0_PERSISTENCE_FORMAT_V2 if format_2 else A0_PERSISTENCE_FORMAT_V1)
 
 
 def load_exposure_inventory(path, *, max_bytes: int = MAX_A0_BYTES) -> PersistedExposureInventory:
@@ -767,13 +811,19 @@ def load_exposure_inventory(path, *, max_bytes: int = MAX_A0_BYTES) -> Persisted
     target = Path(path)
     raw = read_strict_file(target, max_bytes=max_bytes)
     record = parse_strict_record(raw, max_bytes=max_bytes)
-    if type(record) is not dict or set(record) != set(A0_RECORD_KEYS):
-        raise ExposureStoreError(StoreFailure.SCHEMA, "jeu de clés du A0 inattendu")
+    if type(record) is not dict or set(record) not in (set(A0_RECORD_KEYS), set(A0_RECORD_KEYS_V2)):
+        raise ExposureStoreError(StoreFailure.SCHEMA, "jeu de clés du A0 inattendu (ni le format 1 historique, ni le format 2)")
     version = record["version"]
     if type(version) is not str:
         raise ExposureStoreError(StoreFailure.SCHEMA, "version doit être un texte")
     if version != EXPOSURE_INVENTORY_SEMANTICS_VERSION:
         raise ExposureStoreError(StoreFailure.UNKNOWN_VERSION, f"version inconnue : {version!r}")
+    if "persistence_format" in record:
+        persistence_format = record["persistence_format"]
+        if type(persistence_format) is not str:
+            raise ExposureStoreError(StoreFailure.SCHEMA, "persistence_format doit être un texte")
+        if persistence_format != A0_PERSISTENCE_FORMAT_V2:
+            raise ExposureStoreError(StoreFailure.UNKNOWN_VERSION, f"format de persistance inconnu : {persistence_format!r}")
     stored_hash = record["inventory_content_hash"]
     if type(stored_hash) is not str or _HEX64_RE.fullmatch(stored_hash) is None:
         raise ExposureStoreError(StoreFailure.SCHEMA, "inventory_content_hash doit être un SHA-256 hexadécimal minuscule")
