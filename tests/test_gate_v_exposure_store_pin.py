@@ -301,8 +301,10 @@ def unregistered_hashed_tables(source_rules, registry):
     return missing
 
 
-def test_every_published_b3_table_with_hashed_rules_is_registered_today_none_exists_and_the_registry_is_empty():
-    assert store.HASHED_RULES_DIGESTS == frozenset()
+def test_no_historical_b3_table_is_registered_none_of_them_has_a_hashed_rule_and_the_guard_finds_nothing_missing():
+    # B3 v5-A a inscrit SA table de campagne (voir tests/test_gate_v_exposure_store_v5.py) ; les tables v2, v3 et v4 ne comportent aucune règle HASHED_FILE.
+    assert not {version for version, _, _ in store.HASHED_RULES_DIGESTS} & set(b3.KNOWN_B3_VERSIONS)
+    assert not store.HASHED_RULES_DIGESTS & {(version, layout, digest) for version, layout, digest in b3.B3_RULES_DIGESTS}
     assert unregistered_hashed_tables(b3.source_rules, store.HASHED_RULES_DIGESTS) == []
 
 
@@ -352,4 +354,4 @@ def test_the_module_opens_no_admission_and_keeps_its_non_real_qualification_flag
     assert not {name for name in names if any(word in name.lower() for word in ("admission", "admit", "reserve", "reservation", "claim", "authoris", "authoriz"))}
     assert store.OPERATIONAL_LIMITS_QUALIFIED_FOR_REAL is False
     assert store.A0_PERSISTENCE_FORMAT_V2 == V2_FORMAT and store.A0_RECORD_KEYS_V2 == store.A0_RECORD_KEYS + ("persistence_format",)
-    assert store.HASH_LIMIT_NAMES == HL_NAMES and store.HASHED_RULES_DIGESTS == frozenset()          # aucune table publiée ne comporte HASHED_FILE
+    assert store.HASH_LIMIT_NAMES == HL_NAMES and len(store.HASHED_RULES_DIGESTS) == 1               # B3 v5-A : uniquement le triplet vérifié de sa table de campagne

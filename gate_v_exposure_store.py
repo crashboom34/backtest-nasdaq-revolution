@@ -12,7 +12,7 @@ Deux FORMATS de persistance, distincts de la version scientifique d'E3-A (`versi
 - format 1 (HISTORIQUE, implicite, jamais écrit comme clé) : les 24 clés de `A0_RECORD_KEYS`, des pins de scan à 5 clés. Octets, hash et
   relecture strictement inchangés ;
 - format 2 (`gate_v_exposure_a0_format_v2`) : ces 24 clés plus `persistence_format` ; chaque pin dont la table de règles comporte des règles
-  `HASHED_FILE` (déclarée dans `HASHED_RULES_DIGESTS`, vide aujourd'hui : aucune table B3 publiée n'en comporte) porte en plus `hash_limits`
+  `HASHED_FILE` (déclarée dans `HASHED_RULES_DIGESTS` : aujourd'hui la seule table de campagne de B3 v5-A ; aucune table B3 v2-v4 n'en comporte) porte en plus `hash_limits`
   (trois entiers stricts de `HashLimits`, ceux que le scanner a RÉELLEMENT appliqués) ; tout autre pin n'en porte jamais. Le producteur n'écrit
   le format 2 que si un scan a appliqué des `hash_limits` ; sinon le format 1 est écrit à l'identique. Aucune formule d'identité d'E3-A ne change.
 
@@ -34,9 +34,9 @@ indent=2, allow_nan=False) + "\\n"`, UTF-8 sans BOM, fins de ligne LF, sans flot
 les valeurs non finies : B5 lui passe un `dict` déjà trié récursivement dont la sérialisation est vérifiée octet pour octet.
 
 Versions de règles (ADR 0025 23.31.6) : l'A0 enregistre les versions appliquées et le `rules_digest` de chaque table scannée. La relecture
-exige des versions CONNUES et des digests égaux à ceux de la version de B3 enregistrée (`B3_RULES_DIGESTS`). Un A0 d'une version antérieure
-connue (B3 v2) est une LECTURE HISTORIQUE intègre (`rules_versions.is_current()` faux), jamais une requalification avec les règles courantes
-(recalcul par E3-J) ; aucun artefact n'est réécrit.
+exige des versions CONNUES et des digests égaux à ceux de la version de B3 enregistrée (`B3_RULES_DIGESTS` pour v2-v4, `B3_V5_RULES_DIGESTS` pour v5).
+Un A0 d'une version antérieure connue (B3 v2) est une LECTURE HISTORIQUE intègre, et un A0 de B3 v5-A est LISIBLE sans être courant
+(`rules_versions.is_current()` faux dans les deux cas), jamais une requalification avec les règles courantes (recalcul par E3-J) ; aucun artefact n'est réécrit.
 
 Le module reste sans horloge : `created_at` est INJECTÉ. Les garanties de durabilité sont celles de `save_exclusive(durable=True)` :
 sous Windows le `fsync` de répertoire n'est pas démontrable depuis Python (journal NTFS) ; les garanties POSIX exigées par le mode
@@ -67,6 +67,7 @@ from gate_v_exposure_interpreters import (
     PlanIndexEntry,
     RootLayout,
 )
+from gate_v_exposure_interpreters_v5 import B3_V5_RULES_DIGESTS, B3_V5_SEMANTICS_VERSION
 from gate_v_exposure_inventory import (
     B4_SEMANTICS_VERSION,
     CounterProvenance,
@@ -109,9 +110,13 @@ A0_PERSISTENCE_FORMAT_V2 = "gate_v_exposure_a0_format_v2"
 A0_RECORD_KEYS_V2 = A0_RECORD_KEYS + ("persistence_format",)
 HASH_LIMIT_NAMES = ("max_hashed_file_bytes", "max_total_hashed_bytes", "max_hashed_files")
 _PIN_KEYS = ("layout", "rules_digest", "limits", "hooks_used", "roots")
-# Triplets (version de B3, disposition, rules_digest) des tables de règles qui comportent des règles `HASHED_FILE`. VIDE : aucune table B3 publiée
-# (v2, v3, v4) n'en comporte. B3 v5 y inscrira ses tables ; un pin `hash_limits` est alors EXIGÉ pour elles et INTERDIT pour toute autre table.
-HASHED_RULES_DIGESTS = frozenset()
+# Triplets (version de B3, disposition, rules_digest) des tables de règles qui comportent des règles `HASHED_FILE`. Un pin `hash_limits` est EXIGÉ pour elles
+# et INTERDIT pour toute autre table. Aucune table B3 historique (v2, v3, v4) n'y figure. B3 v5-A : la SEULE table de campagne de v5 (digest littéral, mesuré par
+# l'algorithme de B2 et revérifié par les tests, indépendant du module de v5) ; RESULTS et SPLIT_PLAN_DIR de v5 sont des tables sans règle hachée. Ce registre est une
+# DÉCLARATION : il ne prouve ni l'exécution d'un scan, ni la couverture scientifique ; une table hachée non inscrite ne peut pas être persistée (le producteur refuse).
+HASHED_RULES_DIGESTS = frozenset({
+    (B3_V5_SEMANTICS_VERSION, RootLayout.CAMPAIGN_DIR, "aa389aca9e29052ce9812c766f99abaf95a2bb656a3e82fcff17ab041d4a10af"),
+})
 
 
 class StoreFailure(str, Enum):
@@ -487,7 +492,10 @@ class ScanPin:
 
 
 _RULES_KEYS = ("e3a_inventory", "e3a_classification", "b3_interpreters", "b4_assembly")
-_KNOWN_RULES_DIGESTS = {(version, layout): digest for version, layout, digest in B3_RULES_DIGESTS}
+# v5 (B3 v5-A) est LISIBLE sans être « courante » : `RulesVersions.is_current()` compare toujours à `B3_SEMANTICS_VERSION` (v4) tant qu'aucune décision d'activation
+# n'a changé la version courante ; un A0 de v5 n'est donc jamais requalifié avec les règles courantes (recalcul par E3-J).
+_READABLE_B3_VERSIONS = KNOWN_B3_VERSIONS + (B3_V5_SEMANTICS_VERSION,)
+_KNOWN_RULES_DIGESTS = {(version, layout): digest for version, layout, digest in B3_RULES_DIGESTS + B3_V5_RULES_DIGESTS}
 
 
 @dataclass(frozen=True)
@@ -754,7 +762,7 @@ def _parse_record(record: dict, path: Path, raw: bytes) -> PersistedExposureInve
     recorded = RulesVersions(**versions)
     if (recorded.e3a_inventory, recorded.e3a_classification, recorded.b4_assembly) != (
             EXPOSURE_INVENTORY_SEMANTICS_VERSION, EXPOSURE_CLASSIFICATION_RULES_VERSION, B4_SEMANTICS_VERSION) or (
-            recorded.b3_interpreters not in KNOWN_B3_VERSIONS):
+            recorded.b3_interpreters not in _READABLE_B3_VERSIONS):
         raise ExposureStoreError(StoreFailure.UNKNOWN_VERSION, f"rules_versions inconnues : {versions}")
     format_2 = "persistence_format" in record
     pins = tuple(_scan_pin(item, f"scan_pins[{index}]", format_2) for index, item in enumerate(_array(record["scan_pins"], "scan_pins")))
