@@ -237,7 +237,9 @@ def test_entry_class_exposes_its_file_directory_and_read_semantics():
     assert reads == {scan.EntryClass.EXPOSING_JSON, scan.EntryClass.INFORMATIVE_JSON}
     files = {c for c in scan.EntryClass if c.is_file}
     directories = {c for c in scan.EntryClass if c.is_directory}
-    assert files == {scan.EntryClass.EXPOSING_JSON, scan.EntryClass.INFORMATIVE_JSON, scan.EntryClass.INERT_FILE, scan.EntryClass.TEMP_ORPHAN_FILE}
+    # D8 (amendement additif, 2026-10-25) : `HASHED_FILE` s'ajoute aux fichiers ; `reads` reste inchangé (jamais interprété) ; voir test_gate_v_exposure_scan_hashed.py
+    assert files == {scan.EntryClass.EXPOSING_JSON, scan.EntryClass.INFORMATIVE_JSON, scan.EntryClass.INERT_FILE, scan.EntryClass.TEMP_ORPHAN_FILE,
+                     scan.EntryClass.HASHED_FILE}
     assert directories == {scan.EntryClass.INERT_DIRECTORY, scan.EntryClass.STRUCTURAL_DIRECTORY}
     assert files | directories == set(scan.EntryClass) and not files & directories
     assert {c for c in scan.EntryClass if c.is_descended} == {scan.EntryClass.STRUCTURAL_DIRECTORY}
@@ -1349,16 +1351,20 @@ def test_the_module_has_no_mutable_module_level_state():
 
 def test_the_public_api_is_exactly_the_documented_surface():
     public = sorted(name for name, obj in vars(scan).items() if not name.startswith("_") and getattr(obj, "__module__", None) == scan.__name__)
-    public += ["EXPOSURE_TEMP_ORPHAN_PATTERN"]
+    public += ["EXPOSURE_TEMP_ORPHAN_PATTERN", "PUBLICATION_ORPHAN_SUFFIX", "HASHED_FILE_SEMANTICS_VERSION"]
+    # D8 (amendement additif, 2026-10-25) : HashLimits, publication_orphan_pattern, scan_worst_case_read_bytes + 2 constantes ; rien d'autre.
     assert sorted(public) == sorted([
         "AuditRoot", "EntryClass", "EntryKind", "ExposureScan", "ExposureScanRefusal", "JsonKind", "ScanHooks", "ScanLimits", "ScanObservation",
         "ScannedRoot", "SegmentPattern", "SourceAnomaly", "SourceRule", "StrictJsonError", "StructuralFailure", "EXPOSURE_TEMP_ORPHAN_PATTERN",
         "parse_strict_json", "scan_audit_roots",
+        "HashLimits", "publication_orphan_pattern", "scan_worst_case_read_bytes", "PUBLICATION_ORPHAN_SUFFIX", "HASHED_FILE_SEMANTICS_VERSION",
     ])
 
 
 def test_the_scanner_produces_no_finding_no_classification_and_no_admission_decision():
-    assert [f.name for f in dataclasses.fields(scan.ExposureScan)] == ["roots", "observations", "attempts_used", "bytes_read", "rules_digest", "hooks_used", "limits"]
+    # D8 : trois champs OPTIONNELS en queue (comptabilité des fichiers hachés) ; les sept champs historiques et leur ordre sont inchangés.
+    assert [f.name for f in dataclasses.fields(scan.ExposureScan)] == ["roots", "observations", "attempts_used", "bytes_read", "rules_digest", "hooks_used", "limits",
+                                                                         "hash_limits", "hashed_bytes_read", "hashed_files"]
     assert {f.name for f in dataclasses.fields(scan.ScanObservation)} == {
         "root_label", "relative_path", "kind", "entry_class", "anomaly", "size", "mtime_ns", "st_ino", "st_dev", "content_hash", "value_parsed",
         "content_bytes", "rule_tag",

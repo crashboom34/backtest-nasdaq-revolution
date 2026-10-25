@@ -5,8 +5,8 @@ Contrat : ADR 0025 Décision 23, 23.11 étape 1 (listage strict), 23.29.1 (arbor
 design E3-B (AI_HANDOFF.md §44.1).
 
 Ce module réalise VOLONTAIREMENT des entrées/sorties de fichiers en lecture seule, et seulement celles-ci : `lstat`, `scandir`,
-ouverture en lecture des fichiers que la table de sources fournie par l'appelant (B3) classe comme lisibles. Il n'ouvre jamais un
-fichier inerte, inconnu ou orphelin, jamais une donnée de marché, n'écrit rien, ne lit aucune horloge et n'utilise ni le registre,
+ouverture en lecture des fichiers que la table de sources fournie par l'appelant (B3) classe comme lisibles (JSON strict) ou
+hachés (D8 : SHA-256 seul, en flux, sans interprétation). Il n'ouvre jamais un fichier inerte, inconnu ou orphelin, jamais une donnée de marché, n'écrit rien, ne lit aucune horloge et n'utilise ni le registre,
 ni E2, ni le moteur, ni E3-A. Il ne construit aucun `ExposureFinding`, ne classe rien (FRESH, RETROSPECTIVE, UNDETERMINED), ne conclut
 jamais qu'une période est vierge ou exposée.
 
@@ -44,6 +44,12 @@ _EXTENDED_PATH_PREFIXES = ("\\\\?\\", "\\\\.\\")
 # Orphelin de publication (ADR 23.29.1) : `.exposure.tmp.<32 hexadécimaux>`. Une règle `TEMP_ORPHAN_FILE` DOIT l'utiliser comme dernier
 # segment : aucun autre nom ne peut être déclaré « orphelin autorisé » (donc non lu) par une table.
 EXPOSURE_TEMP_ORPHAN_PATTERN = r"\.exposure\.tmp\.[0-9a-f]{32}"
+
+# D8 : second motif d'orphelin de publication, produit par `atomic_json_store.save_atomic` : `<nom de la cible>.<32 hexadécimaux>.tmp`. Il n'existe
+# JAMAIS seul : `publication_orphan_pattern(cible)` le construit pour UNE cible connue ; `SourceRule` n'accepte que cette forme canonique.
+PUBLICATION_ORPHAN_SUFFIX = r"\.[0-9a-f]{32}\.tmp"
+_PUBLICATION_ORPHAN_SUFFIX_WIDTH = 37          # « . » + 32 hexadécimaux + « .tmp »
+_ORPHAN_TARGET_CLASSES = ("EXPOSING_JSON", "INFORMATIVE_JSON", "HASHED_FILE")      # jamais INERT_FILE : un fichier inerte n'acquiert pas d'orphelin
 
 
 def _risky_quantified_group(regex: str) -> bool:
@@ -279,14 +285,20 @@ class EntryClass(str, Enum):
     TEMP_ORPHAN_FILE = "TEMP_ORPHAN_FILE"          # orphelin de publication à l'emplacement exact : consigné, jamais lu
     INERT_DIRECTORY = "INERT_DIRECTORY"            # constaté, jamais descendu
     STRUCTURAL_DIRECTORY = "STRUCTURAL_DIRECTORY"  # structure connue : descendue
+    HASHED_FILE = "HASHED_FILE"                    # D8 : fichier reconnu, lu en flux pour son SEUL SHA-256 ; jamais interprété, jamais conservé
 
     @property
     def is_read(self) -> bool:
         return self in (EntryClass.EXPOSING_JSON, EntryClass.INFORMATIVE_JSON)
 
     @property
+    def is_hashed(self) -> bool:
+        return self is EntryClass.HASHED_FILE
+
+    @property
     def is_file(self) -> bool:
-        return self in (EntryClass.EXPOSING_JSON, EntryClass.INFORMATIVE_JSON, EntryClass.INERT_FILE, EntryClass.TEMP_ORPHAN_FILE)
+        return self in (EntryClass.EXPOSING_JSON, EntryClass.INFORMATIVE_JSON, EntryClass.INERT_FILE, EntryClass.TEMP_ORPHAN_FILE,
+                        EntryClass.HASHED_FILE)
 
     @property
     def is_directory(self) -> bool:
@@ -363,6 +375,38 @@ class SegmentPattern:
         return type(name) is str and self._compiled.fullmatch(name) is not None
 
 
+def _publication_orphan_regex(target) -> str:
+    if type(target) is str:
+        if (_LITERAL_SEGMENT_RE.fullmatch(target) is None or target in (".", "..") or _is_temp_name(target)
+                or len(target) + _PUBLICATION_ORPHAN_SUFFIX_WIDTH > _MAX_NAME_LENGTH):
+            raise ValueError("cible d'orphelin de publication : nom littéral portable, non temporaire, d'au plus "
+                             f"{_MAX_NAME_LENGTH - _PUBLICATION_ORPHAN_SUFFIX_WIDTH} caractères attendu.")
+        return re.escape(target) + PUBLICATION_ORPHAN_SUFFIX
+    if type(target) is SegmentPattern:
+        return "(?:" + target.regex + ")" + PUBLICATION_ORPHAN_SUFFIX
+    raise TypeError("la cible d'un orphelin de publication est un nom littéral (str) ou un SegmentPattern.")
+
+
+def publication_orphan_pattern(target) -> "SegmentPattern":
+    """D8 : motif de segment du fichier temporaire que `save_atomic` laisse si le processus est interrompu avant le remplacement de `target`.
+
+    Forme canonique UNIQUE : nom littéral échappé, ou motif enveloppé `(?:…)`, suivi de `PUBLICATION_ORPHAN_SUFFIX`. Aucun `.tmp` générique."""
+    return SegmentPattern(_publication_orphan_regex(target))
+
+
+def _orphan_target_of(regex: str):
+    """Cible (littéral ou SegmentPattern) dont `regex` est EXACTEMENT l'orphelin canonique, sinon None (reconstruction, jamais une heuristique)."""
+    body = regex[:-len(PUBLICATION_ORPHAN_SUFFIX)]
+    try:
+        if body.startswith("(?:") and body.endswith(")"):
+            target = SegmentPattern(body[3:-1])
+        else:
+            target = re.sub(r"\\(.)", r"\1", body)
+        return target if _publication_orphan_regex(target) == regex else None
+    except (ValueError, TypeError):
+        return None
+
+
 @dataclass(frozen=True)
 class SourceRule:
     """Une entrée de la table fermée de sources : profondeur FIXE, segments littéraux ou `SegmentPattern`, classe de l'entrée.
@@ -395,8 +439,9 @@ class SourceRule:
             raise TypeError("entry_class doit être un EntryClass.")
         if self.entry_class is EntryClass.TEMP_ORPHAN_FILE:
             last = self.segments[-1]
-            if type(last) is not SegmentPattern or last.regex != EXPOSURE_TEMP_ORPHAN_PATTERN:
-                raise ValueError("une règle TEMP_ORPHAN_FILE doit se terminer par SegmentPattern(EXPOSURE_TEMP_ORPHAN_PATTERN) : aucun autre nom n'est un orphelin autorisé.")
+            if type(last) is not SegmentPattern or not (last.regex == EXPOSURE_TEMP_ORPHAN_PATTERN or _orphan_target_of(last.regex) is not None):
+                raise ValueError("une règle TEMP_ORPHAN_FILE doit se terminer par SegmentPattern(EXPOSURE_TEMP_ORPHAN_PATTERN) ou par un motif construit par "
+                                 "publication_orphan_pattern(cible) : aucun autre nom n'est un orphelin autorisé.")
         if self.expected_json is not None:
             if type(self.expected_json) is not JsonKind:
                 raise TypeError("expected_json doit être un JsonKind ou None.")
@@ -448,15 +493,36 @@ class ScanLimits:
             raise ValueError(f"max_name_length ne peut pas dépasser {_MAX_NAME_LENGTH} (coût d'appariement des motifs, longueur d'un nom de répertoire d'audit).")
 
 
+@dataclass(frozen=True, kw_only=True)
+class HashLimits:
+    """D8 : plafonds EXPLICITES des fichiers `HASHED_FILE` (aucune valeur par défaut, aucune constante normative, aucune valeur de production).
+
+    Volontairement SÉPARÉS de `ScanLimits` : les neuf champs historiques de `ScanLimits` sont épinglés tels quels dans les A0 déjà persistés
+    (B5), les modifier romprait leur relecture. Les octets hachés ne comptent PAS dans `max_total_read_bytes` (budget JSON, inchangé) ;
+    le nombre d'essais (`ScanLimits.max_attempts`) est partagé. Le pin de ces plafonds dans un A0 relève d'une décision B3 v5 / B5 distincte.
+    """
+
+    max_hashed_file_bytes: int
+    max_total_hashed_bytes: int
+    max_hashed_files: int
+
+    def __post_init__(self) -> None:
+        for name in ("max_hashed_file_bytes", "max_total_hashed_bytes", "max_hashed_files"):
+            _positive_int(getattr(self, name), name)
+        if self.max_hashed_file_bytes > self.max_total_hashed_bytes:
+            raise ValueError("max_hashed_file_bytes ne peut pas dépasser max_total_hashed_bytes.")
+
+
 @dataclass(frozen=True)
 class ScanHooks:
     """Injections OPTIONNELLES pour les tests de concurrence et de mutation ; jamais utilisées en production."""
 
     after_first_pass: Optional[Callable[[int], None]] = None
     after_file_read: Optional[Callable[[str, str], None]] = None
+    before_open: Optional[Callable[[str, str], None]] = None      # D8 : fenêtre entre `lstat` et `open` d'un fichier haché
 
     def __post_init__(self) -> None:
-        for name in ("after_first_pass", "after_file_read"):
+        for name in ("after_first_pass", "after_file_read", "before_open"):
             value = getattr(self, name)
             if value is not None and not callable(value):
                 raise TypeError(f"{name} doit être appelable ou None.")
@@ -529,6 +595,9 @@ class ScanObservation:
 
     def __post_init__(self) -> None:
         read_file = self.kind is EntryKind.FILE and self.entry_class is not None and self.entry_class.is_read
+        hashed_file = self.kind is EntryKind.FILE and self.entry_class is not None and self.entry_class.is_hashed
+        if self.entry_class is not None and self.entry_class.is_hashed and self.kind is not EntryKind.FILE and (self.content_hash is not None or self.size is not None):
+            raise ValueError("une classe hachée sur une entrée qui n'est pas un fichier (KIND_MISMATCH) ne porte ni hash ni taille : rien n'a été lu.")
         if self.value_parsed:
             if not read_file or self.anomaly is not None:
                 raise ValueError("seul un fichier de classe lue SANS anomalie peut être analysé (value_parsed).")
@@ -543,7 +612,22 @@ class ScanObservation:
                 raise ValueError("content_bytes n'est conservé que pour un contenu JSON accepté (value_parsed).")
             if read_file and self.anomaly is None:
                 raise ValueError("un fichier de classe lue sans anomalie doit être analysé : jamais « propre » sans preuve.")
+            if hashed_file:
+                self._check_hashed_file()
         self._check_entry_consistency()
+
+    def _check_hashed_file(self) -> None:
+        """D8 : un fichier haché porte toujours sa taille mesurée ; « propre », il porte son SHA-256 ; avec une anomalie (taille, lecture), AUCUN hash."""
+        if type(self.size) is not int or self.size < 0:
+            raise ValueError("un fichier haché porte sa taille mesurée par lstat (entier positif ou nul).")
+        if self.anomaly is None:
+            if type(self.content_hash) is not str or _SHA256_HEX_RE.fullmatch(self.content_hash) is None:
+                raise ValueError("un fichier haché sans anomalie porte un content_hash SHA-256 hexadécimal minuscule : jamais « propre » sans hash.")
+        else:
+            if self.anomaly not in (SourceAnomaly.TOO_LARGE, SourceAnomaly.UNREADABLE):
+                raise ValueError("un fichier haché n'est jamais interprété : seules TOO_LARGE et UNREADABLE sont des anomalies de contenu.")
+            if self.content_hash is not None:
+                raise ValueError("un fichier haché en anomalie n'a aucun content_hash : un hash n'est défini que si la lecture complète a réussi.")
 
     def _check_entry_consistency(self) -> None:
         """Seuls les états que le scan peut produire sont constructibles : jamais une entrée « propre » incohérente."""
@@ -559,7 +643,7 @@ class ScanObservation:
         mismatch = self.entry_class.is_file != (self.kind is EntryKind.FILE)
         if mismatch != (self.anomaly is SourceAnomaly.KIND_MISMATCH):
             raise ValueError("KIND_MISMATCH si et seulement si la nature de l'entrée contredit sa classe.")
-        if not mismatch and self.anomaly is not None and not (self.kind is EntryKind.FILE and self.entry_class.is_read):
+        if not mismatch and self.anomaly is not None and not (self.kind is EntryKind.FILE and (self.entry_class.is_read or self.entry_class.is_hashed)):
             raise ValueError("une anomalie de contenu ne concerne qu'un fichier de classe lue.")
 
     @property
@@ -616,6 +700,9 @@ class ExposureScan:
     rules_digest: str
     hooks_used: bool
     limits: ScanLimits
+    hash_limits: Optional[HashLimits] = None     # D8 : plafonds des fichiers hachés (None : la table n'en comporte aucun)
+    hashed_bytes_read: int = 0      # octets hachés LIVRÉS et facturés pendant la passe retenue (lectures partielles de fichiers illisibles comprises)
+    hashed_files: int = 0
 
     def __post_init__(self) -> None:
         if type(self.roots) is not tuple or any(type(root) is not ScannedRoot for root in self.roots):
@@ -638,6 +725,38 @@ class ExposureScan:
             raise ValueError("attempts_used dépasse limits.max_attempts.")
         if self.bytes_read > self.limits.max_total_read_bytes:
             raise ValueError("bytes_read dépasse limits.max_total_read_bytes.")
+        self._check_hashed_accounting()
+
+    def _check_hashed_accounting(self) -> None:
+        for name in ("hashed_bytes_read", "hashed_files"):
+            value = getattr(self, name)
+            if type(value) is not int:
+                raise TypeError(f"{name} doit être un entier.")
+        hashed = [o for o in self.observations if o.kind is EntryKind.FILE and o.entry_class is not None and o.entry_class.is_hashed]
+        if self.hash_limits is None:
+            if hashed or self.hashed_bytes_read or self.hashed_files:
+                raise ValueError("des fichiers hachés exigent des hash_limits explicites : aucun plafond caché.")
+            return
+        if type(self.hash_limits) is not HashLimits:
+            raise TypeError("hash_limits doit être un HashLimits ou None.")
+        if self.hashed_files != len(hashed):
+            raise ValueError("hashed_files doit égaler le nombre de fichiers hachés observés.")
+        clean = sum(o.size for o in hashed if o.anomaly is None)
+        unreadable = sum(1 for o in hashed if o.anomaly is SourceAnomaly.UNREADABLE)
+        # octets LIVRÉS et facturés : la taille des fichiers lus en entier, plus ceux d'éventuelles lectures partielles de fichiers illisibles
+        if self.hashed_bytes_read < clean or self.hashed_bytes_read - clean > unreadable * (self.hash_limits.max_hashed_file_bytes + 1):
+            raise ValueError("hashed_bytes_read doit égaler la taille des fichiers hachés lus en entier, plus au plus un fichier de lecture partielle par fichier illisible.")
+        for observed in hashed:
+            if observed.anomaly is None and observed.size > self.hash_limits.max_hashed_file_bytes:
+                raise ValueError("un fichier haché sans anomalie dépasse hash_limits.max_hashed_file_bytes.")
+            if observed.anomaly is SourceAnomaly.TOO_LARGE and observed.size <= self.hash_limits.max_hashed_file_bytes:
+                raise ValueError("TOO_LARGE exige une taille supérieure à hash_limits.max_hashed_file_bytes.")
+            if observed.anomaly is SourceAnomaly.UNREADABLE and observed.size > self.hash_limits.max_hashed_file_bytes:
+                raise ValueError("un fichier plus grand que le plafond est TOO_LARGE avant toute ouverture : UNREADABLE ne peut pas porter une telle taille.")
+        if self.hashed_files > self.hash_limits.max_hashed_files:
+            raise ValueError("hashed_files dépasse hash_limits.max_hashed_files.")
+        if self.hashed_bytes_read > self.hash_limits.max_total_hashed_bytes:
+            raise ValueError("hashed_bytes_read dépasse hash_limits.max_total_hashed_bytes.")
 
 
 _READ_FLAGS = (
@@ -645,6 +764,8 @@ _READ_FLAGS = (
     | getattr(os, "O_NONBLOCK", 0)      # POSIX : un FIFO substitué entre `lstat` et `open` ne doit jamais bloquer le scan
 )
 _READ_CHUNK = 65536
+_HASH_CHUNK = 1 << 20            # D8 : un fichier haché est lu par morceaux d'au plus 1 Mio, jamais matérialisé en entier
+HASHED_FILE_SEMANTICS_VERSION = "gate_v_scan_hashed_file_v1"   # content_hash = SHA-256 des octets BRUTS du fichier, sans cadrage ni interprétation
 
 
 def _is_temp_name(name: str) -> bool:
@@ -670,6 +791,8 @@ class _ReadBudget:
     def __init__(self) -> None:
         self.bytes_read = 0
         self.entries = 0
+        self.hashed_bytes = 0       # D8 : budget SÉPARÉ du budget JSON historique (`bytes_read`)
+        self.hashed_files = 0
 
 
 class _Unstable(Exception):
@@ -782,7 +905,62 @@ def _read_json_entry(label, names, path, info, rule, limits, budget, hooks) -> S
     return _observation(label, names, EntryKind.FILE, entry_class, None, info, content_hash=digest, content_bytes=raw)
 
 
-def _observe_entry(label, parent_path, prefix, name, rules, limits, budget, hooks):
+def _hash_file_entry(label, names, path, info, rule, limits, hash_limits, budget, hooks) -> ScanObservation:
+    """D8 : lit un fichier reconnu EN FLUX pour son seul SHA-256. Aucune interprétation, aucun octet conservé ; `content_hash` n'est défini que si la
+    lecture complète a réussi ET que les métadonnées observées sont restées identiques (descripteur avant/après lecture, `lstat` final). Un écart
+    observable est une instabilité. Ce n'est PAS une garantie d'instantané : une modification restaurée à l'identique (taille, mtime, inode) après la
+    dernière lecture, ou masquée par une résolution grossière de mtime, reste indétectable (voir `scan_audit_roots`). Chaque octet livré est facturé."""
+    entry_class = rule.entry_class
+    budget.hashed_files += 1
+    if budget.hashed_files > hash_limits.max_hashed_files:
+        _refuse(StructuralFailure.LIMIT_EXCEEDED, "max_hashed_files dépassé", label, names)
+    if info.st_size > hash_limits.max_hashed_file_bytes:
+        return _observation(label, names, EntryKind.FILE, entry_class, SourceAnomaly.TOO_LARGE, info)
+    if budget.hashed_bytes + info.st_size > hash_limits.max_total_hashed_bytes:
+        _refuse(StructuralFailure.LIMIT_EXCEEDED, "max_total_hashed_bytes dépassé", label, names)
+    if hooks is not None and hooks.before_open is not None:
+        hooks.before_open(label, "/".join(names))
+    try:
+        descriptor = os.open(path, _READ_FLAGS)
+    except FileNotFoundError:
+        raise _Unstable(f"{'/'.join(names)} a disparu entre le lstat et l'ouverture") from None
+    except OSError:
+        return _observation(label, names, EntryKind.FILE, entry_class, SourceAnomaly.UNREADABLE, info)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise _Unstable(f"{'/'.join(names)} n'est plus un fichier régulier à l'ouverture")
+        digest = hashlib.sha256()
+        total = 0
+        while total <= hash_limits.max_hashed_file_bytes:
+            remaining_budget = hash_limits.max_total_hashed_bytes - budget.hashed_bytes
+            chunk = os.read(descriptor, min(_HASH_CHUNK, hash_limits.max_hashed_file_bytes + 1 - total, remaining_budget + 1))
+            if not chunk:
+                break
+            budget.hashed_bytes += len(chunk)       # facturé à la LIVRAISON : une lecture avortée ou instable consomme aussi le budget de la passe
+            if budget.hashed_bytes > hash_limits.max_total_hashed_bytes:
+                _refuse(StructuralFailure.LIMIT_EXCEEDED, "max_total_hashed_bytes dépassé", label, names)
+            digest.update(chunk)
+            total += len(chunk)
+        after_read = os.fstat(descriptor)
+    except OSError:
+        return _observation(label, names, EntryKind.FILE, entry_class, SourceAnomaly.UNREADABLE, info)
+    finally:
+        os.close(descriptor)
+    if hooks is not None and hooks.after_file_read is not None:
+        hooks.after_file_read(label, "/".join(names))
+    try:
+        after = os.lstat(path)
+    except OSError:
+        raise _Unstable(f"{'/'.join(names)} n'est plus observable après sa lecture") from None
+    if not (_identity(opened) == _identity(after_read) == _identity(info) == _identity(after)):
+        raise _Unstable(f"{'/'.join(names)} a changé pendant sa lecture (métadonnées ou inode)")
+    if total != info.st_size:
+        raise _Unstable(f"{'/'.join(names)} : {total} octets lus pour une taille observée de {info.st_size}")
+    return _observation(label, names, EntryKind.FILE, entry_class, None, info, content_hash=digest.hexdigest())
+
+
+def _observe_entry(label, parent_path, prefix, name, rules, limits, hash_limits, budget, hooks):
     """Observe UNE entrée : retourne `(observation, descendre)` ou refuse sur une défaillance de structure."""
     names = prefix + (name,)
     path = os.path.join(parent_path, name)
@@ -812,6 +990,8 @@ def _observe_entry(label, parent_path, prefix, name, rules, limits, budget, hook
         observation, descend = _observation(label, names, kind, entry_class, SourceAnomaly.KIND_MISMATCH, info), False
     elif entry_class.is_read:
         observation, descend = _read_json_entry(label, names, path, info, rule, limits, budget, hooks), False
+    elif entry_class.is_hashed:
+        observation, descend = _hash_file_entry(label, names, path, info, rule, limits, hash_limits, budget, hooks), False
     else:
         observation, descend = _observation(label, names, kind, entry_class, None, info), entry_class.is_descended
     return replace(observation, rule_tag=rule.tag), descend
@@ -852,7 +1032,7 @@ def _list_directory(label, directory_path, prefix, limits, budget, is_root) -> l
     return names
 
 
-def _scan_root(root, rules, limits, budget, hooks) -> tuple:
+def _scan_root(root, rules, limits, hash_limits, budget, hooks) -> tuple:
     observations = []
     root_names = _list_directory(root.label, root.path, (), limits, budget, True)
     if not root_names and not root.may_be_empty:
@@ -864,7 +1044,7 @@ def _scan_root(root, rules, limits, budget, hooks) -> tuple:
         if name is None:
             stack.pop()
             continue
-        observation, descend = _observe_entry(root.label, parent_path, prefix, name, rules, limits, budget, hooks)
+        observation, descend = _observe_entry(root.label, parent_path, prefix, name, rules, limits, hash_limits, budget, hooks)
         observations.append(observation)
         if descend:
             child_path = os.path.join(parent_path, name)
@@ -881,6 +1061,16 @@ def _textual_overlap(first: str, second: str) -> bool:
 def _path_overlap(first: str, second: str) -> bool:
     """Imbrication ou identité, sur les chemins tels que donnés ET sur leurs chemins réels (lien ou jonction dans un composant parent)."""
     return _textual_overlap(first, second) or _textual_overlap(os.path.realpath(first), os.path.realpath(second))
+
+
+def _check_orphan_targets(rules: tuple) -> None:
+    """D8 : un orphelin de publication n'est reconnu que pour une cible CONNUE (JSON lu ou fichier haché) du MÊME répertoire de la table."""
+    for rule in rules:
+        if rule.entry_class is not EntryClass.TEMP_ORPHAN_FILE or rule.segments[-1].regex == EXPOSURE_TEMP_ORPHAN_PATTERN:
+            continue
+        target, parent = _orphan_target_of(rule.segments[-1].regex), rule.segments[:-1]
+        if not any(other.entry_class.value in _ORPHAN_TARGET_CLASSES and other.segments[:-1] == parent and other.segments[-1] == target for other in rules):
+            raise ValueError("règle d'orphelin de publication sans fichier cible connu (JSON lu ou haché) dans le même répertoire de la table.")
 
 
 def _validated_roots(roots: tuple, limits: ScanLimits) -> list:
@@ -917,14 +1107,14 @@ def _validated_roots(roots: tuple, limits: ScanLimits) -> list:
     return checked
 
 
-def _single_pass(roots: tuple, rules: tuple, limits: ScanLimits, hooks: Optional[ScanHooks]) -> tuple:
+def _single_pass(roots: tuple, rules: tuple, limits: ScanLimits, hash_limits: Optional[HashLimits], hooks: Optional[ScanHooks]) -> tuple:
     budget = _ReadBudget()
     scanned_roots = []
     observations = []
     for root, info in _validated_roots(roots, limits):
         scanned_roots.append(ScannedRoot(root.label, root.path, info.st_dev, info.st_ino, root.may_be_empty))
-        observations.extend(_scan_root(root, rules, limits, budget, hooks))
-    return tuple(scanned_roots), tuple(observations), budget.bytes_read
+        observations.extend(_scan_root(root, rules, limits, hash_limits, budget, hooks))
+    return tuple(scanned_roots), tuple(observations), budget.bytes_read, budget.hashed_bytes, budget.hashed_files
 
 
 def _comparable(observation: ScanObservation) -> tuple:
@@ -933,7 +1123,7 @@ def _comparable(observation: ScanObservation) -> tuple:
     Les fichiers inertes, inconnus, orphelins et les répertoires ne sont comparés que par leur nom (ADR 23.29.6).
     """
     identity = (observation.root_label, observation.relative_path, observation.kind, observation.entry_class, observation.anomaly)
-    if observation.kind is EntryKind.FILE and observation.entry_class is not None and observation.entry_class.is_read:
+    if observation.kind is EntryKind.FILE and observation.entry_class is not None and (observation.entry_class.is_read or observation.entry_class.is_hashed):
         return identity + (observation.size, observation.mtime_ns, observation.st_ino, observation.st_dev, observation.content_hash)
     return identity
 
@@ -964,7 +1154,20 @@ def _first_difference(first: tuple, second: tuple) -> str:
     return "(racines)"
 
 
-def scan_audit_roots(roots: tuple, rules: tuple, limits: ScanLimits, *, hooks: Optional[ScanHooks] = None) -> ExposureScan:
+def scan_worst_case_read_bytes(limits: ScanLimits, hash_limits: HashLimits) -> int:
+    """Borne SUPÉRIEURE des octets LIVRÉS par les lectures d'un scan, y compris celles qui échouent ou sont avortées : `max_attempts` essais x 2 passes
+    x (au plus `max_entries` lectures JSON de `max_json_bytes + 1` octets + `max_total_hashed_bytes + 1` octets hachés, le budget haché étant facturé à
+    la livraison). Les lectures JSON abouties sont, elles, bornées par `max_total_read_bytes` (budget historique, inchangé). Un scan STABLE coûte
+    exactement 2 x (octets JSON + octets hachés lus) ; les essais répétés (instabilité) multiplient jusqu'à `max_attempts`."""
+    if type(limits) is not ScanLimits:
+        raise TypeError("limits doit être un ScanLimits.")
+    if type(hash_limits) is not HashLimits:
+        raise TypeError("hash_limits doit être un HashLimits.")
+    return limits.max_attempts * 2 * (limits.max_entries * (limits.max_json_bytes + 1) + hash_limits.max_total_hashed_bytes + 1)
+
+
+def scan_audit_roots(roots: tuple, rules: tuple, limits: ScanLimits, *, hooks: Optional[ScanHooks] = None,
+                     hash_limits: Optional[HashLimits] = None) -> ExposureScan:
     """Scan strict, déterministe et en lecture seule des racines d'audit explicitement configurées.
 
     Retourne des OBSERVATIONS (faits de structure et de contenu brut) ; ne classe rien et ne conclut jamais qu'une période est
@@ -988,20 +1191,26 @@ def scan_audit_roots(roots: tuple, rules: tuple, limits: ScanLimits, *, hooks: O
         raise TypeError("limits doit être un ScanLimits.")
     if hooks is not None and type(hooks) is not ScanHooks:
         raise TypeError("hooks doit être un ScanHooks ou None.")
+    if hash_limits is not None and type(hash_limits) is not HashLimits:
+        raise TypeError("hash_limits doit être un HashLimits ou None.")
+    _check_orphan_targets(rules)
+    if hash_limits is None and any(rule.entry_class.is_hashed for rule in rules):
+        raise ValueError("la table comporte des règles HASHED_FILE : des hash_limits explicites sont exigés (aucun plafond caché).")
     last_difference = "aucune"
     for attempt in range(1, limits.max_attempts + 1):
         try:
-            first_roots, first, bytes_read = _single_pass(roots, rules, limits, hooks)
+            first_roots, first, bytes_read, hashed_bytes, hashed_files = _single_pass(roots, rules, limits, hash_limits, hooks)
             if hooks is not None and hooks.after_first_pass is not None:
                 hooks.after_first_pass(attempt)
-            second_roots, second, _ = _single_pass(roots, rules, limits, hooks)
+            second_roots, second, _, _, _ = _single_pass(roots, rules, limits, hash_limits, hooks)
         except _Unstable as unstable:
             last_difference = str(unstable)
             continue
         if first_roots == second_roots and [_comparable(o) for o in first] == [_comparable(o) for o in second]:
             return ExposureScan(
                 roots=first_roots, observations=first, attempts_used=attempt, bytes_read=bytes_read,
-                rules_digest=_rules_digest(rules), hooks_used=hooks is not None, limits=limits,
+                rules_digest=_rules_digest(rules), hooks_used=hooks is not None, limits=limits, hash_limits=hash_limits,
+                hashed_bytes_read=hashed_bytes, hashed_files=hashed_files,
             )
         last_difference = _first_difference(first, second)
     _refuse(
