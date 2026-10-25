@@ -431,8 +431,19 @@ def once_on(relative_path, action):
     return wrapper
 
 
+OLD_MTIME_NS = 1_000_000_000_000_000_000          # 2001-09-09 : très antérieur à toute édition de test
+
+
 def tree_with_aggregate(tmp_path, content=SAME_SIZE_A):
-    return make_tree(tmp_path, dict(BASE, **{AGG: content}))
+    """Arbre de test dont tous les fichiers sont VIEILLIS : l'horloge des `mtime` a une granularité grossière et variable (mesurée sur une machine Windows : pas médian
+    ≈ 1 ms, 15 % des écritures consécutives de même `mtime`), donc une édition faite dans le même pas que la création laissait le `mtime` inchangé (modification
+    annulée indétectable par construction : limite documentée du scanner) et rendait intermittents les tests qui supposent qu'une édition change le `mtime`.
+    Après vieillissement à 2001, toute édition le change quelle que soit la résolution du système de fichiers."""
+    root = make_tree(tmp_path, dict(BASE, **{AGG: content}))
+    for path in root.rglob("*"):
+        if path.is_file():
+            os.utime(path, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+    return root
 
 
 def scan_tree(root, hooks, attempts, hl=None, rules=None):
