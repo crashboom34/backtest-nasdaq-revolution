@@ -354,4 +354,4 @@ def test_the_module_opens_no_admission_and_keeps_its_non_real_qualification_flag
     assert not {name for name in names if any(word in name.lower() for word in ("admission", "admit", "reserve", "reservation", "claim", "authoris", "authoriz"))}
     assert store.OPERATIONAL_LIMITS_QUALIFIED_FOR_REAL is False
     assert store.A0_PERSISTENCE_FORMAT_V2 == V2_FORMAT and store.A0_RECORD_KEYS_V2 == store.A0_RECORD_KEYS + ("persistence_format",)
-    assert store.HASH_LIMIT_NAMES == HL_NAMES and len(store.HASHED_RULES_DIGESTS) == 1               # B3 v5-A : uniquement le triplet vérifié de sa table de campagne
+    assert store.HASH_LIMIT_NAMES == HL_NAMES and len(store.HASHED_RULES_DIGESTS) == 2               # B3 v5-A et B3 v6 (N-VIDE-1) : le triplet vérifié de la SEULE table de campagne, inscrit sous chacune des deux versions

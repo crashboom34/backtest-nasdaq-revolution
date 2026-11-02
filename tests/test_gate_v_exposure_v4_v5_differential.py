@@ -200,7 +200,9 @@ def test_v5_is_never_activated_silently_only_the_b5_store_imports_it_and_nothing
                 importers.add(relative)
             if "interpret_audit_roots_v5" in text:
                 callers.add(relative)
-    assert importers == {"gate_v_exposure_store.py"} and not callers, (importers, callers)           # B5 n'en lit que les digests ; aucun module de production ne l'appelle
+    # B5 n'en lit que les digests ; le SEUL autre consommateur est l'interpréteur v6 (N-VIDE-1), successeur explicite qui l'appelle par construction (v6 = v5 + complétude manifeste) ;
+    # aucun autre module de production ne l'appelle, et v6 n'est lui-même importé que par B5 (voir `test_only_b5_and_nothing_else_imports_or_calls_v6`).
+    assert importers == {"gate_v_exposure_store.py", "gate_v_exposure_interpreters_v6.py"} and callers == {"gate_v_exposure_interpreters_v6.py"}, (importers, callers)
     assert b3.B3_SEMANTICS_VERSION == "gate_v_exposure_interpreters_v4" and v5.B3_V5_SEMANTICS_VERSION not in b3.KNOWN_B3_VERSIONS
     assert "interpret_audit_roots_v5" not in vars(b3) and "source_rules_v5" not in vars(b3)
 

@@ -54,7 +54,9 @@ def copy_of(record):
 
 # ══ B3-v5A-5 : registre et concordance ═══════════════════════════════════════════════════════════════════════════════════════════
 def test_the_registry_holds_exactly_the_verified_v5_campaign_triple_and_no_historical_table():
-    assert store.HASHED_RULES_DIGESTS == frozenset({(V5, CAMPAIGN, CAMPAIGN_V5_DIGEST)})
+    # N-VIDE-1 : B3 v6 (même table, même digest) est inscrite en plus — voir `test_gate_v_exposure_store_v6.py` pour le registre complet ; le triplet de v5 reste EXACTEMENT celui-ci.
+    assert {entry for entry in store.HASHED_RULES_DIGESTS if entry[0] == V5} == {(V5, CAMPAIGN, CAMPAIGN_V5_DIGEST)}
+    assert {version for version, _, _ in store.HASHED_RULES_DIGESTS} == {V5, "gate_v_exposure_interpreters_v6"}
     assert not {version for version, _, _ in store.HASHED_RULES_DIGESTS} & set(b3.KNOWN_B3_VERSIONS)             # v2, v3, v4 : jamais inscrites
     assert not store.HASHED_RULES_DIGESTS & {(version, layout, digest) for version, layout, digest in b3.B3_RULES_DIGESTS}
 
@@ -67,7 +69,7 @@ def unregistered_hashed_tables(source_rules, version, registered):
 
 def test_every_hashed_v5_table_is_registered_and_every_registered_table_really_contains_hashed_rules():
     assert unregistered_hashed_tables(v5.source_rules_v5, V5, store.HASHED_RULES_DIGESTS) == []
-    for version, layout, digest in store.HASHED_RULES_DIGESTS:
+    for version, layout, digest in (entry for entry in store.HASHED_RULES_DIGESTS if entry[0] == V5):         # les triplets de v6 sont vérifiés dans `test_gate_v_exposure_store_v6.py`
         assert version == V5 and digest == scan._rules_digest(v5.source_rules_v5(layout)) and any(r.entry_class.is_hashed for r in v5.source_rules_v5(layout))
         assert (version, layout, digest) in v5.B3_V5_RULES_DIGESTS                                                  # le digest enregistré est celui de la table v5 publiée
 
@@ -167,7 +169,7 @@ def test_the_reader_refuses_a_version_and_digest_that_do_not_belong_together(tmp
     as_v4["rules_versions"]["b3_interpreters"] = V4                                                                      # digest de la table v5 sous la version v4
     refused(write_a0(tmp_path / "b", as_v4), store.StoreFailure.RULES_DIGEST_MISMATCH)
     unknown = copy_of(record)
-    unknown["rules_versions"]["b3_interpreters"] = "gate_v_exposure_interpreters_v6"
+    unknown["rules_versions"]["b3_interpreters"] = "gate_v_exposure_interpreters_v7"          # v6 est désormais une version CONNUE (N-VIDE-1) : la première inconnue est v7
     refused(write_a0(tmp_path / "c", unknown), store.StoreFailure.UNKNOWN_VERSION)
 
 
