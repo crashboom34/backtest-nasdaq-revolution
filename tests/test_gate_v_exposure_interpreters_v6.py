@@ -412,8 +412,12 @@ def test_the_v6_module_is_pure_independent_of_l3a_and_adds_no_source_kind():
     assert "SourceKind" not in text and "ExposureFinding" not in text                               # aucune nouvelle valeur, aucune fabrication de finding
 
 
-def test_only_b5_and_nothing_else_imports_or_calls_v6():
-    root = Path(v6.__file__).parent
+AUTHORISED_V6_IMPORTERS = {"gate_v_exposure_store.py", "gate_v_audit_protocol.py"}        # B5 (constantes de lecture) et le protocole d'audit N-VIDE-2 / N2-a (D11, décision de l'utilisateur)
+AUTHORISED_V6_CALLERS = {"gate_v_audit_protocol.py"}
+
+
+def v6_consumers(root) -> tuple:
+    """(importeurs, appelants) de v6 : recherche de sous-chaîne dans tout `.py` hors tests, comme la garde historique."""
     importers, callers = set(), set()
     for directory, subdirectories, names in os.walk(root):
         subdirectories[:] = [d for d in subdirectories if d not in {".venv", "venv", ".git", "node_modules", "tests", "__pycache__", "frontend"}]
@@ -426,7 +430,25 @@ def test_only_b5_and_nothing_else_imports_or_calls_v6():
                 importers.add(relative)
             if "interpret_audit_roots_v6" in text:
                 callers.add(relative)
-    assert importers == {"gate_v_exposure_store.py"} and not callers, (importers, callers)
+    return importers, callers
+
+
+def test_only_b5_and_the_audit_protocol_import_or_call_v6():
+    importers, callers = v6_consumers(Path(v6.__file__).parent)
+    assert importers == AUTHORISED_V6_IMPORTERS and callers == AUTHORISED_V6_CALLERS, (importers, callers)
+
+
+def test_the_historical_guard_still_rejects_any_other_consumer_of_v6(tmp_path):
+    """Négatif : l'autorisation est nominative (deux fichiers), jamais un jeu de modules ouvert. Un autre module qui importe ou appelle v6 sort de l'ensemble autorisé."""
+    (tmp_path / "gate_v_audit_protocol.py").write_text("import gate_v_exposure_interpreters_v6\ngate_v_exposure_interpreters_v6.interpret_audit_roots_v6\n")
+    (tmp_path / "gate_v_exposure_store.py").write_text("import gate_v_exposure_interpreters_v6\n")
+    assert v6_consumers(tmp_path) == (AUTHORISED_V6_IMPORTERS, AUTHORISED_V6_CALLERS)
+    (tmp_path / "rogue_consumer.py").write_text("from gate_v_exposure_interpreters_v6 import interpret_audit_roots_v6\n")
+    importers, callers = v6_consumers(tmp_path)
+    assert importers != AUTHORISED_V6_IMPORTERS and callers != AUTHORISED_V6_CALLERS and "rogue_consumer.py" in importers & callers
+    (tmp_path / "rogue_consumer.py").unlink()
+    (tmp_path / "gate_v_audit_protocol_copy.py").write_text("import gate_v_exposure_interpreters_v6\n")      # un nom voisin n'est pas autorisé
+    assert v6_consumers(tmp_path)[0] != AUTHORISED_V6_IMPORTERS
 
 
 # ══ 8. Identités historiques gelées, identité d'un nouvel inventaire v6, énumération exhaustive de la fonction de décision ═════════════════════════
