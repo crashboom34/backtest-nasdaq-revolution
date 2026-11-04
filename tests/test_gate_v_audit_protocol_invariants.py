@@ -36,10 +36,11 @@ def test_the_authority_constants_are_locked_to_exact_literals(report):
     assert report.auxiliary_runs is ap.AuxiliaryRuns.UNQUALIFIED and ap.AuxiliaryRuns.UNQUALIFIED.value == "UNQUALIFIED"
     assert report.s0_facts is ap.S0Facts.NOT_VERIFIED and ap.S0Facts.NOT_VERIFIED.value == "NOT_VERIFIED"
     assert report.persistence is ap.Persistence.NOT_PERSISTED and ap.Persistence.NOT_PERSISTED.value == "NOT_PERSISTED"
-    assert report.window_provenance is ap.WindowProvenance.UNVERIFIED and [m.value for m in ap.WindowProvenance] == ["UNVERIFIED"]
+    assert report.window_provenance is ap.WindowProvenance.UNVERIFIED       # requête par défaut (sans window_source) : jamais plus que la fenêtre de l'opérateur
+    assert [m.value for m in ap.WindowProvenance] == ["UNVERIFIED", "SPLIT_PLAN_FINGERPRINT_MATCHED"]      # N2-b1a : un seul niveau ajouté, dérivé d'une dérivation réussie
     assert report.grants == () and report.grants_nothing is True and report.independent_rescan_required is True
     assert ap.E3J_PREREQUISITES_UNMET == E3J_LITERALS and report.e3j_prerequisites_unmet == E3J_LITERALS
-    assert report.not_proven == vf.NOT_PROVEN + ("SNAPSHOT_ATOMICITY", "CHRONOLOGY", "INDEPENDENT_RESCAN", "S0_RECOMPUTATION")
+    assert report.not_proven == vf.NOT_PROVEN + ("SNAPSHOT_ATOMICITY", "CHRONOLOGY", "INDEPENDENT_RESCAN", "S0_RECOMPUTATION", "PLAN_SOURCES_AUTHENTICITY")      # N2-b1a : +1 littéral, dit que le plan V2 n'est pas revalidé contre ses sources
     assert ap.AUDIT_PROTOCOL_VERSION == "gate_v_audit_protocol_v1" and report.protocol_version == ap.AUDIT_PROTOCOL_VERSION
     assert report.b4_inventory is ap.Completeness.NOT_BUILT
 
@@ -123,7 +124,7 @@ def imported_modules() -> set:
 
 def test_the_protocol_imports_only_the_documented_modules():
     assert imported_modules() <= {"__future__", "dataclasses", "enum", "hashlib", "json", "os", "re", "typing",
-                                   "gate_v_exposure_interpreters", "gate_v_exposure_interpreters_v6", "gate_v_exposure_scan", "gate_v_exposure_sources",
+                                   "gate_v_audit_window", "gate_v_exposure_interpreters", "gate_v_exposure_interpreters_v6", "gate_v_exposure_scan", "gate_v_exposure_sources",
                                    "gate_v_k1s2_emptiness", "gate_v_k1s2_observations", "gate_v_k1s2_verifier"}, imported_modules()
     forbidden = ("gate_v_exposure_store", "gate_v_exposure_inventory", "gate_v_inventory_preconditions", "gate_v_registry", "gate_v_final_holdout", "gate_v_campaign_manifest",
                  "gate_v_exposure_declarations", "time", "datetime", "random", "socket", "subprocess", "pathlib", "shutil", "tempfile", "urllib", "requests")

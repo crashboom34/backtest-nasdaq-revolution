@@ -24,6 +24,7 @@ import os
 import re
 from typing import Optional
 
+import gate_v_audit_window as provenance
 from gate_v_exposure_interpreters import InterpretedScan, LayoutRoot, RootLayout, SourceInterpretation
 from gate_v_exposure_interpreters_v6 import B3_V6_RULES_DIGESTS, B3_V6_SEMANTICS_VERSION, interpret_audit_roots_v6
 from gate_v_exposure_scan import AuditRoot, EntryClass, EntryKind, ExposureScan, ExposureScanRefusal, HashLimits, ScanLimits, StructuralFailure, parse_strict_json, scan_worst_case_read_bytes
@@ -35,7 +36,7 @@ import gate_v_k1s2_verifier as verifier
 __all__ = [
     "AUDIT_B3_ACCEPTED", "AUDIT_PROTOCOL_VERSION", "E3J_PREREQUISITES_UNMET", "MAX_DETAIL_CHARS", "AbsenceEvidence", "AuditBlock", "AuditDefect", "AuditReport", "AuditRequest",
     "AuditRootSpec", "AuxiliaryRuns", "BlockCode", "ChainDefect", "ChainStatus", "Completeness", "ManifestState", "Persistence", "ProtocolLimits", "Receivability", "RefusalCode",
-    "RescanStatus", "RootReport", "S0Facts", "Stage", "WindowDeclaredSource", "WindowProvenance", "audit_campaign_exposure",
+    "RescanStatus", "RootReport", "S0Facts", "Stage", "WindowDeclaredSource", "WindowProvenance", "WindowSource", "audit_campaign_exposure",
 ]
 
 AUDIT_PROTOCOL_VERSION = "gate_v_audit_protocol_v1"
@@ -45,13 +46,14 @@ MAX_DETAIL_CHARS = 300
 # Ce que l'audit n'a PAS fait (liste reprise des obligations déjà écrites : préconditions, L3-A). Seule exemption du contrôle de vocabulaire : elle NOMME ce qui manque.
 E3J_PREREQUISITES_UNMET = ("INDEPENDENT_RESCAN", "CHRONOLOGY_PROOF", "SEAL_ANTERIORITY", "D5_PREDICATE", "S0_RECOMPUTATION", "INVENTORY_CONTENT_DIGEST_RECHECK", "ATTESTATION",
                            "AUTHORIZATION", "COMMITMENT", "RESERVATION_TIME_PROOF", "REGISTRY_CHAIN_STRICT_READ", "ADMISSION_WRITER")
-_NOT_PROVEN = verifier.NOT_PROVEN + ("SNAPSHOT_ATOMICITY", "CHRONOLOGY", "INDEPENDENT_RESCAN", "S0_RECOMPUTATION")
+_NOT_PROVEN = verifier.NOT_PROVEN + ("SNAPSHOT_ATOMICITY", "CHRONOLOGY", "INDEPENDENT_RESCAN", "S0_RECOMPUTATION", "PLAN_SOURCES_AUTHENTICITY")   # dernier : le plan V2 n'est pas revalidé contre ses sources (Git, pré-enregistrement)
 
 _CAMPAIGN_NAME = re.compile(r"gate_v_v2_[0-9a-f]{64}")
 _STATUS_ALIASES = {"READY_FOR_EXECUTION": "INITIAL", "RUNNING": "RUNNING", "TECHNICAL_FAILURE": "TECHNICAL_FAILURE", "EVIDENCE_INCOMPLETE": "EVIDENCE_INCOMPLETE",
                    "EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT": "EVIDENCE_COMPLETE"}
 _V6_DIGESTS = {layout: digest for _version, layout, digest in B3_V6_RULES_DIGESTS}
 _HASHED_LAYOUTS = frozenset({RootLayout.CAMPAIGN_DIR})            # seule disposition dont la table comporte des règles hachées : B3 n'y applique `hash_limits` qu'à elle
+_WINDOW_SOURCE_READS = 6          # majorant exact des lectures JSON de la provenance de W : split plan (1), plan (avant, chargeur, après = 3), relecture finale (plan, split plan = 2)
 
 
 # ── Vocabulaire fermé ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -65,6 +67,7 @@ class Stage(str, enum.Enum):
     FIRST_SCAN = "FIRST_SCAN"
     OBSERVATION = "OBSERVATION"
     SECOND_SCAN = "SECOND_SCAN"
+    WINDOW_SOURCE = "WINDOW_SOURCE"
     PROTOCOL = "PROTOCOL"
 
 
@@ -86,6 +89,10 @@ class RefusalCode(str, enum.Enum):
     RESCAN_STRUCTURAL_FAILURE = "RESCAN_STRUCTURAL_FAILURE"
     RESCAN_FACT_DRIFT = "RESCAN_FACT_DRIFT"
     RESCAN_IDENTITY_DRIFT = "RESCAN_IDENTITY_DRIFT"
+    WINDOW_SOURCE_INVALID = "WINDOW_SOURCE_INVALID"            # plan V2 ou plan de split absent, non strictement observé, mal formé ou refusé par son chargeur
+    PLAN_SPLIT_CONTRADICTION = "PLAN_SPLIT_CONTRADICTION"      # campagne, identifiant, snapshot ou empreinte recalculée : désaccord entre le plan V2 et le plan de split
+    WINDOW_MISMATCH = "WINDOW_MISMATCH"                        # la fenêtre de l'opérateur diffère de la fenêtre dérivée : jamais remplacée en silence
+    WINDOW_SOURCE_CHANGED = "WINDOW_SOURCE_CHANGED"            # un fichier source ne porte plus les octets observés par le premier scan
     AUDIT_INTERNAL_FAILURE = "AUDIT_INTERNAL_FAILURE"
 
 
@@ -128,11 +135,15 @@ class RescanStatus(str, enum.Enum):
 
 
 class WindowDeclaredSource(str, enum.Enum):
+    """Entrée : seule `OPERATOR_CONFIGURED` est acceptée. `SPLIT_PLAN_REFERENCED` n'existe que dans un RAPPORT, posée par le protocole après une dérivation réussie."""
+
     OPERATOR_CONFIGURED = "OPERATOR_CONFIGURED"
+    SPLIT_PLAN_REFERENCED = "SPLIT_PLAN_REFERENCED"
 
 
 class WindowProvenance(str, enum.Enum):
     UNVERIFIED = "UNVERIFIED"             # W est configurée par l'opérateur et non revalidée contre le plan V2 et le plan de split
+    SPLIT_PLAN_FINGERPRINT_MATCHED = "SPLIT_PLAN_FINGERPRINT_MATCHED"   # métadonnées du plan V2 et du plan de split COHÉRENTES : ni authenticité, ni chronologie, ni absence d'exposition
 
 
 class AbsenceEvidence(str, enum.Enum):
@@ -172,6 +183,14 @@ class AuditRootSpec:
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
+class WindowSource:
+    """Demande de dérivation de W : désigne la racine SPLIT_PLAN_DIR configurée qui porte `split_plan.json`. La racine propre (plan V2) est celle de la campagne propre. Ne REMPLACE
+    jamais la fenêtre de l'opérateur : la confronte."""
+
+    split_plan_root_label: str
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class AuditRequest:
     own_campaign_id: str
     roots: tuple
@@ -181,6 +200,7 @@ class AuditRequest:
     window_start_utc: str
     window_end_utc: str
     window_declared_source: WindowDeclaredSource
+    window_source: Optional[WindowSource] = None
 
 
 # ── Rapport ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -266,6 +286,12 @@ class AuditReport:
             raise ValueError("un audit recevable a terminé B3 et le rescan")
         if (self.b3_completeness is Completeness.COMPLETE) and self.incomplete_reasons:
             raise ValueError("COMPLETE exclut toute raison d'incomplétude")
+        if self.window_declared_source is not None and type(self.window_declared_source) is not WindowDeclaredSource:
+            raise ValueError("window_declared_source inconnu")
+        if self.window_declared_source is WindowDeclaredSource.SPLIT_PLAN_REFERENCED:
+            layouts = {r.layout for r in self.roots}
+            if self.receivability is not Receivability.RECEIVABLE or self.window is None or self.facts_s1 is None or self.facts_s1 != self.facts_s2                     or self.identity_s1 is None or self.identity_s1 != self.identity_s2 or not {RootLayout.CAMPAIGN_DIR, RootLayout.SPLIT_PLAN_DIR} <= layouts:
+                raise ValueError("la source dérivée n'est affirmée que par un audit recevable complet (fenêtre, empreintes S1 = S2, racines de campagne et de plan de split) ; ce n'est pas un justificatif")
 
     def __reduce__(self):
         raise TypeError("AuditReport n'est pas un justificatif transportable : ni sérialisation, ni copie")
@@ -276,6 +302,9 @@ class AuditReport:
 
     @property
     def window_provenance(self) -> WindowProvenance:
+        """Propriété DÉRIVÉE de `window_declared_source` (jamais un champ, jamais une entrée) : cohérence de métadonnées, pas une authenticité."""
+        if self.window_declared_source is WindowDeclaredSource.SPLIT_PLAN_REFERENCED:
+            return WindowProvenance.SPLIT_PLAN_FINGERPRINT_MATCHED
         return WindowProvenance.UNVERIFIED
 
     @property
@@ -369,8 +398,8 @@ def _validate(request) -> tuple:
         and _is_positive_int(request.protocol_limits.max_total_read_bytes)
     if not limits_ok:
         bad("protocol_limits doit être un ProtocolLimits d'entiers strictement positifs")
-    if type(request.window_declared_source) is not WindowDeclaredSource:
-        bad("window_declared_source inconnu")
+    if request.window_declared_source is not WindowDeclaredSource.OPERATOR_CONFIGURED:
+        bad("window_declared_source : seule OPERATOR_CONFIGURED est acceptée en entrée (la source dérivée est posée par le protocole)")
     window = None
     try:
         window = normalize_window(request.window_start_utc, request.window_end_utc)
@@ -391,6 +420,10 @@ def _validate(request) -> tuple:
         labels = [spec.label for spec in specs]
         if len(set(labels)) != len(labels):
             bad("deux racines portent le même label")
+    source = request.window_source
+    if source is not None and (type(source) is not WindowSource or type(source.split_plan_root_label) is not str
+                               or not any(spec.label == source.split_plan_root_label and spec.layout is RootLayout.SPLIT_PLAN_DIR for spec in specs)):
+        bad("window_source : un WindowSource exact désignant le label d'une racine SPLIT_PLAN_DIR configurée est attendu")
     if problems:
         return problems, (), window
     campaign = [(spec, root) for spec, root in zip(specs, roots) if spec.layout is RootLayout.CAMPAIGN_DIR]
@@ -405,7 +438,8 @@ def _validate(request) -> tuple:
     if foreign:
         return [_defect(RefusalCode.ROOT_FOREIGN, Stage.REQUEST, "le dossier de la racine n'a pas le nom attendu", label) for label in foreign], (), window
     groups = {spec.layout for spec in specs}
-    if limits_ok and request.hash_limits is not None and 2 * len(groups) * scan_worst_case_read_bytes(request.limits, request.hash_limits) > request.protocol_limits.max_total_read_bytes:
+    extra = _WINDOW_SOURCE_READS * request.limits.max_json_bytes if request.window_source is not None else 0
+    if limits_ok and request.hash_limits is not None and 2 * len(groups) * scan_worst_case_read_bytes(request.limits, request.hash_limits) + extra > request.protocol_limits.max_total_read_bytes:
         return [_defect(RefusalCode.RESOURCE_BUDGET_EXCEEDED, Stage.REQUEST, "le majorant de lecture (S1 + S2, par disposition) dépasse le budget")], (), window
     return [], tuple(zip(specs, roots)), window
 
@@ -514,7 +548,7 @@ def _identity(interpretation) -> dict:
                       "limits": dataclasses.asdict(s.limits), "hash_limits": dataclasses.asdict(s.hash_limits) if s.hash_limits is not None else None,
                       "roots": sorted([r.label, r.path, r.st_dev, r.st_ino, r.may_be_empty] for r in s.roots)})
     return {"semantics_version": interpretation.semantics_version, "window": [interpretation.holdout_window_start_utc, interpretation.holdout_window_end_utc],
-            "window_provenance": WindowProvenance.UNVERIFIED.value, "window_declared_source": WindowDeclaredSource.OPERATOR_CONFIGURED.value,
+            "window_provenance": WindowProvenance.UNVERIFIED.value, "window_declared_source": WindowDeclaredSource.OPERATOR_CONFIGURED.value,   # décrit le SCAN (fenêtre fournie à B3), pas la provenance
             "protocol_version": AUDIT_PROTOCOL_VERSION, "scans": scans, "files": _identity_rows(interpretation)}
 
 
@@ -624,6 +658,34 @@ def _distinct(first, second) -> bool:
     return all(a is not b and a.scan is not b.scan and (not a.scan.observations or a.scan.observations is not b.scan.observations) for a in first.scans for b in second.scans)
 
 
+_PROVENANCE_CODES = {provenance.WindowFailure.INVALID: RefusalCode.WINDOW_SOURCE_INVALID, provenance.WindowFailure.CONTRADICTION: RefusalCode.PLAN_SPLIT_CONTRADICTION,
+                     provenance.WindowFailure.CHANGED: RefusalCode.WINDOW_SOURCE_CHANGED}
+
+
+def _provenance_defect(error) -> AuditDefect:
+    return _defect(_PROVENANCE_CODES[error.failure], Stage.WINDOW_SOURCE, error.detail)
+
+
+def _window_paths(request, pairs) -> tuple:
+    """(racine propre, racine du plan de split) : chemins et labels des racines CONFIGURÉES, jamais déduits du disque."""
+    own = next(root for spec, root in pairs if spec.layout is RootLayout.CAMPAIGN_DIR and spec.expected_name == request.own_campaign_id)
+    split = next(root for spec, root in pairs if spec.layout is RootLayout.SPLIT_PLAN_DIR and spec.label == request.window_source.split_plan_root_label)
+    return own, split
+
+
+def _derive(request, pairs, first, window) -> tuple:
+    """(fenêtre dérivée, None) ou (None, refus). La fenêtre de l'opérateur n'est jamais remplacée : un désaccord est un refus."""
+    own, split = _window_paths(request, pairs)
+    try:
+        derived = provenance.derive_window(first, own_label=own.label, split_label=split.label, own_root_path=own.path, split_root_path=split.path,
+                                           own_campaign_id=request.own_campaign_id, max_json_bytes=request.limits.max_json_bytes)
+    except provenance.WindowSourceRefused as error:
+        return None, _provenance_defect(error)
+    if derived.window != window:
+        return None, _defect(RefusalCode.WINDOW_MISMATCH, Stage.WINDOW_SOURCE, "la fenêtre de l'opérateur diffère de la frontière final_holdout du plan de split")
+    return derived, None
+
+
 def _audit(request) -> AuditReport:
     problems, pairs, window = _validate(request)
     if problems:
@@ -637,6 +699,11 @@ def _audit(request) -> AuditReport:
     problems = _check_interpretation(first, request, pairs, window, Stage.FIRST_SCAN)
     if problems:
         return _refused(problems, window=window, source=source)
+    derived = None
+    if request.window_source is not None:
+        derived, refusal = _derive(request, pairs, first, window)
+        if refusal is not None:
+            return _refused([refusal], window=window, source=source)
     reports, blocks = {}, []
     for spec, root in pairs:
         if spec.layout is RootLayout.CAMPAIGN_DIR:
@@ -669,6 +736,13 @@ def _audit(request) -> AuditReport:
     if digests[2] != digests[3]:
         return _refused([_defect(RefusalCode.RESCAN_IDENTITY_DRIFT, Stage.SECOND_SCAN, "identité ou contexte différents entre S1 et S2 (fichier retouché, racine remplacée)")],
                         window=window, source=source, facts=digests, rescan=RescanStatus.DRIFT)
+    if derived is not None:
+        own, split = _window_paths(request, pairs)
+        try:
+            provenance.recheck_sources(derived, own_root_path=own.path, split_root_path=split.path, max_json_bytes=request.limits.max_json_bytes)
+        except provenance.WindowSourceRefused as error:
+            return _refused([_provenance_defect(error)], window=window, source=source, facts=digests, rescan=RescanStatus.PROTOCOL_RESCAN_MATCHED)
+        source = WindowDeclaredSource.SPLIT_PLAN_REFERENCED
     ordered = tuple(reports[root.label] for _spec, root in pairs)
     return AuditReport(Receivability.RECEIVABLE, blocks=tuple(blocks), window=window, window_declared_source=source, b3_semantics_version=first.semantics_version,
                        b3_completeness=Completeness.COMPLETE if first.complete else Completeness.INCOMPLETE, incomplete_reasons=tuple(first.incomplete_reasons), roots=ordered,

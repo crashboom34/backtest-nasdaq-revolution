@@ -46,7 +46,7 @@ def no_disk(monkeypatch):
 def test_the_public_entry_point_takes_exactly_one_request_and_the_request_carries_only_configuration():
     assert list(inspect.signature(ap.audit_campaign_exposure).parameters) == ["request"]
     assert {f.name for f in dataclasses.fields(ap.AuditRequest)} == {"own_campaign_id", "roots", "limits", "hash_limits", "protocol_limits", "window_start_utc",
-                                                                      "window_end_utc", "window_declared_source"}
+                                                                      "window_end_utc", "window_declared_source", "window_source"}      # N2-b1a : un seul bloc optionnel ajouté
     assert {f.name for f in dataclasses.fields(ap.AuditRootSpec)} == {"label", "path", "layout", "expected_name", "may_be_empty"}
     names = " ".join(f.name for cls in (ap.AuditRequest, ap.AuditRootSpec, ap.ProtocolLimits) for f in dataclasses.fields(cls)).lower()
     for forbidden in ("scan", "tree", "interpretation", "inventory", "hook", "finding", "fact", "verdict", "observation"):
@@ -54,9 +54,13 @@ def test_the_public_entry_point_takes_exactly_one_request_and_the_request_carrie
 
 
 def test_no_limit_has_a_default_value():
+    """N2-b1a : la seule exemption est le bloc OPTIONNEL `window_source` (défaut `None` = mode N2-a). Les plafonds et la fenêtre de l'opérateur restent sans valeur par défaut."""
+    defaulted = set()
     for cls in (ap.AuditRequest, ap.ProtocolLimits):
         for field in dataclasses.fields(cls):
-            assert field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING, (cls.__name__, field.name)
+            if field.default is not dataclasses.MISSING or field.default_factory is not dataclasses.MISSING:
+                defaulted.add((cls.__name__, field.name, field.default))
+    assert defaulted == {("AuditRequest", "window_source", None)}
 
 
 @pytest.mark.parametrize("hostile", [None, 0, "request", {}, [], object(), scan.ExposureScanRefusal, ScanHooks()])
@@ -204,7 +208,8 @@ def test_the_refusal_detail_is_bounded_and_the_code_set_is_closed():
     assert {c.value for c in ap.RefusalCode} == {
         "REQUEST_INVALID", "HASH_LIMITS_MISSING", "RESOURCE_BUDGET_EXCEEDED", "ROOT_FOREIGN", "SCAN_STRUCTURAL_FAILURE", "SCAN_UNSTABLE", "SCAN_HOOKS_PRESENT",
         "SCAN_TABLE_MISMATCH", "SCAN_LIMITS_MISMATCH", "SCAN_CONTEXT_MISMATCH", "VERSION_BELOW_MINIMUM", "OBSERVATION_REFUSED", "OBSERVATION_PROJECTION_MISMATCH", "RESCAN_NOT_DISTINCT",
-        "RESCAN_STRUCTURAL_FAILURE", "RESCAN_FACT_DRIFT", "RESCAN_IDENTITY_DRIFT", "AUDIT_INTERNAL_FAILURE"}
+        "RESCAN_STRUCTURAL_FAILURE", "RESCAN_FACT_DRIFT", "RESCAN_IDENTITY_DRIFT", "AUDIT_INTERNAL_FAILURE",
+        "WINDOW_SOURCE_INVALID", "PLAN_SPLIT_CONTRADICTION", "WINDOW_MISMATCH", "WINDOW_SOURCE_CHANGED"}      # N2-b1a : quatre codes de provenance de W
     assert {c.value for c in ap.BlockCode} == {"CHAIN_INCOHERENT", "EMPTINESS_BLOCKING"}
 
 
