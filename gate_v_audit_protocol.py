@@ -10,8 +10,8 @@ jamais un scan, un arbre observé, une interprétation, des hooks, des findings 
 
 Le rapport n'accorde rien : aucun statut n'est FRESH, NO_OVERLAP, une autorisation de réservation ou d'admission, un accès au holdout ou un passage de la Gate V. Il n'est pas un
 justificatif transportable (aucune API de sérialisation, ni pickle ni copie ; les empreintes F / I sont des champs de diagnostic, pas des justificatifs) : l'aval relance l'audit. En Python, un
-objet du même processus reste forgeable : limite de protocole, pas cryptographique. Aucun A0, aucune déclaration, aucun Claim, aucun écrivain de registre, aucun B4,
-aucun B5. La fenêtre W est celle de l'opérateur, NON revalidée (`UNVERIFIED`). L3-A prouve une cohérence avec les observations fournies, jamais l'exclusion.
+objet du même processus reste forgeable : limite de protocole, pas cryptographique. Aucun A0, aucune déclaration, aucun Claim, aucun écrivain de registre, aucun B5 ;
+B4 et le registre n'interviennent que par le bloc OPTIONNEL `registry` (N2-b1b : lecture seule, adaptateur interne, trois dimensions distinctes jamais agrégées, aucune écriture). La fenêtre W est celle de l'opérateur, NON revalidée (`UNVERIFIED`). L3-A prouve une cohérence avec les observations fournies, jamais l'exclusion.
 """
 
 from __future__ import annotations
@@ -24,7 +24,9 @@ import os
 import re
 from typing import Optional
 
+import gate_v_audit_registry as registry_audit
 import gate_v_audit_window as provenance
+from gate_v_audit_registry import RegistryConfig, RegistryCoverage, TrialCounter
 from gate_v_exposure_interpreters import InterpretedScan, LayoutRoot, RootLayout, SourceInterpretation
 from gate_v_exposure_interpreters_v6 import B3_V6_RULES_DIGESTS, B3_V6_SEMANTICS_VERSION, interpret_audit_roots_v6
 from gate_v_exposure_scan import AuditRoot, EntryClass, EntryKind, ExposureScan, ExposureScanRefusal, HashLimits, ScanLimits, StructuralFailure, parse_strict_json, scan_worst_case_read_bytes
@@ -36,7 +38,7 @@ import gate_v_k1s2_verifier as verifier
 __all__ = [
     "AUDIT_B3_ACCEPTED", "AUDIT_PROTOCOL_VERSION", "E3J_PREREQUISITES_UNMET", "MAX_DETAIL_CHARS", "AbsenceEvidence", "AuditBlock", "AuditDefect", "AuditReport", "AuditRequest",
     "AuditRootSpec", "AuxiliaryRuns", "BlockCode", "ChainDefect", "ChainStatus", "Completeness", "ManifestState", "Persistence", "ProtocolLimits", "Receivability", "RefusalCode",
-    "RescanStatus", "RootReport", "S0Facts", "Stage", "WindowDeclaredSource", "WindowProvenance", "WindowSource", "audit_campaign_exposure",
+    "RegistryConfig", "RescanStatus", "RootReport", "S0Facts", "Stage", "WindowDeclaredSource", "WindowProvenance", "WindowSource", "audit_campaign_exposure",
 ]
 
 AUDIT_PROTOCOL_VERSION = "gate_v_audit_protocol_v1"
@@ -46,13 +48,19 @@ MAX_DETAIL_CHARS = 300
 # Ce que l'audit n'a PAS fait (liste reprise des obligations déjà écrites : préconditions, L3-A). Seule exemption du contrôle de vocabulaire : elle NOMME ce qui manque.
 E3J_PREREQUISITES_UNMET = ("INDEPENDENT_RESCAN", "CHRONOLOGY_PROOF", "SEAL_ANTERIORITY", "D5_PREDICATE", "S0_RECOMPUTATION", "INVENTORY_CONTENT_DIGEST_RECHECK", "ATTESTATION",
                            "AUTHORIZATION", "COMMITMENT", "RESERVATION_TIME_PROOF", "REGISTRY_CHAIN_STRICT_READ", "ADMISSION_WRITER")
-_NOT_PROVEN = verifier.NOT_PROVEN + ("SNAPSHOT_ATOMICITY", "CHRONOLOGY", "INDEPENDENT_RESCAN", "S0_RECOMPUTATION", "PLAN_SOURCES_AUTHENTICITY")   # dernier : le plan V2 n'est pas revalidé contre ses sources (Git, pré-enregistrement)
+_NOT_PROVEN = verifier.NOT_PROVEN + ("SNAPSHOT_ATOMICITY", "CHRONOLOGY", "INDEPENDENT_RESCAN", "S0_RECOMPUTATION", "PLAN_SOURCES_AUTHENTICITY",   # b1a : le plan V2 n'est pas revalidé contre ses sources
+                                     "CAMPAIGNS_OUTSIDE_REGISTRY", "TRIAL_ACCOUNTING", "DERIVED_ROOT_CONTENT_ATTRIBUTION", "REGISTRY_NOT_REAL_BOUND", "STAGE_CONSUMPTION_LINK_UNVERIFIED")   # N2-b1b, constants dans tous les modes
 
 _CAMPAIGN_NAME = re.compile(r"gate_v_v2_[0-9a-f]{64}")
 _STATUS_ALIASES = {"READY_FOR_EXECUTION": "INITIAL", "RUNNING": "RUNNING", "TECHNICAL_FAILURE": "TECHNICAL_FAILURE", "EVIDENCE_INCOMPLETE": "EVIDENCE_INCOMPLETE",
                    "EVIDENCE_COMPLETE_AWAITING_FINAL_HOLDOUT": "EVIDENCE_COMPLETE"}
 _V6_DIGESTS = {layout: digest for _version, layout, digest in B3_V6_RULES_DIGESTS}
 _HASHED_LAYOUTS = frozenset({RootLayout.CAMPAIGN_DIR})            # seule disposition dont la table comporte des règles hachées : B3 n'y applique `hash_limits` qu'à elle
+_BLOCK_SENTINEL_LABEL = "(registry)"          # ne peut pas heurter un label d'opérateur : les labels portables n'admettent pas de parenthèse
+_COUNTER_ORDER = ("research_runs", "strategies", "campaigns", "abandoned_reservations", "failed_ingestion_attempts", "void_commitments")
+_MAX_B4_REASONS = 64
+_MAX_UNCOVERED_SAMPLE = 20
+_CANDIDATE_READS = 3          # lectures du JSON d'une racine candidate (deux gardées autour du chargeur du plan V2, plus la lecture du chargeur lui-même) : majorant TYPIQUE, non imposé (le chargeur lit sans plafond)
 _WINDOW_SOURCE_READS = 6          # majorant exact des lectures JSON de la provenance de W : split plan (1), plan (avant, chargeur, après = 3), relecture finale (plan, split plan = 2)
 
 
@@ -68,6 +76,7 @@ class Stage(str, enum.Enum):
     OBSERVATION = "OBSERVATION"
     SECOND_SCAN = "SECOND_SCAN"
     WINDOW_SOURCE = "WINDOW_SOURCE"
+    REGISTRY = "REGISTRY"
     PROTOCOL = "PROTOCOL"
 
 
@@ -91,8 +100,12 @@ class RefusalCode(str, enum.Enum):
     RESCAN_IDENTITY_DRIFT = "RESCAN_IDENTITY_DRIFT"
     WINDOW_SOURCE_INVALID = "WINDOW_SOURCE_INVALID"            # plan V2 ou plan de split absent, non strictement observé, mal formé ou refusé par son chargeur
     PLAN_SPLIT_CONTRADICTION = "PLAN_SPLIT_CONTRADICTION"      # campagne, identifiant, snapshot ou empreinte recalculée : désaccord entre le plan V2 et le plan de split
-    WINDOW_MISMATCH = "WINDOW_MISMATCH"                        # la fenêtre de l'opérateur diffère de la fenêtre dérivée : jamais remplacée en silence
+    WINDOW_MISMATCH = "WINDOW_MISMATCH"                        # la fenêtre de l'opérateur diffère de la fenêtre dérivée, ou d'un enregistrement propre du registre : jamais remplacée en silence
     WINDOW_SOURCE_CHANGED = "WINDOW_SOURCE_CHANGED"            # un fichier source ne porte plus les octets observés par le premier scan
+    REGISTRY_UNREADABLE = "REGISTRY_UNREADABLE"                # N2-b1b : le registre n'a pas pu être lu de façon sûre (R1 ou R2)
+    REGISTRY_CHAIN_HEAD_CHANGED = "REGISTRY_CHAIN_HEAD_CHANGED"  # R2 diffère de R1 : un ajout légitime pendant l'audit invalide l'audit
+    STAGE_NOT_DERIVABLE = "STAGE_NOT_DERIVABLE"                # l'étage de l'enregistrement propre n'est pas dérivable des faits
+    B4_ASSEMBLY_REFUSED = "B4_ASSEMBLY_REFUSED"                # la conversion ou l'assemblage de B4 est refusé
     AUDIT_INTERNAL_FAILURE = "AUDIT_INTERNAL_FAILURE"
 
 
@@ -101,6 +114,7 @@ class BlockCode(str, enum.Enum):
 
     CHAIN_INCOHERENT = "CHAIN_INCOHERENT"
     EMPTINESS_BLOCKING = "EMPTINESS_BLOCKING"
+    DERIVED_COVERAGE_PARTIAL = "DERIVED_COVERAGE_PARTIAL"      # N2-b1b : une campagne de la chaîne n'a pas de racine dérivée ; jamais un refus
 
 
 class Completeness(str, enum.Enum):
@@ -201,6 +215,7 @@ class AuditRequest:
     window_end_utc: str
     window_declared_source: WindowDeclaredSource
     window_source: Optional[WindowSource] = None
+    registry: Optional[RegistryConfig] = None          # N2-b1b : lecture d'audit du registre SYNTHÉTIQUE ; None = mode N2-a / N2-b1a inchangé
 
 
 # ── Rapport ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -272,8 +287,25 @@ class AuditReport:
     facts_s2: Optional[str] = None
     identity_s1: Optional[str] = None
     identity_s2: Optional[str] = None
+    # N2-b1b : trois dimensions DISTINCTES (b3_completeness, b4_completeness, registry_coverage), jamais agrégées ; vides, None, NOT_BUILT ou NOT_ASSESSED sans registre et pour tout rapport REFUSED.
+    b4_completeness: Completeness = Completeness.NOT_BUILT
+    b4_incomplete_reasons: tuple = ()
+    b4_semantics_version: Optional[str] = None
+    registry_id: Optional[str] = None
+    registry_chain_head: Optional[str] = None
+    registry_slot_count: Optional[int] = None
+    registry_rebind_count: Optional[int] = None
+    registry_durability_profile: Optional[str] = None
+    derived_root_labels: tuple = ()
+    registry_coverage: RegistryCoverage = RegistryCoverage.NOT_ASSESSED
+    registry_other_campaign_count: Optional[int] = None
+    registry_uncovered_count: Optional[int] = None
+    registry_uncovered_sample: tuple = ()
+    trial_counters: tuple = ()
+    trial_counter_reasons: tuple = ()
 
     def __post_init__(self) -> None:
+        self._check_registry_fields()
         if type(self.receivability) is not Receivability or type(self.refusals) is not tuple or type(self.blocks) is not tuple or type(self.roots) is not tuple:
             raise ValueError("AuditReport mal formé")
         if any(type(d) is not AuditDefect for d in self.refusals) or any(type(b) is not AuditBlock for b in self.blocks) or any(type(r) is not RootReport for r in self.roots):
@@ -293,6 +325,52 @@ class AuditReport:
             if self.receivability is not Receivability.RECEIVABLE or self.window is None or self.facts_s1 is None or self.facts_s1 != self.facts_s2                     or self.identity_s1 is None or self.identity_s1 != self.identity_s2 or not {RootLayout.CAMPAIGN_DIR, RootLayout.SPLIT_PLAN_DIR} <= layouts:
                 raise ValueError("la source dérivée n'est affirmée que par un audit recevable complet (fenêtre, empreintes S1 = S2, racines de campagne et de plan de split) ; ce n'est pas un justificatif")
 
+    def _check_registry_fields(self) -> None:
+        """Invariants (1) à (9) des champs de registre (note N2-b1b, 19.11). Constructeur seulement : un rapport forgé par `object.__new__` reste possible (limite T16)."""
+        bad = ValueError("AuditReport : champs de registre incohérents")
+        blocks = tuple(b for b in self.blocks if type(b) is AuditBlock) if type(self.blocks) is tuple else ()
+        if type(self.b4_completeness) is not Completeness or type(self.registry_coverage) is not RegistryCoverage:
+            raise bad
+        if any(type(value) is not tuple for value in (self.b4_incomplete_reasons, self.derived_root_labels, self.registry_uncovered_sample, self.trial_counters, self.trial_counter_reasons)):
+            raise bad
+        empty = (self.registry_id is None and self.registry_chain_head is None and self.registry_slot_count is None and self.registry_rebind_count is None
+                 and self.registry_durability_profile is None and self.b4_semantics_version is None and self.registry_other_campaign_count is None
+                 and self.registry_uncovered_count is None and not self.b4_incomplete_reasons and not self.derived_root_labels and not self.registry_uncovered_sample
+                 and not self.trial_counters and not self.trial_counter_reasons)
+        absent = self.registry_id is None
+        if not (absent == (self.b4_completeness is Completeness.NOT_BUILT) == (self.registry_coverage is RegistryCoverage.NOT_ASSESSED) == empty):          # (1)
+            raise bad
+        if absent:
+            if any(b.code is BlockCode.DERIVED_COVERAGE_PARTIAL for b in blocks):
+                raise bad
+            return
+        if self.receivability is Receivability.REFUSED:                                                                                                  # (7)
+            raise bad
+        if any(type(v) is not int or v < 0 for v in (self.registry_slot_count, self.registry_rebind_count, self.registry_other_campaign_count, self.registry_uncovered_count)):
+            raise bad
+        if any(type(v) is not str or not v for v in (self.registry_id, self.registry_chain_head, self.registry_durability_profile, self.b4_semantics_version)):
+            raise bad
+        reasons = self.b4_incomplete_reasons
+        if any(type(r) is not str for r in reasons) or list(reasons) != sorted(reasons) or len(reasons) > _MAX_B4_REASONS:                                  # (6)
+            raise bad
+        if self.b4_completeness is Completeness.COMPLETE and (self.b3_completeness is not Completeness.COMPLETE or reasons):                               # (2)
+            raise bad
+        if self.b4_completeness is Completeness.INCOMPLETE and self.b3_completeness is Completeness.COMPLETE and not reasons:                              # (8)
+            raise bad
+        partial_block = any(b.code is BlockCode.DERIVED_COVERAGE_PARTIAL for b in blocks)
+        partial = self.registry_coverage is RegistryCoverage.PARTIAL
+        if not (partial == (self.registry_uncovered_count > 0) == partial_block) or self.registry_uncovered_count > self.registry_other_campaign_count:           # (3)
+            raise bad
+        sample = self.registry_uncovered_sample
+        if any(type(s) is not str for s in sample) or list(sample) != sorted(set(sample)) or len(sample) != min(_MAX_UNCOVERED_SAMPLE, self.registry_uncovered_count):   # (4)
+            raise bad
+        if len(self.trial_counters) != 6 or any(type(c) is not TrialCounter for c in self.trial_counters) or [c.name for c in self.trial_counters] != list(_COUNTER_ORDER):  # (5)
+            raise bad
+        if any(type(r) is not str for r in self.trial_counter_reasons) or any(type(label) is not str for label in self.derived_root_labels):
+            raise bad
+        if len(self.derived_root_labels) + self.registry_uncovered_count != self.registry_other_campaign_count:                                              # (9)
+            raise bad
+
     def __reduce__(self):
         raise TypeError("AuditReport n'est pas un justificatif transportable : ni sérialisation, ni copie")
 
@@ -309,7 +387,8 @@ class AuditReport:
 
     @property
     def b4_inventory(self) -> Completeness:
-        return Completeness.NOT_BUILT
+        """Alias en lecture seule de `b4_completeness` (NOT_BUILT sans registre)."""
+        return self.b4_completeness
 
     @property
     def absence_evidence(self) -> AbsenceEvidence:
@@ -424,6 +503,12 @@ def _validate(request) -> tuple:
     if source is not None and (type(source) is not WindowSource or type(source.split_plan_root_label) is not str
                                or not any(spec.label == source.split_plan_root_label and spec.layout is RootLayout.SPLIT_PLAN_DIR for spec in specs)):
         bad("window_source : un WindowSource exact désignant le label d'une racine SPLIT_PLAN_DIR configurée est attendu")
+    registry_part = 0
+    if request.registry is not None:
+        try:
+            registry_part = registry_audit.validate_config(request.registry, audit_root_paths=tuple(root.path for root in roots))
+        except registry_audit.RegistryAuditRefused as error:
+            problems.append(_registry_defect(error))
     if problems:
         return problems, (), window
     campaign = [(spec, root) for spec, root in zip(specs, roots) if spec.layout is RootLayout.CAMPAIGN_DIR]
@@ -439,7 +524,12 @@ def _validate(request) -> tuple:
         return [_defect(RefusalCode.ROOT_FOREIGN, Stage.REQUEST, "le dossier de la racine n'a pas le nom attendu", label) for label in foreign], (), window
     groups = {spec.layout for spec in specs}
     extra = _WINDOW_SOURCE_READS * request.limits.max_json_bytes if request.window_source is not None else 0
+    if request.registry is not None:
+        # part registre (R1 + R2) puis lectures des plans des racines candidates (toutes les racines CAMPAIGN_DIR NON propres, comptées avant tout accès disque)
+        extra += registry_part + _CANDIDATE_READS * request.limits.max_json_bytes * (len(campaign) - 1)
     if limits_ok and request.hash_limits is not None and 2 * len(groups) * scan_worst_case_read_bytes(request.limits, request.hash_limits) + extra > request.protocol_limits.max_total_read_bytes:
+        if request.registry is not None:
+            return [_defect(RefusalCode.RESOURCE_BUDGET_EXCEEDED, Stage.REQUEST, "REGISTRY_BUDGET")], (), window
         return [_defect(RefusalCode.RESOURCE_BUDGET_EXCEEDED, Stage.REQUEST, "le majorant de lecture (S1 + S2, par disposition) dépasse le budget")], (), window
     return [], tuple(zip(specs, roots)), window
 
@@ -666,6 +756,16 @@ def _provenance_defect(error) -> AuditDefect:
     return _defect(_PROVENANCE_CODES[error.failure], Stage.WINDOW_SOURCE, error.detail)
 
 
+def _registry_defect(error) -> AuditDefect:
+    """Conversion par table d'un refus de l'adaptateur (chaîne d'un ensemble fermé) en refus typé du protocole : `REQUEST_INVALID` reste une erreur de requête, les autres portent `Stage.REGISTRY`."""
+    code = RefusalCode(error.code)
+    return _defect(code, Stage.REQUEST if code is RefusalCode.REQUEST_INVALID else Stage.REGISTRY, error.detail)
+
+
+def _campaign_roots(pairs) -> tuple:
+    return tuple((root.label, root.path, spec.expected_name) for spec, root in pairs if spec.layout is RootLayout.CAMPAIGN_DIR)
+
+
 def _window_paths(request, pairs) -> tuple:
     """(racine propre, racine du plan de split) : chemins et labels des racines CONFIGURÉES, jamais déduits du disque."""
     own = next(root for spec, root in pairs if spec.layout is RootLayout.CAMPAIGN_DIR and spec.expected_name == request.own_campaign_id)
@@ -691,6 +791,12 @@ def _audit(request) -> AuditReport:
     if problems:
         return _refused(problems, window=window)
     source = request.window_declared_source
+    handle = None
+    if request.registry is not None:                                 # R1 : avant tout scan ; échec ou fenêtre propre incohérente ⇒ refus typé immédiat
+        try:
+            handle = registry_audit.read(request.registry, own_campaign_id=request.own_campaign_id, window=window)
+        except registry_audit.RegistryAuditRefused as error:
+            return _refused([_registry_defect(error)], window=window, source=source)
     roots = _layout_roots(pairs)
     try:
         first = interpret_audit_roots_v6(roots, request.limits, hash_limits=request.hash_limits, holdout_window_start_utc=window[0], holdout_window_end_utc=window[1])
@@ -717,6 +823,13 @@ def _audit(request) -> AuditReport:
             blocks.extend(more)
         else:
             reports[root.label] = RootReport(root.label, spec.layout, None, None, ChainStatus.NOT_EVALUATED, (), None, (), ())
+    assessment = None
+    if handle is not None:                                           # conversion, étage, racines dérivées, couverture, comptabilité, B4 : sur R1 et S1, avant S2
+        try:
+            assessment = registry_audit.assess(handle, first, own_campaign_id=request.own_campaign_id, window=window, campaign_roots=_campaign_roots(pairs),
+                                               max_json_bytes=request.limits.max_json_bytes)
+        except registry_audit.RegistryAuditRefused as error:
+            return _refused([_registry_defect(error)], window=window, source=source)
     facts_1, identity_1 = _facts(first), _identity(first)
     try:
         second = interpret_audit_roots_v6(_layout_roots(pairs), request.limits, hash_limits=request.hash_limits, holdout_window_start_utc=window[0],
@@ -742,11 +855,28 @@ def _audit(request) -> AuditReport:
             provenance.recheck_sources(derived, own_root_path=own.path, split_root_path=split.path, max_json_bytes=request.limits.max_json_bytes)
         except provenance.WindowSourceRefused as error:
             return _refused([_provenance_defect(error)], window=window, source=source, facts=digests, rescan=RescanStatus.PROTOCOL_RESCAN_MATCHED)
+    if handle is not None:                                           # R2 : après la relecture finale de la fenêtre ; la source de la fenêtre de l'opérateur est conservée en cas de refus
+        try:
+            registry_audit.compare(handle, request.registry)
+        except registry_audit.RegistryAuditRefused as error:
+            return _refused([_registry_defect(error)], window=window, source=source, facts=digests, rescan=RescanStatus.PROTOCOL_RESCAN_MATCHED)
+    if derived is not None:
         source = WindowDeclaredSource.SPLIT_PLAN_REFERENCED
     ordered = tuple(reports[root.label] for _spec, root in pairs)
+    registry_fields = {}
+    if assessment is not None:
+        registry_fields = dict(
+            b4_completeness=Completeness.COMPLETE if assessment.b4_complete else Completeness.INCOMPLETE, b4_incomplete_reasons=assessment.b4_incomplete_reasons,
+            b4_semantics_version=assessment.b4_semantics_version, registry_id=assessment.registry_id, registry_chain_head=assessment.registry_chain_head,
+            registry_slot_count=assessment.registry_slot_count, registry_rebind_count=assessment.registry_rebind_count,
+            registry_durability_profile=assessment.registry_durability_profile, derived_root_labels=assessment.derived_root_labels, registry_coverage=assessment.registry_coverage,
+            registry_other_campaign_count=assessment.registry_other_campaign_count, registry_uncovered_count=assessment.registry_uncovered_count,
+            registry_uncovered_sample=assessment.registry_uncovered_sample, trial_counters=assessment.trial_counters, trial_counter_reasons=assessment.trial_counter_reasons)
+        if assessment.registry_coverage is RegistryCoverage.PARTIAL:
+            blocks.append(AuditBlock(BlockCode.DERIVED_COVERAGE_PARTIAL, _BLOCK_SENTINEL_LABEL, _clip(f"UNCOVERED:{assessment.registry_uncovered_count}/{assessment.registry_other_campaign_count}")))
     return AuditReport(Receivability.RECEIVABLE, blocks=tuple(blocks), window=window, window_declared_source=source, b3_semantics_version=first.semantics_version,
                        b3_completeness=Completeness.COMPLETE if first.complete else Completeness.INCOMPLETE, incomplete_reasons=tuple(first.incomplete_reasons), roots=ordered,
-                       rescan=RescanStatus.PROTOCOL_RESCAN_MATCHED, facts_s1=digests[0], facts_s2=digests[1], identity_s1=digests[2], identity_s2=digests[3])
+                       rescan=RescanStatus.PROTOCOL_RESCAN_MATCHED, facts_s1=digests[0], facts_s2=digests[1], identity_s1=digests[2], identity_s2=digests[3], **registry_fields)
 
 
 def audit_campaign_exposure(request) -> AuditReport:

@@ -27,7 +27,7 @@ from gate_v_exposure_interpreters import TAG_SPLIT_PLAN, RootLayout
 from gate_v_exposure_scan import EntryKind
 from gate_v_exposure_sources import normalize_window
 
-__all__ = ["DerivedWindow", "WindowFailure", "WindowSourceRefused", "derive_window", "recheck_sources"]
+__all__ = ["DerivedWindow", "WindowFailure", "WindowSourceRefused", "derive_window", "plan_root_attributed", "recheck_sources"]
 
 PLAN_FILE = "plan.json"
 SPLIT_FILE = "split_plan.json"
@@ -200,3 +200,21 @@ def recheck_sources(derived: DerivedWindow, *, own_root_path: str, split_root_pa
     """Relecture gardée finale (après le second scan) : les deux fichiers doivent redonner les empreintes de S1. Tout écart ou toute lecture impossible est `CHANGED`."""
     _same_bytes(own_root_path, PLAN_FILE, derived.plan_sha256, max_json_bytes, on_guard_failure=WindowFailure.CHANGED)
     _same_bytes(split_root_path, SPLIT_FILE, derived.split_sha256, max_json_bytes, on_guard_failure=WindowFailure.CHANGED)
+
+
+def plan_root_attributed(interpretation, *, label: str, root_path: str, expected_name: str, max_json_bytes: int) -> bool:
+    """N2-b1b : le plan V2 d'une racine de campagne porte-t-il le nom attendu ? Vrai seulement si le premier scan contient EXACTEMENT une observation propre et lue de `plan.json` pour cette
+    racine (objet JSON), et si le chargeur historique du plan V2 (qui RECALCULE le `campaign_id` depuis le contenu), encadré par deux lectures gardées dont l'empreinte égale celle du premier
+    scan, rend un plan dont l'identifiant égale `expected_name` et l'enregistrement strict du premier scan. Toute autre issue est `False` (jamais un refus) : la racine reste STATIQUE.
+    Ce n'est PAS une preuve que le dossier contienne les données réelles de la campagne : un plan authentique recopié dans un dossier de même nom passerait. Fonction nouvelle ; aucune
+    fonction de b1a n'est modifiée ni appelée à sa place. Limites dites sans détour : le chargeur historique lit SANS plafond (un fichier qui grossit entre les deux lectures gardées est lu
+    en entier avant d'être rejeté par l'empreinte : risque de mémoire, non imposé) ; un retour à l'identique entre les deux lectures gardées (ABA) n'est pas détecté."""
+    try:
+        observation, record = _observed(interpretation, RootLayout.CAMPAIGN_DIR, label, PLAN_FILE)
+        sha256 = observation.content_hash
+        _same_bytes(root_path, PLAN_FILE, sha256, max_json_bytes, on_guard_failure=WindowFailure.INVALID)
+        plan = load_gate_v_campaign_plan_v2(os.path.join(root_path, PLAN_FILE))
+        _same_bytes(root_path, PLAN_FILE, sha256, max_json_bytes, on_guard_failure=WindowFailure.CHANGED)
+    except (WindowSourceRefused, OSError, ValueError, TypeError, RuntimeError, MemoryError):
+        return False
+    return plan.campaign_id == expected_name and record.get("campaign_id") == plan.campaign_id

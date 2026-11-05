@@ -24,6 +24,7 @@ import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 
 from atomic_json_store import (
     DurabilityProfile,
@@ -56,6 +57,9 @@ MAX_IDENTITY_BYTES = 4096
 MAX_SLOTS = 100000
 # PROPOSÉ (P20) : nombre de listages de `admissions/` avant de conclure à un trou (un listage peut être déchiré par un ajout concurrent).
 LISTING_ATTEMPTS = 3
+# PROPOSÉ (N2-b1b, option B) : marge d'entrées de TOUTE nature (orphelin `.registry.tmp.*`, entrée inconnue) tolérée en plus de `max_slots` par un listage PLAFONNÉ ; elle ne sert qu'aux plafonds
+# explicites de `read_registry` (jamais au chemin par défaut). La racine du registre admet `MAX_ORPHAN_ENTRIES + 2` entrées (identity.json, admissions/ et les autres).
+MAX_ORPHAN_ENTRIES = 1024
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
@@ -205,13 +209,19 @@ def _root_path(root: object) -> Path:
     return path
 
 
-def _directory_entries(directory: Path, what: str) -> list:
+def _directory_entries(directory: Path, what: str, *, max_entries: Optional[int] = None) -> list:
     """Listage `(nom, lstat)`. Un temporaire `.registry.tmp.*` qui disparaît entre le listage et son `lstat` est celui d'un écrivain CONCURRENT (créé puis supprimé, 23.10 étape 7) :
-    il est ignoré. La disparition de toute autre entrée (slot, identité, répertoire) est une anomalie : échec fermé."""
+    il est ignoré. La disparition de toute autre entrée (slot, identité, répertoire) est une anomalie : échec fermé.
+    `max_entries` (plafonds explicites seulement) : le compteur est incrémenté EN TÊTE DE BOUCLE pour chaque entrée produite par `scandir`, avant `lstat` ; la `(max_entries + 1)`ᵉ lève
+    `TOO_MANY_SLOTS` sans `lstat` ni rangement. Il borne les entrées produites ; il ne borne NI le temps de `scandir` côté noyau, NI la mémoire de la chaîne."""
     entries = []
+    produced = 0
     try:
         with os.scandir(directory) as iterator:
             for entry in iterator:
+                produced += 1
+                if max_entries is not None and produced > max_entries:
+                    _fail(ReadFailure.TOO_MANY_SLOTS, f"plus de {max_entries} entrées dans {what} (plafond d'énumération).")
                 try:
                     info = os.lstat(entry.path)
                 except FileNotFoundError:
@@ -273,12 +283,14 @@ def _read_identity(root: Path) -> RegistryIdentity:
     return RegistryIdentity(registry_id=registry_id, instance_id=instance_id, mode=mode, durability_profile=profile)
 
 
-def _slot_sequence(admissions: Path) -> list:
+def _slot_sequence(admissions: Path, *, max_slots: Optional[int] = None, max_entries: Optional[int] = None) -> list:
     """Numéros des slots, denses depuis 0. Un répertoire n'est pas un instantané : pendant un ajout concurrent, UN listage peut montrer le slot n+1 sans le slot n. Un trou n'est donc
     conclu qu'après `LISTING_ATTEMPTS` listages successifs (re-observation, jamais une réparation) ; les appends ne font qu'ajouter des slots de rang plus élevé."""
+    slot_limit = MAX_SLOTS if max_slots is None else max_slots
     for _ in range(LISTING_ATTEMPTS):
         slots = {}
-        for name, info in _directory_entries(admissions, "admissions/"):
+        listed = _directory_entries(admissions, "admissions/") if max_entries is None else _directory_entries(admissions, "admissions/", max_entries=max_entries)
+        for name, info in listed:
             seq = parse_slot_file_name(name)
             if seq is None:
                 if _tolerated_orphan(name, info):
@@ -287,17 +299,23 @@ def _slot_sequence(admissions: Path) -> list:
             if _is_link(info) or not stat.S_ISREG(info.st_mode):
                 _fail(ReadFailure.NOT_REGULAR, f"{name} n'est pas un fichier ordinaire (lien, répertoire ou autre) : refusé, jamais suivi.")
             slots[seq] = name
-        if len(slots) > MAX_SLOTS:
-            _fail(ReadFailure.TOO_MANY_SLOTS, f"plus de {MAX_SLOTS} slots.")
+        if len(slots) > slot_limit:
+            _fail(ReadFailure.TOO_MANY_SLOTS, f"plus de {slot_limit} slots.")
         ordered = sorted(slots)
         if ordered == list(range(len(ordered))):
             return ordered
     _fail(ReadFailure.SLOT_GAP, "la numérotation des slots n'est pas dense depuis 0 (slot manquant ou numéro inattendu), confirmée sur plusieurs listages : chaîne rompue.")
 
 
-def _read_record(admissions: Path, seq: int) -> dict:
+def _read_record(admissions: Path, seq: int, *, remaining_bytes: Optional[list] = None) -> dict:
+    """`remaining_bytes` (plafonds explicites seulement) : liste à un élément, octets encore autorisés pour l'ensemble des slots ; la limite de ce slot est le minimum de `MAX_SLOT_BYTES` (lu à
+    l'appel) et de ce reste, et le reste est décrémenté des octets réellement lus."""
     name = slot_file_name(seq)
-    raw = _read_bounded(admissions / name, MAX_SLOT_BYTES, name)
+    if remaining_bytes is None:
+        raw = _read_bounded(admissions / name, MAX_SLOT_BYTES, name)
+    else:
+        raw = _read_bounded(admissions / name, min(MAX_SLOT_BYTES, remaining_bytes[0]), name)
+        remaining_bytes[0] -= len(raw)
     try:
         record = _load_strict_json(raw, name)
         if serialize_normative_json(record) != raw:
@@ -309,17 +327,39 @@ def _read_record(admissions: Path, seq: int) -> dict:
     return record
 
 
-def read_registry(root: object, *, barrier: bool) -> RegistrySnapshot:
+def _validate_read_limits(max_slots: object, max_total_bytes: object) -> bool:
+    """`True` si des plafonds explicites sont demandés. Ordre (avant tout accès disque, constantes lues à l'appel) : un seul des deux à `None` ⇒ `ValueError` ; type non `int` strict (`bool`,
+    flottant, texte…) ⇒ `TypeError` ; valeur `< 1` ⇒ `ValueError` ; au-delà de `MAX_SLOTS` / `MAX_SLOTS * MAX_SLOT_BYTES` ⇒ `ValueError`."""
+    if max_slots is None and max_total_bytes is None:
+        return False
+    if max_slots is None or max_total_bytes is None:
+        raise ValueError("max_slots et max_total_bytes se donnent ensemble ou pas du tout.")
+    if type(max_slots) is not int or type(max_total_bytes) is not int:
+        raise TypeError("max_slots et max_total_bytes doivent être des int stricts.")
+    if max_slots < 1 or max_total_bytes < 1:
+        raise ValueError("max_slots et max_total_bytes doivent être >= 1.")
+    if max_slots > MAX_SLOTS or max_total_bytes > MAX_SLOTS * MAX_SLOT_BYTES:
+        raise ValueError("max_slots et max_total_bytes ne peuvent pas dépasser les plafonds du module.")
+    return True
+
+
+def read_registry(root: object, *, barrier: bool, max_slots: Optional[int] = None, max_total_bytes: Optional[int] = None) -> RegistrySnapshot:
     """Lecture stricte, complète et en lecture seule. `barrier` est OBLIGATOIRE (aucune valeur par défaut) : `True` ajoute, APRÈS la lecture, la barrière de répertoire sur
-    `admissions/` (23.10 étape 1) ; un échec de barrière est `BARRIER_FAILED`. Lève `RegistryReadError` (disque) ou `RegistryChainError` (chaîne incohérente) ; jamais de repli."""
+    `admissions/` (23.10 étape 1) ; un échec de barrière est `BARRIER_FAILED`. Lève `RegistryReadError` (disque) ou `RegistryChainError` (chaîne incohérente) ; jamais de repli.
+
+    `max_slots` / `max_total_bytes` (N2-b1b, option B) : plafonds EXPLICITES, ensemble ou pas du tout (`None, None` : comportement historique inchangé). Ils imposent, par listage, au plus
+    `max_slots + MAX_ORPHAN_ENTRIES` entrées de toute nature dans `admissions/` (et `MAX_ORPHAN_ENTRIES + 2` à la racine ; `scandir` peut en produire une de plus, jamais rangée ni `lstat`-ée)
+    puis au plus `max_total_bytes` octets cumulés dans les slots (`+ 1` seulement sur l'échec). La validation des plafonds précède tout accès disque. Ils ne bornent NI le temps de `scandir` côté noyau, NI la mémoire de la chaîne décodée, NI le temps de `verify_chain`."""
     if type(barrier) is not bool:
         raise TypeError("barrier doit être un bool explicite.")
+    limited = _validate_read_limits(max_slots, max_total_bytes)
     path = _root_path(root)
     if ".." in path.parts:
         _fail(ReadFailure.ROOT_UNUSABLE, "composante '..' interdite dans la racine.")
     _require_real_directory(path, "racine du registre")
     names = {}
-    for name, info in _directory_entries(path, "racine du registre"):
+    root_entries = _directory_entries(path, "racine du registre") if not limited else _directory_entries(path, "racine du registre", max_entries=MAX_ORPHAN_ENTRIES + 2)
+    for name, info in root_entries:
         if name in (IDENTITY_FILE, ADMISSIONS_DIR) or _tolerated_orphan(name, info):
             names[name] = info
         else:
@@ -330,7 +370,12 @@ def read_registry(root: object, *, barrier: bool) -> RegistrySnapshot:
     if ADMISSIONS_DIR not in names:
         _fail(ReadFailure.ROOT_UNUSABLE, "le répertoire admissions/ est absent.")
     admissions = path / ADMISSIONS_DIR
-    records = [_read_record(admissions, seq) for seq in _slot_sequence(admissions)]
+    if limited:
+        remaining = [max_total_bytes]
+        records = [_read_record(admissions, seq, remaining_bytes=remaining)
+                   for seq in _slot_sequence(admissions, max_slots=max_slots, max_entries=max_slots + MAX_ORPHAN_ENTRIES)]
+    else:
+        records = [_read_record(admissions, seq) for seq in _slot_sequence(admissions)]
     chain = verify_chain(records, registry_id=identity.registry_id, genesis_instance_id=identity.instance_id)
     if barrier:
         try:
