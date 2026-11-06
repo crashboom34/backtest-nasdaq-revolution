@@ -477,7 +477,8 @@ def test_the_sample_rejects_duplicates_and_accepts_a_sorted_distinct_sample(tmp_
     good = ap.audit_campaign_exposure(request(audit_dir, cfg))
     base = {f.name: getattr(good, f.name) for f in dataclasses.fields(ap.AuditReport)}
     two = (sup.foreign_id(0xB), sup.foreign_id(0xC))
-    valid = {**base, "registry_other_campaign_count": 2, "registry_uncovered_count": 2, "registry_uncovered_sample": two}
+    two_unavailable = dataclasses.replace(base["plan_declared_diagnostic"], unavailable_campaign_count=2, unavailable_breakdown=(("NO_ATTRIBUTED_ROOT", 2),))          # N2-b2a : diagnostic cohérent (invariant 11)
+    valid = {**base, "registry_other_campaign_count": 2, "registry_uncovered_count": 2, "registry_uncovered_sample": two, "plan_declared_diagnostic": two_unavailable}
     assert ap.AuditReport(**valid).registry_uncovered_sample == two                                              # bloc PARTIAL présent, comptes cohérents
     with pytest.raises(ValueError, match="champs de registre"):
         ap.AuditReport(**{**valid, "registry_uncovered_sample": (sup.foreign_id(0xB), sup.foreign_id(0xB))})

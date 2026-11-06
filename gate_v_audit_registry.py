@@ -2,7 +2,7 @@
 gate_v_audit_registry.py — N-VIDE-2 / N2-b1b : adaptateur de LECTURE d'AUDIT du registre (module interne, lecture seule, diagnostic seul).
 
 Ce module lit le registre SYNTHÉTIQUE (deux fois : R1 avant le premier scan, R2 après la relecture finale), convertit la chaîne vérifiée en vue de B4, dérive l'étage de l'enregistrement propre,
-attribue des racines « dérivées » à des campagnes de la chaîne, assemble B4 et rend des SCALAIRES. Il n'écrit rien (la lecture s'accompagne d'une barrière de répertoire, appel de type `fsync` sans modification de contenu), ne persiste rien, n'appelle aucune fonction d'écriture, d'ajout,
+attribue des racines « dérivées » à des campagnes de la chaîne, assemble B4 et rend des SCALAIRES, des tuples et un diagnostic immuable des déclarations des plans V2 (N2-b2a, séparé de la comptabilité de B4). Il n'écrit rien (la lecture s'accompagne d'une barrière de répertoire, appel de type `fsync` sans modification de contenu), ne persiste rien, n'appelle aucune fonction d'écriture, d'ajout,
 d'initialisation ou de publication du registre, ne crée aucun enregistrement propre, n'ouvre aucune donnée de marché et n'accorde aucun droit.
 
 Ce que le résultat n'est PAS : ni une preuve d'absence d'exposition, ni une admission, ni une autorisation, ni une complétude globale du registre. Trois dimensions restent DISTINCTES et ne sont
@@ -18,15 +18,17 @@ import enum
 import os
 from typing import Optional
 
+import gate_v_audit_plan_declared as plan_declared
 import gate_v_audit_window as window_sources
 import gate_v_exposure_interpreters as interpreters
+from gate_v_audit_plan_declared import PlanDeclaredBasis, PlanDeclaredDiagnostic
 from gate_v_exposure_inventory import AccountingViews, CounterProvenance, RegistryRecordFact, RegistryView, assemble_exposure_inventory
 from gate_v_final_holdout_protocol import OwnCampaignContext, OwnRecordStage, SourceKind, SourceStatus
 from gate_v_registry_chain import CampaignState, RegistryChainError
 from gate_v_registry_model import RecordType
 from gate_v_registry_store import MAX_IDENTITY_BYTES, MAX_SLOT_BYTES, MAX_SLOTS, ReadFailure, RegistryReadError, read_registry
 
-__all__ = ["REGISTRY_REFUSAL_CODES", "CounterState", "RegistryAssessment", "RegistryAuditRefused", "RegistryConfig", "RegistryCoverage", "RegistryHandle", "TrialCounter", "assess", "compare", "read",
+__all__ = ["REGISTRY_REFUSAL_CODES", "CounterState", "PlanDeclaredBasis", "PlanDeclaredDiagnostic", "RegistryAssessment", "RegistryAuditRefused", "RegistryConfig", "RegistryCoverage", "RegistryHandle", "TrialCounter", "assess", "compare", "read",
            "validate_config"]
 
 MAX_DETAIL = 300
@@ -99,7 +101,8 @@ class RegistryAuditRefused(Exception):
 
 @dataclasses.dataclass(frozen=True)
 class RegistryAssessment:
-    """Résultat de `assess` : scalaires et tuples seulement (jamais l'assemblage de B4, la vue, la chaîne, l'instantané ni `inventory_id`)."""
+    """Résultat de `assess` : scalaires, tuples et un diagnostic immuable des déclarations des plans V2 (jamais l'assemblage de B4, la vue, la chaîne, l'instantané ni `inventory_id`). Le diagnostic est
+    OBLIGATOIRE (aucune valeur par défaut) et n'entre jamais dans la comptabilité de B4."""
 
     b4_complete: bool
     b4_incomplete_reasons: tuple
@@ -116,6 +119,7 @@ class RegistryAssessment:
     registry_uncovered_sample: tuple
     trial_counters: tuple
     trial_counter_reasons: tuple
+    plan_declared_diagnostic: PlanDeclaredDiagnostic
 
 
 _TOKEN = object()
@@ -330,7 +334,7 @@ def _derived_roots(chain_campaigns: frozenset, interpretation, campaign_roots: t
 
 
 def assess(handle, interpretation_s1, *, own_campaign_id: str, window: tuple, campaign_roots: tuple, max_json_bytes: int) -> RegistryAssessment:
-    """Conversion, étage, racines dérivées, couverture, comptabilité et assemblage de B4 sur R1 et S1. Retourne des scalaires. Après le retour (ou le refus), la poignée libère l'instantané."""
+    """Conversion, étage, racines dérivées, couverture, comptabilité et assemblage de B4 sur R1 et S1. Retourne des scalaires, des tuples et un diagnostic immuable ; ce dernier est calculé APRÈS B4 et la couverture, hors de tout `except` (une défaillance critique se propage). Après le retour (ou le refus), la poignée libère l'instantané."""
     if type(handle) is not RegistryHandle or handle._state[0] is None:
         raise TypeError("handle doit être une RegistryHandle non consommée")
     snapshot = handle._state[0]
@@ -359,11 +363,12 @@ def assess(handle, interpretation_s1, *, own_campaign_id: str, window: tuple, ca
         covered = {expected for _label, expected in derived}
         uncovered = sorted(chain_campaigns - covered)
         coverage = RegistryCoverage.PARTIAL if uncovered else RegistryCoverage.ALL_CHAIN_CAMPAIGNS_HAVE_ROOT
+        diagnostic = plan_declared.diagnose(interpretation_s1, derived=derived, other_campaign_count=len(chain_campaigns), max_json_bytes=max_json_bytes)          # N2-b2a : après B4 et la couverture, hors de tout `except`
         return RegistryAssessment(
             b4_complete=bool(assembly.inventory.complete), b4_incomplete_reasons=own_reasons, b4_semantics_version=assembly.semantics_version, registry_id=chain.registry_id,
             registry_chain_head=chain.head_content_hash, registry_slot_count=chain.next_seq, registry_rebind_count=rebinds,
             registry_durability_profile=snapshot.identity.durability_profile.value, derived_root_labels=tuple(sorted(label for label, _expected in derived)), registry_coverage=coverage,
             registry_other_campaign_count=len(chain_campaigns), registry_uncovered_count=len(uncovered), registry_uncovered_sample=tuple(uncovered[:MAX_UNCOVERED_SAMPLE]),
-            trial_counters=counters, trial_counter_reasons=tuple(provenance.reasons))
+            trial_counters=counters, trial_counter_reasons=tuple(provenance.reasons), plan_declared_diagnostic=diagnostic)
     finally:
         handle._state[0] = None

@@ -601,7 +601,7 @@ def _imports():
 
 def test_gu_the_adapter_imports_only_the_documented_modules_and_no_dynamic_import():
     assert _imports() <= {"__future__", "dataclasses", "enum", "os", "typing", "gate_v_audit_window", "gate_v_exposure_interpreters", "gate_v_exposure_inventory",
-                          "gate_v_final_holdout_protocol", "gate_v_registry_chain", "gate_v_registry_model", "gate_v_registry_store"}, _imports()
+                          "gate_v_final_holdout_protocol", "gate_v_registry_chain", "gate_v_registry_model", "gate_v_registry_store", "gate_v_audit_plan_declared"}, _imports()
     tree = ast.parse(SOURCE)
     names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     assert not {"__import__", "importlib", "import_module"} & names

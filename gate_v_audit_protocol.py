@@ -26,7 +26,7 @@ from typing import Optional
 
 import gate_v_audit_registry as registry_audit
 import gate_v_audit_window as provenance
-from gate_v_audit_registry import RegistryConfig, RegistryCoverage, TrialCounter
+from gate_v_audit_registry import PlanDeclaredDiagnostic, RegistryConfig, RegistryCoverage, TrialCounter
 from gate_v_exposure_interpreters import InterpretedScan, LayoutRoot, RootLayout, SourceInterpretation
 from gate_v_exposure_interpreters_v6 import B3_V6_RULES_DIGESTS, B3_V6_SEMANTICS_VERSION, interpret_audit_roots_v6
 from gate_v_exposure_scan import AuditRoot, EntryClass, EntryKind, ExposureScan, ExposureScanRefusal, HashLimits, ScanLimits, StructuralFailure, parse_strict_json, scan_worst_case_read_bytes
@@ -303,6 +303,8 @@ class AuditReport:
     registry_uncovered_sample: tuple = ()
     trial_counters: tuple = ()
     trial_counter_reasons: tuple = ()
+    # N2-b2a : déclarations des plans V2 des autres campagnes de la chaîne (DIAGNOSTIC descriptif, jamais de la comptabilité) ; `None` sans registre et pour tout rapport REFUSED.
+    plan_declared_diagnostic: Optional[PlanDeclaredDiagnostic] = None
 
     def __post_init__(self) -> None:
         self._check_registry_fields()
@@ -340,6 +342,9 @@ class AuditReport:
         absent = self.registry_id is None
         if not (absent == (self.b4_completeness is Completeness.NOT_BUILT) == (self.registry_coverage is RegistryCoverage.NOT_ASSESSED) == empty):          # (1)
             raise bad
+        diagnostic = self.plan_declared_diagnostic
+        if (diagnostic is None) != absent or (diagnostic is not None and type(diagnostic) is not PlanDeclaredDiagnostic):                                  # (10) : type exact, avant le retour anticipé
+            raise bad
         if absent:
             if any(b.code is BlockCode.DERIVED_COVERAGE_PARTIAL for b in blocks):
                 raise bad
@@ -369,6 +374,10 @@ class AuditReport:
         if any(type(r) is not str for r in self.trial_counter_reasons) or any(type(label) is not str for label in self.derived_root_labels):
             raise bad
         if len(self.derived_root_labels) + self.registry_uncovered_count != self.registry_other_campaign_count:                                              # (9)
+            raise bad
+        if diagnostic.source_campaign_count + diagnostic.unavailable_campaign_count != self.registry_other_campaign_count:                                  # (11)
+            raise bad
+        if diagnostic.source_campaign_count > len(self.derived_root_labels) or dict(diagnostic.unavailable_breakdown).get("NO_ATTRIBUTED_ROOT", 0) != self.registry_uncovered_count:   # (12)
             raise bad
 
     def __reduce__(self):
@@ -871,7 +880,8 @@ def _audit(request) -> AuditReport:
             registry_slot_count=assessment.registry_slot_count, registry_rebind_count=assessment.registry_rebind_count,
             registry_durability_profile=assessment.registry_durability_profile, derived_root_labels=assessment.derived_root_labels, registry_coverage=assessment.registry_coverage,
             registry_other_campaign_count=assessment.registry_other_campaign_count, registry_uncovered_count=assessment.registry_uncovered_count,
-            registry_uncovered_sample=assessment.registry_uncovered_sample, trial_counters=assessment.trial_counters, trial_counter_reasons=assessment.trial_counter_reasons)
+            registry_uncovered_sample=assessment.registry_uncovered_sample, trial_counters=assessment.trial_counters, trial_counter_reasons=assessment.trial_counter_reasons,
+            plan_declared_diagnostic=assessment.plan_declared_diagnostic)
         if assessment.registry_coverage is RegistryCoverage.PARTIAL:
             blocks.append(AuditBlock(BlockCode.DERIVED_COVERAGE_PARTIAL, _BLOCK_SENTINEL_LABEL, _clip(f"UNCOVERED:{assessment.registry_uncovered_count}/{assessment.registry_other_campaign_count}")))
     return AuditReport(Receivability.RECEIVABLE, blocks=tuple(blocks), window=window, window_declared_source=source, b3_semantics_version=first.semantics_version,

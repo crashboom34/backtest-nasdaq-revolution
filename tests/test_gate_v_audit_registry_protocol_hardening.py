@@ -79,13 +79,23 @@ def test_rp1_clause_7_alone_a_refused_report_with_fully_consistent_registry_fiel
                       "incomplete_reasons": (), "rescan": ap.RescanStatus.NOT_PERFORMED, "b4_completeness": ap.Completeness.INCOMPLETE, "b4_incomplete_reasons": ("X",),
                       "registry_coverage": ar.RegistryCoverage.ALL_CHAIN_CAMPAIGNS_HAVE_ROOT, "registry_uncovered_count": 0, "registry_uncovered_sample": (),
                       "registry_other_campaign_count": 1, "derived_root_labels": ("b",)}
+    # P6 (cinquième amendement, N2-b2a) : diagnostic cohérent avec une autre campagne attribuée dont le plan n'est pas lu (invariants (10) à (12)), sinon la clause (12) échouerait aussi.
+    refused_fields["plan_declared_diagnostic"] = ar.PlanDeclaredDiagnostic(
+        basis=ar.PlanDeclaredBasis.NO_CHAIN_CAMPAIGN_HAS_PLAN_RECORD_READ, source_campaign_count=0, unavailable_campaign_count=1, unavailable_breakdown=(("PLAN_RECORD_NOT_READ", 1),),
+        declared_run_reference_count=None, declared_run_id_count=None, declared_search_config_count=None, declared_strategy_name_count=None, multi_campaign_run_reference_count=None,
+        multi_campaign_search_config_count=None, id_with_several_content_hashes_count=None, content_hash_with_several_ids_count=None, conflicting_run_id_sample=())
+    witness = object.__new__(ap.AuditReport)                                                                    # témoin : les mêmes champs, sauf le refus, satisfont TOUTES les autres clauses de registre
+    for name, value in {**refused_fields, "receivability": ap.Receivability.RECEIVABLE, "refusals": ()}.items():
+        object.__setattr__(witness, name, value)
+    witness._check_registry_fields()
     with pytest.raises(ValueError, match="champs de registre"):
         ap.AuditReport(**refused_fields)
 
 
 def test_rp1_clause_4_the_sample_is_20_for_21_uncovered(good):
     ids = tuple(sorted(sup.foreign_id(0x100 + i) for i in range(21)))
-    valid = {**fields_of(good), "registry_other_campaign_count": 21, "registry_uncovered_count": 21, "registry_uncovered_sample": ids[:20]}
+    twenty_one_unavailable = dataclasses.replace(good.plan_declared_diagnostic, unavailable_campaign_count=21, unavailable_breakdown=(("NO_ATTRIBUTED_ROOT", 21),))          # N2-b2a : invariant (11)
+    valid = {**fields_of(good), "registry_other_campaign_count": 21, "registry_uncovered_count": 21, "registry_uncovered_sample": ids[:20], "plan_declared_diagnostic": twenty_one_unavailable}
     assert ap.AuditReport(**valid).registry_uncovered_count == 21
     for sample in (ids[:21], ids[:19]):
         with pytest.raises(ValueError, match="champs de registre"):

@@ -377,7 +377,8 @@ EXPECTED_GATE_MODULES = {"gate_v_audit_protocol", "gate_v_audit_window", "gate_v
                          "gate_v_exposure_interpreters_v6", "gate_v_exposure_scan", "gate_v_exposure_sources", "gate_v_final_holdout_claim", "gate_v_final_holdout_protocol",
                          "gate_v_frame_digest", "gate_v_k1s2_emptiness", "gate_v_k1s2_observations", "gate_v_k1s2_verifier", "gate_v_preregistration", "gate_v_run_evidence_models",
                          "gate_v_validation_policy",                                                         # base mesurée sur HEAD 47317a9 (17 modules)
-                         "gate_v_audit_registry", "gate_v_registry_store", "gate_v_registry_chain", "gate_v_registry_model", "gate_v_exposure_inventory"}      # N2-b1b : exactement cinq
+                         "gate_v_audit_registry", "gate_v_registry_store", "gate_v_registry_chain", "gate_v_registry_model", "gate_v_exposure_inventory",      # N2-b1b : exactement cinq
+                         "gate_v_audit_plan_declared"}                                                                                        # N2-b2a : exactement un de plus
 
 
 ROOT = Path(ap.__file__).parent

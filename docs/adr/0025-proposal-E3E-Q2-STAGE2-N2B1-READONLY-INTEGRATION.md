@@ -308,7 +308,7 @@ B5 et B6 ne sont **pas** modifiés par cette note ; `publish_audit_a0` n'est pas
 | D-b1-2 | Niveau de provenance de `W` livré en N2-b1 : `SPLIT_PLAN_FINGERPRINT_MATCHED` seul ; `validate_…_sources` (sous-processus Git, six sources) reporté | oui ; niveau 2 en tranche ultérieure, avec décision sur l'effet de bord Git |
 | D-b1-3 | Lecture du registre : `read_registry(barrier=True)` deux fois (avant S1, après S2), mode `SYNTHETIC` seul, refus de toute vue partielle | oui |
 | D-b1-4 | Budget de lecture du registre : `RegistryConfig.max_slots` explicite et listage borné avant lecture (aucune modification du store) | oui |
-| D-b1-5 | Comptabilité de N2-b1 : `AccountingViews()` vide ; seul `campaigns` observé ; cinq compteurs `NOT_OBSERVED` | oui ; les vues d'essais sont renvoyées à N2-b2 |
+| D-b1-5 | Comptabilité de N2-b1 : `AccountingViews()` vide ; seul `campaigns` observé ; cinq compteurs `NOT_OBSERVED` | oui ; les vues d'essais sont renvoyées à N2-b2 *(renvoi N2-b2a : les vues d'essais ne seront pas alimentées par des identités déclarées ; voir la note `…N2B2A-PLAN-DECLARED-DIAGNOSTIC-DESIGN-PROPOSED.md`, et le brouillon N2-b2b pour les producteurs réels)* |
 | D-b1-6 | Règle des racines dérivées (5.5) et blocage `DERIVED_COVERAGE_PARTIAL` | oui |
 | D-b1-7 | Vocabulaire : aucun nom d'étage ni de type d'enregistrement dans les noms du rapport ; compteurs en tuple d'entiers à ordre documenté ; aucune exemption nouvelle | oui |
 | D-b1-8 | Dérivation de l'étage propre avec le Claim de campagne (table 5.4) | oui |
@@ -331,7 +331,7 @@ Questions ouvertes (non décidées par cette note) : valeurs opérationnelles de
 | adaptateur de registre → vues | | `gate_v_audit_registry.py` | D-b1-3 à 6, 8 |
 | dérivation de `W` | | `gate_v_audit_window.py` | D-b1-2 |
 | extension de la requête et du rapport | | dans `gate_v_audit_protocol.py` | D-b1-1, 7, 9, 10 |
-| vues d'essais, `ClosingRecord`, ingestion échouée, engagements nuls | **non** | N2-b2 ou plus tard | producteurs inexistants |
+| vues d'essais, `ClosingRecord`, ingestion échouée, engagements nuls | **non** | N2-b2 ou plus tard *(N2-b2a : diagnostic déclaratif séparé, jamais dans ces vues)* | producteurs inexistants |
 | `validate_…_sources` dans l'audit | fonction existe | intégration non conçue | D-b1-2 |
 | record A0 pur, prévalidation B5 | partiel (privé) | N2-c | D12, D13 |
 
@@ -347,7 +347,7 @@ Questions ouvertes (non décidées par cette note) : valeurs opérationnelles de
 
 1. **N2-b1a — provenance de W** : `gate_v_audit_window.py`, bloc `window_source`, niveau `SPLIT_PLAN_FINGERPRINT_MATCHED`, garde de lecture préalable, refus 4.3, relecture finale, tests 1 à 10, 33 et la partie « plan et split plan » des tests 34 et 35, amendements D-b1-1. Aucune dépendance au registre ni à B4.
 2. **N2-b1b — registre et B4** : `gate_v_audit_registry.py`, bloc `registry`, budget, étage, racines dérivées, assemblage B4, relecture de la tête, tests 11 à 32, 34 et 35 (partie registre), 36 à 39, dont les tests 28 à 30 (anciens A0, relabellisation, caractérisation de B6). Dépend de N2-b1a pour le recoupement de `W` (optionnel : il retombe sur la fenêtre de l'opérateur).
-3. **N2-b2 (non conçue ici)** : vues d'essais et `ClosingView` — exige des décisions sur des producteurs inexistants.
+3. **N2-b2 (non conçue ici)** : vues d'essais et `ClosingView` — exige des décisions sur des producteurs inexistants. *(Renvoi : N2-b2a a décidé que les vues d'essais ne seront pas alimentées par des identités simplement déclarées ; voir la note N2-b2a.)*
 4. **N2-c (non conçue ici)** : record A0 pur, D12 et D13.
 
 Ordre recommandé : (1) acceptation de cette note ; (2) N2-b1a ; (3) N2-b1b ; la validation Linux se prépare en parallèle sans code.
@@ -559,6 +559,8 @@ Cas : campagne enregistrée sans racine ⇒ `uncovered`, `PARTIAL` ; racine sans
 `AccountingViews()` est construit **vide** (aucune vue inventée). Avec le registre lu et la campagne propre exclue : `campaigns` = nombre de campagnes distinctes de la chaîne hors propre, `OBSERVED` ; les cinq autres compteurs valent 0 avec `NOT_OBSERVED` (valeur **interne** de B4, jamais exposée : le rapport rend `None`, voir ci-dessous). Raisons de provenance : quatre textes constants (`abandoned_reservations:CLOSING_VIEW_NOT_PROVIDED`, `failed_ingestion_attempts:VIEW_NOT_PROVIDED`, `void_commitments:VIEW_NOT_PROVIDED`, `trials:VIEW_NOT_PROVIDED`). Les essais historiques ne sont jamais déduits de noms de dossiers ; les valeurs déclarées ne sont jamais fusionnées avec les observées ; aucune vue de clôture, d'ingestion échouée, d'engagements nuls ou d'essais n'existe (N2-b2 ou plus tard).
 
 **Rendu dans `AuditReport`.** Un tuple fixe de six `TrialCounter(name, value, provenance)` dans l'ordre `research_runs, strategies, campaigns, abandoned_reservations, failed_ingestion_attempts, void_commitments`. **`value` vaut `None` quand la provenance est `NOT_OBSERVED`** (invariant du constructeur : `value is None ⇔ NOT_OBSERVED`) : le rapport n'expose jamais le zéro de B4 pour un compteur non observé. `campaigns` ne compte que le **registre**. `not_proven` gagne cinq littéraux **constants** (présents même sans registre) : `CAMPAIGNS_OUTSIDE_REGISTRY`, `TRIAL_ACCOUNTING`, `DERIVED_ROOT_CONTENT_ATTRIBUTION`, `REGISTRY_NOT_REAL_BOUND` (le registre lu est `SYNTHETIC` et sa barrière peut être simulée : aucun lien avec un registre `REAL`) et `STAGE_CONSUMPTION_LINK_UNVERIFIED` (le lien Claim ↔ CONSUMPTION n'est pas vérifié, T23). L'ordre du tuple pinné est celui de b1a suivi de ces cinq littéraux dans l'ordre de cette énumération. Le rapport expose aussi `registry_durability_profile` (valeur textuelle de `identity.durability_profile`) pour qu'un registre synthétique vide ne se lise pas comme une preuve. `E3J_PREREQUISITES_UNMET` conserve `REGISTRY_CHAIN_STRICT_READ` : la lecture de N2-b1b est une lecture d'audit sur un registre synthétique, pas la lecture stricte exigée par E3-J au moment d'une admission. Aucun calcul de PBO, de DSR ou de qualification statistique ne peut s'appuyer sur ces compteurs.
+
+**Extension de l'interdiction (N2-b2a).** L'interdiction de fusionner du déclaré dans l'observé s'étend au diagnostic `plan_declared_diagnostic` de N2-b2a : aucune de ses valeurs n'est un nombre d'essais exécutés, ni le N d'un test multiple, ni une entrée d'un calcul de PBO ou de DSR, et aucune n'entre dans `AccountingViews`, `inventory_id`, `inventory_content_digest` ni la classification.
 
 ### 19.9 Assemblage B4 et conditions de `b4_completeness == b3_completeness`
 

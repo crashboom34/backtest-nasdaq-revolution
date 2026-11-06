@@ -5526,3 +5526,24 @@ Tests ciblés (dix fichiers N2-b1b et amendés) : 418 passés, 2 ignorés. Suite
 Voir 85.7, 86.4 et 19.19 : variante POSIX de CC5, validation Linux, noms 8.3 et liens symboliques non qualifiés ; aucun instantané atomique ; `ALL_CHAIN_CAMPAIGNS_HAVE_ROOT` ne prouve ni authenticité ni absence d'exposition ; aucune promotion vers FRESH, admission ou autorisation.
 
 ---
+
+---
+
+## 88. N-VIDE-2 / N2-b2a — diagnostic des déclarations des plans V2 (2026-11-06, COMMIT LOCAL, NON PUBLIÉ)
+
+### 88.1 Statut courant
+Implémentation dans un worktree isolé (D:), basée sur `origin/master = e0bfae7ebacd7c03639c9ba94ce2115cd5551cf3` (N2-b1b publié ; le §87 qui place `origin/master` à `47317a9` est périmé sur ce point). Enregistrée dans un commit local (`feat(gate-v): add N2-b2a declared-plan diagnostics`), suivi d'un commit distinct P5 (88.6) ; aucun push, dépôt original non synchronisé. `REAL` = DISABLED / NOT QUALIFIED · `GATE V` = NON PASSÉE · `FINAL_HOLDOUT` = NON ACCÉDÉ.
+
+### 88.2 Ce qui a été fait
+Module pur `gate_v_audit_plan_declared.py` (`PlanDeclaredDiagnostic`, `PlanDeclaredBasis`, `diagnose`) ; champ `plan_declared_diagnostic` dans `RegistryAssessment` (obligatoire) et `AuditReport` (défaut `None`) ; invariants de rapport (10) à (12) ; quatre amendements de tests existants (liste fermée) et un cinquième, P6 (approuvé le 2026-11-06 : isolation de `test_rp1_clause_7_alone…` restaurée, mutant « clause (7) supprimée » tué ; note, 16.5) ; 215 tests nouveaux (171 unitaires, 44 d'intégration). Le diagnostic décrit ce que les plans V2 des autres campagnes de la chaîne **déclarent** ; ce n'est ni une comptabilité, ni une preuve d'exécution, ni un N de test multiple. Les six compteurs de B4, `inventory_id`, `inventory_content_digest` et la classification sont inchangés (vérifié). Détail, déviations D-impl-1 à D-impl-7, limites et propositions P5/P6 : note `docs/adr/0025-proposal-E3E-Q2-STAGE2-N2B2A-PLAN-DECLARED-DIAGNOSTIC-DESIGN-PROPOSED.md`, sections 16 et 17.
+
+### 88.3 Preuves exécutées (lanceur D:, `PYTHONUTF8=1`, worktree isolé avec copie locale du fichier de données non suivi)
+Tests ciblés (9 fichiers) : 504 passés, 1 ignoré. **Suite complète : 8511 passés, 66 ignorés, 0 échec** (rapport `20261106-084912-26540-n2b2a-full3`). Comparaison avec le dernier rapport de référence (`20261105-204059-25388-push-utf8-full`, 8296 passés, 66 ignorés) : 215 tests ajoutés (tous dans les deux nouveaux fichiers), 0 résultat modifié, aucun test supprimé ; la seule différence d'identité est un test paramétré par un `uuid` aléatoire (`test_atomic_link_publication`), même test. 8296 + 215 = 8511. Mutants ciblés : 124 exécutions sur quatre tours (57 + 61 + 1 + 5) ; aucun survivant non équivalent sur le code final ; deux mutants équivalents consignés (clause (12a) du rapport, contrôle de version déplacé derrière le format de l'identifiant) — voir la note, 16.3.
+
+Clôture P6 (2026-11-06) : **suite complète sur l'état N2-b2a + P6 (sans P5) : 8511 passés, 66 ignorés, 0 échec** (rapport `20261106-174930-12756-c1-full`, `PYTHONUTF8=1`, `-p no:randomly`) ; par identité contre `…n2b2a-full3` : 0 ajouté, 0 supprimé, 0 résultat modifié (hors l'identifiant `uuid` aléatoire de `test_atomic_link_publication`), mêmes 66 ignorés. La suite écrit, dans la copie de validation seulement, un `.pyc` de `gate_v_frame_digest` et un dossier `optimization_history` vide (effet préexistant, ignoré par Git). Relecture indépendante en lecture seule du dernier delta (N2-b2a, P6) : aucun HIGH ni MEDIUM ; témoin de P6 vérifié clause par clause.
+
+### 88.4 À ne pas faire sans décision de l'utilisateur
+Push, synchronisation du dépôt original, N2-b2b, N2-c, P1, P4, D12, D13, L3-B, E3-J. P5 (gestionnaires de ressources en amont) : approuvé, livré dans le commit distinct qui suit.
+
+### 88.5 Brouillons distincts (hors dépôt, sur D:)
+`D:\AlphaForge-TDD\drafts\n2b2b-20261106\…N2B2B-TRIAL-ACCOUNTING-PRODUCERS-DESIGN-PROPOSED.md` (révision 3, PROPOSED) et sa fiche de décision `N2B2B-DECISION-PACKAGE-20261106.md` (D-b2b-1 à 11, aucune décision prise) ; `D:\AlphaForge-TDD\drafts\n2c-20261106\…N2C-DEPENDENCY-PRECHECK.md` (précheck) et `N2C-D12-D13-ORIENTATIONS-20261106.md` (orientations, non approuvées). Aucun contrat normatif modifié.
