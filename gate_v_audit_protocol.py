@@ -710,7 +710,7 @@ def _manifest_state(tree, diagnostic) -> ManifestState:
     try:
         record = parse_strict_json(item.content, max_bytes=verifier.MAX_CONTENT_BYTES, max_depth=64)
         alias = _STATUS_ALIASES.get(record.get("status")) if type(record) is dict else None
-    except Exception:                                          # noqa: BLE001 — voie conservatrice : jamais un statut inventé
+    except (ValueError, TypeError):                            # données seulement (`StrictJsonError` est une `ValueError` ; `status` non hachable : `TypeError`) ; P5 : une défaillance critique se propage
         alias = None
     return ManifestState(alias) if alias is not None else ManifestState.UNREADABLE_OR_NONCONFORMING
 

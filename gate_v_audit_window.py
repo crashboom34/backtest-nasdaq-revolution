@@ -183,7 +183,7 @@ def derive_window(interpretation, *, own_label: str, split_label: str, own_root_
     _same_bytes(own_root_path, PLAN_FILE, plan_sha256, max_json_bytes, on_guard_failure=WindowFailure.INVALID)
     try:
         plan = load_gate_v_campaign_plan_v2(os.path.join(own_root_path, PLAN_FILE))
-    except (OSError, ValueError, TypeError, RuntimeError, MemoryError):
+    except (OSError, ValueError, TypeError):                     # P5 : erreurs de DONNÉES seulement ; MemoryError, RecursionError et toute RuntimeError se propagent (refus `AUDIT_INTERNAL_FAILURE`)
         raise WindowSourceRefused(WindowFailure.INVALID, "plan de campagne V2 refusé par son chargeur historique") from None
     _same_bytes(own_root_path, PLAN_FILE, plan_sha256, max_json_bytes, on_guard_failure=WindowFailure.CHANGED)
     pairs = (("campaign_id", plan.campaign_id, own_campaign_id), ("split_plan_id", plan.split_plan_id, split.split_plan_id),
@@ -208,13 +208,14 @@ def plan_root_attributed(interpretation, *, label: str, root_path: str, expected
     scan, rend un plan dont l'identifiant égale `expected_name` et l'enregistrement strict du premier scan. Toute autre issue est `False` (jamais un refus) : la racine reste STATIQUE.
     Ce n'est PAS une preuve que le dossier contienne les données réelles de la campagne : un plan authentique recopié dans un dossier de même nom passerait. Fonction nouvelle ; aucune
     fonction de b1a n'est modifiée ni appelée à sa place. Limites dites sans détour : le chargeur historique lit SANS plafond (un fichier qui grossit entre les deux lectures gardées est lu
-    en entier avant d'être rejeté par l'empreinte : risque de mémoire, non imposé) ; un retour à l'identique entre les deux lectures gardées (ABA) n'est pas détecté."""
+    en entier avant d'être rejeté par l'empreinte : risque de mémoire, non imposé) ; un retour à l'identique entre les deux lectures gardées (ABA) n'est pas détecté.
+    P5 : une défaillance CRITIQUE (`MemoryError`, `RecursionError`, toute autre `RuntimeError`) n'est jamais lue comme « non attribuée » : elle se propage (refus typé du protocole)."""
     try:
         observation, record = _observed(interpretation, RootLayout.CAMPAIGN_DIR, label, PLAN_FILE)
         sha256 = observation.content_hash
         _same_bytes(root_path, PLAN_FILE, sha256, max_json_bytes, on_guard_failure=WindowFailure.INVALID)
         plan = load_gate_v_campaign_plan_v2(os.path.join(root_path, PLAN_FILE))
         _same_bytes(root_path, PLAN_FILE, sha256, max_json_bytes, on_guard_failure=WindowFailure.CHANGED)
-    except (WindowSourceRefused, OSError, ValueError, TypeError, RuntimeError, MemoryError):
+    except (WindowSourceRefused, OSError, ValueError, TypeError):
         return False
     return plan.campaign_id == expected_name and record.get("campaign_id") == plan.campaign_id

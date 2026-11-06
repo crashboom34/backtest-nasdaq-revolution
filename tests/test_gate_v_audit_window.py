@@ -448,7 +448,8 @@ def test_a_loader_result_that_disagrees_with_the_strict_record_of_s1_is_a_contra
 
 
 def test_a_plan_the_historical_loader_refuses_is_a_refusal_even_if_its_json_is_strict(layout):
-    with mock.patch.object(aw, "load_gate_v_campaign_plan_v2", mock.Mock(side_effect=RecursionError("deep"))):
+    # P5 : l'exemple était `RecursionError` ; une défaillance critique est désormais `AUDIT_INTERNAL_FAILURE` (tests/test_gate_v_audit_resource_failures.py) ; un refus de DONNÉES du chargeur reste invalide.
+    with mock.patch.object(aw, "load_gate_v_campaign_plan_v2", mock.Mock(side_effect=ValueError("refusé"))):
         refused(audit(layout), R.WINDOW_SOURCE_INVALID)
 
 
