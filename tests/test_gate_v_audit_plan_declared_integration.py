@@ -414,7 +414,7 @@ def test_rp6_a_refused_report_has_no_diagnostic_even_with_consistent_fields(good
 
 def test_rp7_the_diagnostic_never_changes_the_authority_constants(good):
     assert good.absence_evidence is ap.AbsenceEvidence.UNAVAILABLE and good.grants == () and good.grants_nothing and good.persistence is ap.Persistence.NOT_PERSISTED
-    assert good.protocol_version == "gate_v_audit_protocol_v1"
+    assert good.protocol_version == "gate_v_audit_protocol_v2"
     names = {f.name for f in dataclasses.fields(ap.AuditReport)}
     assert not {"absence_evidence", "grants", "not_proven", "inventory_id", "inventory_content_digest"} & names
     assert good.not_proven == B1A_NOT_PROVEN + FIVE and "PLAN_DECLARED" not in "".join(good.not_proven)                                    # D5 : `_NOT_PROVEN` inchangé, comparé à ses littéraux

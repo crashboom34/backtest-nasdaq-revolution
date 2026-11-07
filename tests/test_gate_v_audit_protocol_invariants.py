@@ -43,7 +43,7 @@ def test_the_authority_constants_are_locked_to_exact_literals(report):
     assert report.not_proven == vf.NOT_PROVEN + ("SNAPSHOT_ATOMICITY", "CHRONOLOGY", "INDEPENDENT_RESCAN", "S0_RECOMPUTATION", "PLAN_SOURCES_AUTHENTICITY",      # N2-b1a : le plan V2 n'est pas revalidé contre ses sources
                                                  "CAMPAIGNS_OUTSIDE_REGISTRY", "TRIAL_ACCOUNTING", "DERIVED_ROOT_CONTENT_ATTRIBUTION", "REGISTRY_NOT_REAL_BOUND",
                                                  "STAGE_CONSUMPTION_LINK_UNVERIFIED")      # N2-b1b : cinq littéraux CONSTANTS, avec ou sans registre
-    assert ap.AUDIT_PROTOCOL_VERSION == "gate_v_audit_protocol_v1" and report.protocol_version == ap.AUDIT_PROTOCOL_VERSION
+    assert ap.AUDIT_PROTOCOL_VERSION == "gate_v_audit_protocol_v2" and report.protocol_version == ap.AUDIT_PROTOCOL_VERSION
     assert report.b4_inventory is ap.Completeness.NOT_BUILT
 
 

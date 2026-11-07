@@ -319,12 +319,14 @@ _L2_CHAIN_CODES = {"HASH_ROLE_COLLISION": ChainRefusal.HASH_ROLE_COLLISION, "CIR
 
 
 def verify_run_chain(tree, expected_run_id) -> ChainVerification:
-    """Vérifie la chaîne de preuves Walk-Forward du run `expected_run_id` contre les observations `tree`. FONCTION TOTALE : un argument hostile donne un rapport
-    `BAD_INPUT`, jamais une exception. Tous les défauts décelables sont rapportés, dans un ordre déterministe. Un objet d'observation FORGÉ (champs altérés après
-    construction, contournant `__post_init__`) qui ferait échouer le calcul est rapporté `BAD_INPUT` : jamais « établi »."""
+    """Vérifie la chaîne de preuves Walk-Forward du run `expected_run_id` contre les observations `tree`. FONCTION TOTALE, SAUF épuisement de ressources (`MemoryError`,
+    `RecursionError`), qui se propage (B2 et L2 ne la convertissent plus en défaut typé sur un document d'imbrication <= 64) : un argument hostile donne un rapport `BAD_INPUT`, jamais une exception. Tous les défauts décelables sont rapportés, dans un ordre
+    déterministe. Un objet d'observation FORGÉ (champs altérés après construction, contournant `__post_init__`) qui ferait échouer le calcul est rapporté `BAD_INPUT` : jamais « établi »."""
     try:
         return _verify_run_chain(tree, expected_run_id)
-    except Exception:                                            # noqa: BLE001 — voie conservatrice : une exception inattendue ne peut jamais produire « établi »
+    except (MemoryError, RecursionError):                        # P5-bis (A1) : épuisement de ressources, jamais un défaut des données ; se propage (le protocole rend AUDIT_INTERNAL_FAILURE)
+        raise
+    except Exception:                                            # noqa: BLE001 — voie conservatrice : une exception inattendue ne peut jamais produire « établi » (`RuntimeError` hors ressources comprise)
         return _report(expected_run_id if type(expected_run_id) is str else "", [Defect(ChainRefusal.BAD_INPUT, "observations incohérentes ou forgées")])
 
 

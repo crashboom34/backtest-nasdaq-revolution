@@ -137,11 +137,13 @@ def _manifest_facts(tree, reasons: set):
 
 
 def diagnose_emptiness(tree) -> EmptinessDiagnostic:
-    """Classe la situation de vide / d'artefacts imposés d'un `ObservedRunTree`. FONCTION TOTALE et déterministe ; ne prononce aucun verdict. Une observation FORGÉE
-    qui ferait échouer le calcul est classée `BAD_INPUT` (blocage), jamais une exception."""
+    """Classe la situation de vide / d'artefacts imposés d'un `ObservedRunTree`. FONCTION TOTALE et déterministe, SAUF épuisement de ressources (`MemoryError`,
+    `RecursionError`), qui se propage (B2 ne la convertit plus en raison typée sur un document d'imbrication <= 64) ; ne prononce aucun verdict. Une observation FORGÉE qui ferait échouer le calcul est classée `BAD_INPUT` (blocage), jamais une exception."""
     try:
         return _diagnose_emptiness(tree)
-    except Exception:                                            # noqa: BLE001 — voie conservatrice
+    except (MemoryError, RecursionError):                        # P5-bis (A1) : épuisement de ressources, jamais un défaut des données ; se propage (le protocole rend AUDIT_INTERNAL_FAILURE)
+        raise
+    except Exception:                                            # noqa: BLE001 — voie conservatrice (inchangée : `RuntimeError` hors ressources comprise)
         return EmptinessDiagnostic(EmptinessCategory.BAD_INPUT, (EmptinessReason.BAD_INPUT,), ())
 
 

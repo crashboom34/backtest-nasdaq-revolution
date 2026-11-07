@@ -248,7 +248,7 @@ def test_v4_and_v5_are_refused_for_the_new_protocol_but_stay_readable_historical
 
 
 def test_the_accepted_version_list_is_exactly_v6_and_the_default_interpreter_is_v6(directory):
-    assert ap.AUDIT_B3_ACCEPTED == ("gate_v_exposure_interpreters_v6",) and ap.AUDIT_PROTOCOL_VERSION == "gate_v_audit_protocol_v1"
+    assert ap.AUDIT_B3_ACCEPTED == ("gate_v_exposure_interpreters_v6",) and ap.AUDIT_PROTOCOL_VERSION == "gate_v_audit_protocol_v2"
     assert ap.audit_campaign_exposure(request_of(directory)).b3_semantics_version == v6.B3_V6_SEMANTICS_VERSION
 
 

@@ -41,7 +41,10 @@ __all__ = [
     "RegistryConfig", "RescanStatus", "RootReport", "S0Facts", "Stage", "WindowDeclaredSource", "WindowProvenance", "WindowSource", "audit_campaign_exposure",
 ]
 
-AUDIT_PROTOCOL_VERSION = "gate_v_audit_protocol_v1"
+# Versionnement PROSPECTIF (décision utilisateur, P5-bis) : tout changement OBSERVABLE de la sémantique publique d'audit (recevabilité, refus, structure du rapport) exige une nouvelle version ;
+# un changement interne compatible n'en exige pas. Les rapports ne sont pas persistables : aucun artefact antérieur n'est réinterprété. v1 : jusqu'à e4f06c9 ; v2 : P5-bis (A1), un épuisement
+# de ressources dans L3-A (`MemoryError`, `RecursionError`) donne `REFUSED / AUDIT_INTERNAL_FAILURE` au lieu d'un rapport recevable bloquant (B2 et L2 ne convertissent plus en refus de données une `RecursionError` sur un document d'imbrication mesurée <= 64 ; voir la note L3-A).
+AUDIT_PROTOCOL_VERSION = "gate_v_audit_protocol_v2"
 AUDIT_B3_ACCEPTED = ("gate_v_exposure_interpreters_v6",)        # liste blanche littérale : jamais une comparaison de versions, jamais un nom de version historique
 MAX_DETAIL_CHARS = 300
 

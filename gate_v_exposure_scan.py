@@ -185,6 +185,11 @@ def _finite_float(text: str) -> float:
     return value
 
 
+# P5-bis : plancher d'imbrication sous lequel une `RecursionError` ne peut pas venir des données (= plafond de profondeur de L3-A). Une `RecursionError` seule ne distingue pas un document
+# trop profond d'une pile épuisée par l'appelant ; la mesure du document, elle, le fait. Au-delà du plancher le refus de données historique est conservé (cas ambigu : voie conservatrice).
+_ENVIRONMENT_DEPTH_FLOOR = 64
+
+
 def _nesting_depth_exceeds(text: str, max_depth: int) -> bool:
     """Parcours itératif (jamais récursif) : vrai si l'imbrication `{`/`[` hors chaînes dépasse `max_depth`."""
     depth = 0
@@ -230,6 +235,7 @@ def parse_strict_json(raw: bytes, *, max_bytes: int, max_depth: int) -> object:
     Refuse : taille au-delà de `max_bytes`, BOM, UTF-8 invalide, imbrication au-delà de `max_depth` (un scalaire a la profondeur 0),
     JSON vide, tronqué ou mal formé, clé dupliquée (après décodage des échappements), constante ou valeur non finie, substitut isolé.
     Aucune conversion silencieuse, aucune réparation, aucun repli. `TypeError` si `raw` n'est pas exactement un `bytes`.
+    P5-bis : une `RecursionError` levée sur un document d'imbrication mesurée <= 64 (`_ENVIRONMENT_DEPTH_FLOOR`) N'EST PAS un refus de données : elle se propage (pile épuisée par l'environnement). Au-delà, refus `DEPTH_EXCEEDED` (cas ambigu conservé).
     """
     _positive_int(max_bytes, "max_bytes")
     _positive_int(max_depth, "max_depth")
@@ -257,6 +263,8 @@ def parse_strict_json(raw: bytes, *, max_bytes: int, max_depth: int) -> object:
     except _NonFinite:
         raise StrictJsonError(SourceAnomaly.NON_FINITE, "valeur ou constante non finie") from None
     except RecursionError:
+        if not _nesting_depth_exceeds(text, _ENVIRONMENT_DEPTH_FLOOR):    # P5-bis : le DOCUMENT est peu imbriqué (mesure itérative) : aucune donnée n'explique l'épuisement, c'est l'environnement ; se propage
+            raise
         raise StrictJsonError(SourceAnomaly.DEPTH_EXCEEDED, "imbrication excessive") from None
     except ValueError as error:   # JSONDecodeError et entier trop long
         raise StrictJsonError(SourceAnomaly.INVALID_JSON, str(error)) from None

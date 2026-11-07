@@ -101,6 +101,56 @@ def _refuse(code: EvidenceRefusal, message: str):
 
 
 # ── JSON normatif (ADR 0025 23.29.4), réimplémenté ici pour rester pur ; l'identité des octets avec E3-C est verrouillée par test ─────────
+# P5-bis : plancher d'imbrication sous lequel une `RecursionError` ne peut pas venir des données (= plafond de profondeur de L3-A, `_RUN_JSON_MAX_DEPTH`). Une `RecursionError` seule ne
+# distingue pas un document trop profond d'une pile épuisée par l'appelant ; la mesure du document, elle, le fait. Au-delà du plancher le refus de données historique est conservé.
+_ENVIRONMENT_DEPTH_FLOOR = 64
+
+
+def _text_nesting_exceeds(text: str, limit: int) -> bool:
+    """Parcours ITÉRATIF (aucune récursion) : vrai si l'imbrication `{`/`[` hors chaînes dépasse `limit`."""
+    depth, in_string, escaped = 0, False, False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+            if depth > limit:
+                return True
+        elif char in "}]":
+            depth -= 1
+    return False
+
+
+def _value_nesting_exceeds(value, limit: int) -> bool:
+    """Parcours ITÉRATIF (aucune récursion) : vrai si les conteneurs `dict` / `list` imbriqués dépassent `limit` niveaux. Une structure cyclique dépasse toujours ; un objet partagé n'est
+    revisité que par un chemin plus profond (borne : chaque objet au plus `limit + 1` fois)."""
+    deepest: dict = {}
+    pending = [(value, 0)]
+    while pending:
+        item, depth = pending.pop()
+        kind = type(item)
+        if kind is dict:
+            children = item.values()
+        elif kind is list:
+            children = item
+        else:
+            continue
+        if depth + 1 > limit:
+            return True
+        if deepest.get(id(item), -1) >= depth:
+            continue
+        deepest[id(item)] = depth
+        pending.extend((child, depth + 1) for child in children)
+    return False
+
+
 def _check_value(value) -> None:
     kind = type(value)
     if value is None or kind in (bool, int, str):
@@ -130,6 +180,8 @@ def normative_json_bytes(record) -> bytes:
     except EvidenceRefused:
         raise
     except RecursionError:
+        if not _value_nesting_exceeds(record, _ENVIRONMENT_DEPTH_FLOOR):      # P5-bis : structure peu imbriquée et acyclique : aucune donnée n'explique l'épuisement ; se propage
+            raise
         _refuse(EvidenceRefusal.BAD_VALUE, "imbrication trop profonde ou structure cyclique")
     except (ValueError, UnicodeEncodeError):
         _refuse(EvidenceRefusal.BAD_VALUE, "représentation impossible (texte non encodable, entier démesuré)")
@@ -146,7 +198,10 @@ def _unique_pairs(pairs):
 
 def parse_normative_json(raw) -> dict:
     """Octets → objet, en refusant tout ce qui n'est pas EXACTEMENT les octets normatifs de l'objet décodé (BOM, CRLF, indentation, ordre des
-    clés, LF final manquant ou double, doublons, NaN/Infinity, flottants, entiers démesurés, imbrication excessive)."""
+    clés, LF final manquant ou double, doublons, NaN/Infinity, flottants, entiers démesurés, imbrication excessive).
+
+    P5-bis : une `RecursionError` levée sur un document d'imbrication mesurée <= 64 (`_ENVIRONMENT_DEPTH_FLOOR`) n'est PAS un refus de données : elle se propage. Au-delà, `JSON_INVALID` (cas ambigu conservé).
+    """
     if type(raw) is not bytes:
         _refuse(EvidenceRefusal.BAD_TYPE, "raw doit être de type bytes")
     if raw.startswith(b"\xef\xbb\xbf"):
@@ -160,7 +215,11 @@ def parse_normative_json(raw) -> dict:
         value = json.loads(text, object_pairs_hook=_unique_pairs)
     except EvidenceRefused:
         raise
-    except (ValueError, RecursionError):
+    except RecursionError:
+        if not _text_nesting_exceeds(text, _ENVIRONMENT_DEPTH_FLOOR):         # P5-bis : document peu imbriqué : aucune donnée n'explique l'épuisement de la pile ; se propage
+            raise
+        _refuse(EvidenceRefusal.JSON_INVALID, "JSON mal formé ou démesuré")
+    except ValueError:
         _refuse(EvidenceRefusal.JSON_INVALID, "JSON mal formé ou démesuré")
     if type(value) is not dict:
         _refuse(EvidenceRefusal.NOT_OBJECT, "la racine doit être un objet JSON")
