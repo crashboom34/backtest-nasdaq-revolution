@@ -580,3 +580,8 @@ l'Optimizer, et n'écrit jamais sur disque. Contrairement à `resume_walk_forwar
 attendu n'a pas de checkpoint valide — une relecture read-only n'a structurellement aucun moteur à
 invoquer pour combler l'absence. Les mêmes gardes de fingerprint/provenance/intégrité que la
 reprise s'appliquent donc intégralement, sans duplication de logique.
+
+
+### Amendement PN-1-S1 du 2026-11-08 — représentation de `+inf` dans `validation_run.json`
+
+La valeur en mémoire de `profit_factor` ne change pas : `+inf` quand le gain brut est strictement positif et la perte brute nulle (et aussi 0 / 0 dans le moteur et le validateur V2), aucune formule ni sémantique n'est modifiée, aucune condition de nombre minimal de trades n'est ajoutée. Seule la représentation écrite par `save_validation_run` est précisée : `+inf` est écrit `{"kind": "float", "value": "+inf"}` aux trois chemins fermés `evidence.fold_results[*].profit_factor` et `evidence.aggregate.oos_profit_factor` (Walk-Forward), `evidence.profit_factor` (OOS), et relu par `load_validation_run`. Un `+inf` n'est pas une preuve de robustesse. Les fichiers intermédiaires de `walk_forward.py` restent écrits avec le mot non standard `Infinity` jusqu'à la tranche PN-1-S2. Détail : `AI_HANDOFF.md` § 91.

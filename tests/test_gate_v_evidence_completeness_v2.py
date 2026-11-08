@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import json
 import os
 import subprocess
 import sys
@@ -47,6 +48,7 @@ from validation_run import (
     FoldResult,
     FoldSelection,
     MonteCarloEvidence,
+    NonFiniteMetricRefused,
     ParameterStabilityEvidence,
     PercentileDistributionSummary,
     VALIDATION_TYPE_MONTE_CARLO,
@@ -334,9 +336,16 @@ def scratch(tmp_path_factory):
 
 
 def _json_variant(run, scratch):
-    """La même preuve rechargée depuis JSON : enregistrements imbriqués = dict/list, pas dataclass."""
+    """La même preuve rechargée depuis JSON : enregistrements imbriqués = dict/list, pas dataclass.
+
+    PN-1-S1 : le nouvel écrivain refuse (`NonFiniteMetricRefused`) un enregistrement FORGÉ (`NaN`, `±inf` hors chemin fermé, booléen ou autre
+    type interdit à un chemin fermé). Pour ces cas, on reproduit un fichier historique forgé sur disque avec les octets de l'ancien écrivain, de
+    sorte que V1 et V2 le jugent comme avant ; les cas légitimes (dont `+inf` d'un chemin fermé) exercent le nouvel écrivain."""
     path = scratch / f"{uuid.uuid4().hex}.json"
-    save_validation_run(path, run)
+    try:
+        save_validation_run(path, run)
+    except NonFiniteMetricRefused:
+        path.write_text(json.dumps(dataclasses.asdict(run), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return load_validation_run(path)
 
 
@@ -693,7 +702,8 @@ def _wrong_mc_spec(**changes):
     return mutate
 
 
-# Seul un type d'evidence incohérent n'a aucune forme JSON à recharger (NaN/inf, eux, font l'aller-retour).
+# Seul un type d'evidence incohérent n'a aucune forme JSON à recharger. NaN/inf font l'aller-retour via l'ancien format sur disque : le nouvel
+# écrivain (PN-1-S1) les refuse, `_json_variant` reproduit alors les octets de l'ancien écrivain (fichier historique forgé).
 _NO_JSON_NAN = frozenset({"evidence_wrong_type"})
 _MC_MUTATIONS = [
     ("baseline_complete", None, _BOTH, "complete"),

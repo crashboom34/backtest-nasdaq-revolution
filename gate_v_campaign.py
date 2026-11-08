@@ -49,6 +49,9 @@ from validation_run import (
     build_monte_carlo_specification,
     build_parameter_stability_specification,
     build_validation_run,
+    canonical_oos_evidence_payload,
+    decode_validation_run_record,
+    require_no_legacy_non_finite_in_run_file,
     ValidationRun,
     WalkForwardEvidence,
     WalkForwardRunOutcome,
@@ -263,10 +266,9 @@ def build_gate_v_campaign_plan(
             )
         except ValueError as exc:
             raise ValueError("La preuve OOS référencée ne correspond pas au split.") from exc
-        oos_payload = json.dumps(
-            dataclasses.asdict(oos_run), sort_keys=True, separators=(",", ":"),
-            ensure_ascii=False, allow_nan=False,
-        )
+        # PN-1-S1 site 1 : refus conservé d'un fichier historique à flottant non fini, puis charge utile canonique PARTAGÉE avec site 2.
+        require_no_legacy_non_finite_in_run_file(oos_evidence_path)
+        oos_payload = canonical_oos_evidence_payload(oos_run)
         oos_evidence_hash = hashlib.sha256(oos_payload.encode("utf-8")).hexdigest()
 
     specification = build_walk_forward_specification(
@@ -807,10 +809,7 @@ def derive_gate_v_campaign_status(
     mc = (_validate_scoped_run(plan, mc_id, VALIDATION_TYPE_MONTE_CARLO, evidence_by_validation_run_id)
           if mc_id is not None else None)
     if oos is not None and plan.oos_evidence_hash is not None:
-        payload = json.dumps(
-            dataclasses.asdict(oos), sort_keys=True, separators=(",", ":"),
-            ensure_ascii=False, allow_nan=False,
-        )
+        payload = canonical_oos_evidence_payload(oos)   # PN-1-S1 site 2 : même représentation canonique que le site 1
         if hashlib.sha256(payload.encode("utf-8")).hexdigest() != plan.oos_evidence_hash:
             raise ValueError("La preuve OOS ne correspond plus à l'empreinte du plan de campagne.")
     wf_complete = _walk_forward_complete(plan, wf) if wf is not None else False
@@ -910,7 +909,8 @@ def save_gate_v_campaign_manifest(
                 json.loads(json.dumps(dataclasses.asdict(expected_run), ensure_ascii=False))
                 if isinstance(expected_run, ValidationRun) else None
             )
-            if persisted is None or load_json_tolerant(proof_path) != expected_record:
+            # PN-1-S1 site 3 : comparaison dans le domaine décodé (marqueur et `Infinity` historique donnent tous deux `inf`).
+            if persisted is None or decode_validation_run_record(load_json_tolerant(proof_path)) != expected_record:
                 raise ValueError(f"La preuve persistée {run_id} est absente ou différente.")
     if path.exists():
         previous = load_gate_v_campaign_manifest(path, plan)

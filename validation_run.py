@@ -161,6 +161,8 @@ jamais un couple `dict`/`dict` générique opaque. Ce ticket introduit ce contra
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -923,9 +925,184 @@ def build_validation_run(
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+# PN-1-S1 — représentation de `+inf` dans `validation_run.json` (contrat `PN1-S1-FINAL-CONTRACT-20261108.md`, S-1 à S-5).
+# Le moteur produit `profit_factor = +inf` pour un pli sans trade strictement perdant ; `json.dumps` écrivait alors le token non standard
+# `Infinity`, que le lecteur strict de l'audit refuse. Le marqueur ci-dessous le remplace aux SEULS chemins où une formule peut sortir `+inf`.
+# Aucune formule ni sémantique de métrique n'est modifiée. Aucun champ de premier niveau n'est ajouté (l'audit exige l'ensemble exact).
+# ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+NON_FINITE_ENCODING_VERSION = "validation_run_non_finite_encoding_v1"
+"""Constante de module, JAMAIS écrite dans le fichier. Le marqueur v1 est figé : il entre dans `oos_evidence_hash` donc dans le
+`campaign_id` V1 d'une campagne dont l'OOS vaut `+inf`. Toute évolution exige une nouvelle constante et un décodeur qui lit encore v1."""
+
+_NON_FINITE_MARKER = {"kind": "float", "value": "+inf"}
+
+_CLOSED_PATHS: Dict[str, Tuple[Tuple[str, ...], ...]] = {
+    VALIDATION_TYPE_OOS: (("evidence", "profit_factor"),),
+    VALIDATION_TYPE_WALK_FORWARD: (
+        ("evidence", "fold_results", "*", "profit_factor"),
+        ("evidence", "aggregate", "oos_profit_factor"),
+    ),
+}
+"""Chemins fermés par `validation_type`. Monte-Carlo, Parameter Stability et tout type inconnu : aucun."""
+
+_RUN_RECORD_FIELDS = (
+    "validation_run_id", "research_run_id", "split_plan_id", "dataset_snapshot_id", "validation_type", "strategy_name",
+    "strategy_params", "specification", "evidence", "status", "completed_at",
+)
+
+
+class NonFiniteMetricRefused(ValueError):
+    """Valeur non finie (hors `+inf` aux chemins fermés), clé non textuelle ou type interdit : refus AVANT toute création de fichier."""
+
+
+def _is_sequence(node) -> bool:
+    return isinstance(node, (list, tuple))
+
+
+def _encode_leaf(value, trail: Tuple):
+    """Valeur d'un chemin fermé : `None`, entier non booléen ou `float` (donc `np.float64`). `+inf` → marqueur. Tout autre type est refusé."""
+    if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+        return value
+    if isinstance(value, float):
+        return dict(_NON_FINITE_MARKER) if value == math.inf else value
+    raise NonFiniteMetricRefused(
+        f"type interdit ({type(value).__name__}) à un chemin fermé {'/'.join(map(str, trail))} : seuls None, entier et flottant sont acceptés."
+    )
+
+
+def _encode_at(node, path: Tuple[str, ...], trail: Tuple = ()):
+    """Copie de chemin : reconstruit seulement les conteneurs le long du chemin (les `tuple` de `asdict` sont conservés)."""
+    head, rest = path[0], path[1:]
+    if head == "*":
+        if not _is_sequence(node):
+            return node
+        items = [
+            _encode_at(item, rest, trail + (index,)) if rest else _encode_leaf(item, trail + (index,))
+            for index, item in enumerate(node)
+        ]
+        return tuple(items) if isinstance(node, tuple) else items
+    if not isinstance(node, dict) or head not in node:
+        return node
+    rebuilt = dict(node)
+    rebuilt[head] = _encode_at(node[head], rest, trail + (head,)) if rest else _encode_leaf(node[head], trail + (head,))
+    return rebuilt
+
+
+def _refuse_remaining_non_finite(node, trail: Tuple = ()) -> None:
+    if isinstance(node, float) and not math.isfinite(node):
+        raise NonFiniteMetricRefused(f"valeur non finie ({node!r}) à {'/'.join(map(str, trail))} : refusée (ni +inf d'un chemin fermé, ni autorisée ailleurs).")
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if not isinstance(key, str):
+                raise NonFiniteMetricRefused(f"clé non textuelle ({key!r}) à {'/'.join(map(str, trail))} : refusée.")
+            _refuse_remaining_non_finite(value, trail + (key,))
+    elif _is_sequence(node):
+        for index, value in enumerate(node):
+            _refuse_remaining_non_finite(value, trail + (index,))
+
+
+def encode_validation_run_record(run: "ValidationRun") -> dict:
+    """Forme écrite d'une `ValidationRun` : `asdict(run)` où `+inf` des chemins fermés devient le marqueur. Pur (aucune E/S), ne modifie pas `run`.
+    Lève `NonFiniteMetricRefused` pour tout autre non fini, toute clé non textuelle et tout type interdit à un chemin fermé. `RecursionError`
+    et `MemoryError` se propagent. Pour une donnée finie et bien typée, le résultat sérialise exactement comme `asdict(run)`."""
+    record = asdict(run)
+    validation_type = record.get("validation_type")
+    if isinstance(validation_type, str):
+        for path in _CLOSED_PATHS.get(validation_type, ()):
+            record = _encode_at(record, path)
+    _refuse_remaining_non_finite(record)
+    return record
+
+
+def _decode_leaf(value):
+    if type(value) is dict and value == _NON_FINITE_MARKER:
+        return math.inf
+    return value
+
+
+def _decode_at(node, path: Tuple[str, ...]):
+    head, rest = path[0], path[1:]
+    if head == "*":
+        if not _is_sequence(node):
+            return node
+        items = [_decode_at(item, rest) if rest else _decode_leaf(item) for item in node]
+        return tuple(items) if isinstance(node, tuple) else items
+    if not isinstance(node, dict) or head not in node:
+        return node
+    rebuilt = dict(node)
+    rebuilt[head] = _decode_at(node[head], rest) if rest else _decode_leaf(node[head])
+    return rebuilt
+
+
+def decode_validation_run_record(record):
+    """Inverse de l'encodage aux seuls chemins fermés du `validation_type` lu : un `dict` égal au marqueur (au sens de `dict ==`, ordre des clés
+    indifférent) devient `math.inf`. Tout le reste est rendu inchangé (ni réparation, ni refus). Totale : une racine qui n'est pas un objet, un
+    `validation_type` qui n'est pas un texte, ou toute forme inattendue sont rendus tels quels ; aucune exception n'est levée par une donnée."""
+    if not isinstance(record, dict):
+        return record
+    validation_type = record.get("validation_type")
+    if not isinstance(validation_type, str):
+        return record
+    for path in _CLOSED_PATHS.get(validation_type, ()):
+        record = _decode_at(record, path)
+    return record
+
+
+def canonical_oos_evidence_payload(run: "ValidationRun") -> str:
+    """Charge utile canonique de l'empreinte OOS V1 : même représentation aux sites de création du plan et de dérivation du statut. Identique
+    octet pour octet à `json.dumps(asdict(run), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)` pour un run fini et
+    bien typé ; calculable pour un OOS à `+inf` (marqueur). Refuse (NonFiniteMetricRefused) un type interdit, une clé non textuelle ou un autre non fini."""
+    return json.dumps(
+        encode_validation_run_record(run), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+    )
+
+
+def _first_non_finite(node, trail: str):
+    if isinstance(node, float) and not math.isfinite(node):
+        return trail
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found = _first_non_finite(value, f"{trail}.{key}")
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            found = _first_non_finite(value, f"{trail}[{index}]")
+            if found is not None:
+                return found
+    return None
+
+
+def require_no_legacy_non_finite_in_run_file(path: Union[str, Path]) -> None:
+    """Refus conservé d'un fichier de preuve OOS portant, dans les champs de la preuve, un flottant non fini (token historique `Infinity`/`NaN`/
+    `-Infinity` ou littéral `1e999`). Reproduit exactement le refus de l'ancienne empreinte (`allow_nan=False`) : n'ajoute NI refus de clé dupliquée,
+    NI examen des clés supplémentaires de premier niveau (ignorées à la relecture). `ValueError` dont le message contient « OOS » (aussi pour un
+    fichier illisible). Aucune réparation implicite : un fichier historique à `Infinity` ne devient jamais une preuve liée à l'identité."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:        # `UnicodeDecodeError` et `JSONDecodeError` sont des `ValueError`
+        raise ValueError(f"Le fichier de preuve OOS {path} est illisible ({type(exc).__name__}).") from exc
+    if not isinstance(data, dict):
+        return
+    for field_name in _RUN_RECORD_FIELDS:
+        if field_name in data:
+            found = _first_non_finite(data[field_name], field_name)
+            if found is not None:
+                raise ValueError(
+                    f"La preuve OOS {path} contient une valeur flottante non finie ({found}) : écriture historique non standard, "
+                    "refusée (aucune réparation implicite)."
+                )
+
+
 def save_validation_run(path: Union[str, Path], run: ValidationRun) -> Path:
     """Écriture atomique de la `ValidationRun`. Lève `FileExistsError` si déjà écrite (immuable —
     un seul enregistrement par `validation_run_id`).
+
+    PN-1-S1 : `+inf` des chemins fermés est écrit comme marqueur ; toute autre valeur non finie, clé non textuelle ou
+    type interdit lève `NonFiniteMetricRefused` AVANT toute E/S (ni répertoire, ni fichier temporaire, ni contrôle
+    `FileExistsError`).
 
     Lève `ValueError` si `run.specification is None` (durcissement 2026-09-12) : cette
     représentation n'est honnête qu'en LECTURE d'un ancien enregistrement AF-V-01
@@ -942,7 +1119,17 @@ def save_validation_run(path: Union[str, Path], run: ValidationRun) -> Path:
             "créer ou re-persister un artefact. Utilise build_validation_run() avec une "
             "specification réelle pour tout nouveau run."
         )
-    return save_atomic(path, asdict(run), "validation_run")
+    binding = _VALIDATION_TYPES.get(run.validation_type) if isinstance(run.validation_type, str) else None
+    if binding is not None and not isinstance(run.evidence, binding[1]):
+        raise ValueError(
+            f"save_validation_run() refuse une evidence de type {type(run.evidence).__name__} pour validation_type="
+            f"{run.validation_type!r} (attendu {binding[1].__name__}) : aucun fichier n'est créé."
+        )
+    record = encode_validation_run_record(run)
+    # Garde d'octets qui reflète l'écriture réelle de `save_atomic` (`ensure_ascii=False`, `indent=2`, UTF-8) : refuse aussi un substitut Unicode
+    # isolé AVANT toute E/S (sinon l'erreur surviendrait après la création du répertoire).
+    json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
+    return save_atomic(path, record, "validation_run")
 
 
 def load_validation_run(path: Union[str, Path]) -> Optional[ValidationRun]:
@@ -959,10 +1146,14 @@ def load_validation_run(path: Union[str, Path]) -> Optional[ValidationRun]:
       `evidence` dont les champs ne correspondent pas au type attendu, **ou clé `"specification"`
       présente avec la valeur `null` explicite** — distinct d'une absence totale, voir
       `_SPECIFICATION_KEY_ABSENT`) -> lève `IncoherentValidationRunError`, jamais un `None` qui
-      masquerait silencieusement une donnée corrompue ou un nouveau format mal formé."""
+      masquerait silencieusement une donnée corrompue ou un nouveau format mal formé.
+
+    PN-1-S1 : avant la rehydratation, `decode_validation_run_record` remplace le marqueur `{"kind": "float", "value": "+inf"}` par `math.inf`
+    aux seuls chemins fermés du type de preuve ; un `Infinity` historique est déjà lu comme `inf` (tolérance inchangée, jamais réécrit)."""
     data = load_json_tolerant(path)
     if data is None:
         return None
+    data = decode_validation_run_record(data)      # PN-1-S1 : marqueur → inf aux chemins fermés ; un `Infinity` historique est déjà `inf`
     try:
         validation_run_id = data["validation_run_id"]
         research_run_id = data["research_run_id"]

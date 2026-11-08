@@ -3936,3 +3936,8 @@ V1 et les temporaires d'écriture atomique.
   partie lecture/vérification/lignée d'E3-B6 sont implémentés et testés **localement**, non commités ; la publication des déclarations et
   des attestations reste **bloquée** par E3-C (absent). E3-A, B1, B2 et B4 sont inchangés. Le mode `REAL` reste **désactivé et non
   qualifié**. Aucun accès `FINAL_HOLDOUT`, aucun Claim réel. `AF-V-07` = IN PROGRESS, `GATE V` NON PASSÉE, aucun Champion qualifié.
+
+
+### Amendement PN-1-S1 du 2026-11-08 — dérogation limitée au gel de `validation_run.py` et de trois sites de `gate_v_campaign.py`
+
+Le gel des modules `gate_v_campaign.py`, `validation_run.py` et `walk_forward.py` prévu par la présente décision est levé, pour la seule tranche PN-1-S1, sur `validation_run.py` et sur trois sites identifiés de `gate_v_campaign.py` (empreinte OOS à la création du plan, même empreinte dans la dérivation du statut, comparaison fichier persisté contre record attendu à la sauvegarde du manifeste). `walk_forward.py` reste gelé (tranche PN-1-S2). Le marqueur `{"kind": "float", "value": "+inf"}` est normatif et gelé : il entre dans `oos_evidence_hash` et donc dans `campaign_id` V1. Les identités et empreintes des runs finis sont inchangées ; aucune empreinte historique n'est recalculée ; B2, B3 et L3-A ne sont pas modifiés et refusent toujours le mot `Infinity`. Aucune opération FINAL_HOLDOUT, aucune admission nouvelle, `GATE V` reste NON PASSÉE. Détail : `AI_HANDOFF.md` § 91.
