@@ -51,7 +51,11 @@ from optimizer import (
     count_combinations,
     params_hash,
     reaches_stratified_sample,
+    SCORING_SEMANTICS_VERSION,
+    TECHNICAL_REJECTION_PREFIXES,
+    validate_scoring_configuration,
 )
+
 from strategy_contracts import DailyStateReadiness, resolve_state_ready_boundary
 from validation_run import (
     VALIDATION_TYPE_WALK_FORWARD,
@@ -65,6 +69,17 @@ from validation_run import (
     build_validation_run,
     build_walk_forward_evidence,
 )
+
+# ADR 0029 : familles de motifs de rejet TECHNIQUES — définition unique dans `scoring`.
+_TECHNICAL_REJECTION_PREFIXES = TECHNICAL_REJECTION_PREFIXES
+
+
+def _require_valid_scoring_configuration(base_config) -> None:
+    """ADR 0029 (C14, G-7) : configuration de scoring validée à l'ENTRÉE de chaque orchestrateur
+    Walk-Forward (run, reprise, capture), avant tout backtest — y compris une reprise REPLAY_TEST
+    qui ne repasserait pas par `Optimizer.run()`."""
+    validate_scoring_configuration(base_config.score_weights, base_config.filters, base_config.param_ranges)
+
 
 # Identifie la sémantique du protocole Walk-Forward — géométrie, inclusivité des frontières, règle
 # terminale. Indépendante de TRAIN_TEST_SEMANTICS_VERSION ("exact-boundary-v2")/
@@ -445,7 +460,39 @@ class NoEligibleTrainCandidate(ValueError):
     """Levée quand TOUS les candidats TRAIN d'un fold sont à zéro trade/filtrés (score <= 0) —
     le fold n'a pas de `FoldSelection` possible (ADR 0021 Décision 15). Distincte du cas TEST à
     zéro trade (`FoldResult.zero_trade_oos=True`), qui reste une observation scientifique valide,
-    jamais une erreur."""
+    jamais une erreur.
+
+    ADR 0029 (U-9) : porte les effectifs TYPÉS de la population inéligible — mauvaise performance
+    (`n_non_performant`), rejets numériques (`n_invalid_metric`), configuration (`n_invalid_config`),
+    exceptions moteur (`n_exception`), candidats repris sans motif persisté (`n_unclassified_reused`)
+    — sans aucun seuil d'abandon : un rejet numérique n'est jamais une performance."""
+
+    COUNT_FIELDS = ("n_non_performant", "n_invalid_metric", "n_invalid_config", "n_exception",
+                    "n_unclassified_reused")
+
+    def __init__(self, message: str, **counts):
+        super().__init__(message)
+        for name in self.COUNT_FIELDS:
+            setattr(self, name, int(counts.get(name, 0)))
+
+
+def _ineligible_population_counts(candidates: list) -> dict:
+    """Effectifs typés (U-9) des candidats de score <= 0."""
+    counts = dict.fromkeys(NoEligibleTrainCandidate.COUNT_FIELDS, 0)
+    for r in candidates:
+        if "filter_reason" not in r:
+            counts["n_unclassified_reused"] += 1
+            continue
+        reason = r.get("filter_reason") or ""
+        if reason.startswith("INVALID_METRIC:"):
+            counts["n_invalid_metric"] += 1
+        elif reason.startswith("INVALID_CONFIG:"):
+            counts["n_invalid_config"] += 1
+        elif reason.startswith("Exception:"):
+            counts["n_exception"] += 1
+        else:
+            counts["n_non_performant"] += 1
+    return counts
 
 
 class FoldTestExecutionFailed(RuntimeError):
@@ -584,10 +631,13 @@ def select_fold_top1(
     multi-passes (ex. mode "general") peut réévaluer la même combinaison plusieurs fois."""
     eligible = [r for r in all_results if r["score"] > 0]
     if not eligible:
+        counts = _ineligible_population_counts(all_results)
+        detail = ", ".join(f"{k}={v}" for k, v in counts.items())
         raise NoEligibleTrainCandidate(
             f"{fold.fold_id} : aucun candidat TRAIN éligible parmi "
-            f"{len(all_results)} évalué(s) (tous à zéro trade/filtrés) — impossible de "
-            "construire une FoldSelection (ADR 0021 Décision 15)."
+            f"{len(all_results)} évalué(s) ({detail}) — impossible de "
+            "construire une FoldSelection (ADR 0021 Décision 15, ADR 0029 U-9).",
+            **counts,
         )
     best = all_results[0]
     unique_hashes = {params_hash(r["params"]) for r in all_results}
@@ -645,7 +695,9 @@ def _run_fold_test_core(
         fold.effective_boundary, fold.effective_test_end,
         end_boundary="exclusive", include_artifacts=True,
     )
-    if test_result["filtered"] and (test_result["filter_reason"] or "").startswith("Exception:"):
+    if test_result["filtered"] and (test_result["filter_reason"] or "").startswith(
+        _TECHNICAL_REJECTION_PREFIXES
+    ):  # ADR 0029 (C9, U-8) : une métrique TEST invalide/indéfinie est un échec technique
         raise FoldTestExecutionFailed(
             f"{fold.fold_id} : l'exécution TEST a échoué techniquement "
             f"({test_result['filter_reason']}) — jamais traduite en zero_trade_oos=True "
@@ -669,10 +721,14 @@ def _run_fold_test_core(
         forced_closes = int((trades["raison_sortie"] == "fin-donnees").sum())
         # Recalcul INDÉPENDANT de l'éligibilité TRAIN, à partir des MÊMES `stats` (aucun second
         # backtest) — voir _UNFILTERED_TEST_SCORING et le finding BLOQUANT qu'il corrige.
-        score_test, _, _, _ = compute_score(
+        score_test, test_filtered, test_reason, _ = compute_score(
             stats, base_config.score_weights, _UNFILTERED_TEST_SCORING,
             params=selection.selected_params, param_ranges=base_config.param_ranges,
         )
+        if test_filtered and (test_reason or "").startswith(_TECHNICAL_REJECTION_PREFIXES):
+            raise FoldTestExecutionFailed(  # ADR 0029 (C9) : jamais score_test = 0.0
+                f"{fold.fold_id} : score TEST non calculable ({test_reason}) — échec technique."
+            )
         # gross_win/gross_loss/n_win (AF-V-02 Slice 3, extension additive de FoldResult) : mêmes
         # noms de grandeur qu'engine.py::_compute_stats(), lus depuis les MÊMES stats déjà
         # produites — .get(..., défaut) car un faux run_backtest de test peut légitimement ne pas
@@ -686,6 +742,13 @@ def _run_fold_test_core(
     coverage_bars = int(
         ((df["time_paris"] >= ts_boundary) & (df["time_paris"] < ts_test_end)).sum()
     )
+    if zero_trade and len(equity) == 0 and coverage_bars > 0:
+        # ADR 0029 (F-8, revue de code) : le moteur ne rend une equity vide que pour une fenêtre
+        # SANS barre ; une fenêtre TEST couverte avec equity vide n'est jamais un zéro trade OOS.
+        raise FoldTestExecutionFailed(
+            f"{fold.fold_id} : equity TEST vide alors que la fenêtre couvre {coverage_bars} barre(s) "
+            "— échec technique, jamais zero_trade_oos (ADR 0029)."
+        )
 
     fold_result = FoldResult(
         fold_id=fold.fold_id,
@@ -864,6 +927,7 @@ def run_walk_forward(
 
     Lève `DatasetTooShortForWalkForward` telle quelle si `compute_fold_definitions()` ne génère
     aucun fold (Slice 1, jamais dupliquée ici)."""
+    _require_valid_scoring_configuration(base_config)  # ADR 0029 C14 : avant tout backtest
     if spec.master_seed is not None and validation_run_id is None:
         raise ValueError(
             "validation_run_id est obligatoire quand spec.master_seed est fourni — nécessaire "
@@ -1088,6 +1152,9 @@ def build_walk_forward_manifest(
         )
     return {
         "walk_forward_semantics_version": WALK_FORWARD_SEMANTICS_VERSION,
+        # ADR 0029 : sémantique de scoring dans le fingerprint RUN-LEVEL — une reprise legacy
+        # (clé absente) diverge et est refusée par check_resume_fingerprint().
+        "scoring_semantics_version": SCORING_SEMANTICS_VERSION,
         "train_test_semantics_version": TRAIN_TEST_SEMANTICS_VERSION,
         "state_readiness_semantics_version": STATE_READINESS_SEMANTICS_VERSION,
         "master_seed": spec.master_seed,
@@ -1428,6 +1495,11 @@ def _load_fold_result(fold_dir: Path) -> Optional[FoldResult]:
         return None
 
 
+def fingerprint_divergent_keys(persisted: dict, current: dict) -> list:
+    """API publique (ADR 0029, S-2) de `_fingerprint_divergent_keys`, utilisée par `gate_v_campaign`."""
+    return _fingerprint_divergent_keys(persisted, current)
+
+
 def _fingerprint_divergent_keys(persisted: dict, current: dict) -> list:
     """Compare le `manifest.json` persisté au manifest fraîchement reconstruit pour le run
     courant (`build_walk_forward_manifest()`, Slice 4, jamais réimplémenté) — TOUTES les clés SAUF
@@ -1608,6 +1680,9 @@ def _fold_definition_fingerprint(fold: FoldDefinition, base_config) -> str:
     TRAIN — jamais `data_manifest_path`/champs runtime, mêmes principe que
     `_fingerprint_divergent_keys()`."""
     payload = {
+        # ADR 0029 : un train_progress.csv calculé sous une autre sémantique de scoring n'est
+        # jamais réutilisé (empreinte différente -> [] -> candidats recalculés).
+        "scoring_semantics_version": SCORING_SEMANTICS_VERSION,
         "fold": dataclasses.asdict(fold),
         "base_params": base_config.base_params,
         "param_ranges": [dataclasses.asdict(pr) for pr in base_config.param_ranges],
@@ -1657,9 +1732,17 @@ def _load_train_progress(fold_dir: Path, fold: FoldDefinition, base_config) -> l
                 return []
             params = json.loads(row["params_json"])
             score = float(row["score"])
+            reason = row["filter_reason"]
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return []
-        candidates.append({"params": params, "score": score})
+        # ADR 0029 (C12) : un score repris non fini ou hors [0, 100] (CSV corrompu/forgé) n'est
+        # jamais réinjecté dans la sélection Top-1 -> tout le fichier est ignoré (REDO complet).
+        if not math.isfinite(score) or not 0.0 <= score <= 100.0:
+            return []
+        reason = "" if pd.isna(reason) else str(reason)
+        if score > 0 and reason.startswith(_TECHNICAL_REJECTION_PREFIXES):
+            return []  # ligne forgée : un rejet technique n'est jamais éligible
+        candidates.append({"params": params, "score": score, "filter_reason": reason})
     return candidates
 
 
@@ -1680,6 +1763,7 @@ def _write_train_progress(
             "fold_fingerprint": fingerprint,
             "params_json": json.dumps(c["params"], sort_keys=True, ensure_ascii=False),
             "score": c["score"],
+            "filter_reason": c.get("filter_reason") or "",  # ADR 0029 U-9 : motif conservé
         }
         for c in candidates
     ]
@@ -1767,7 +1851,8 @@ def _redo_fold_reusing_train_candidates(
     accumulated = list(reused_candidates)
 
     def _persisting_progress_cb(done_in_batch, total_in_batch, result):
-        accumulated.append({"params": result["params"], "score": result["score"]})
+        accumulated.append({"params": result["params"], "score": result["score"],
+                            "filter_reason": result.get("filter_reason") or ""})
         if base_config.mode in _TRAIN_PROGRESS_REUSE_SAFE_MODES:
             _write_train_progress(fold_dir, fold, base_config, accumulated)
         if progress_cb is not None:
@@ -1899,6 +1984,7 @@ def resume_walk_forward_run(
     l'ensemble des folds attendus, mais `stopped_early=True` le signale explicitement à
     l'appelant : ce n'est jamais un agrégat partiel produit SANS que l'appelant puisse le
     distinguer d'un agrégat complet."""
+    _require_valid_scoring_configuration(base_config)  # ADR 0029 C14 : avant tout backtest
     if spec.master_seed is not None and validation_run_id is None:
         raise ValueError(
             "validation_run_id est obligatoire quand spec.master_seed est fourni — nécessaire "
@@ -1953,6 +2039,34 @@ def resume_walk_forward_run(
 # avant cette écriture laisse le fold non validé ; sa reprise peut le recalculer.
 WALK_FORWARD_CAPTURE_CONTRACT_VERSION = "walk-forward-capture-v1"
 _CAPTURE_CHECKPOINT_DIRNAME = ".gate_v_checkpoints_v1"
+
+
+def build_walk_forward_capture_manifest(
+    validation_zone: SplitBoundary,
+    spec: WalkForwardSpecification,
+    readiness_spec: Optional[DailyStateReadiness],
+    base_config,
+    data_manifest_path: Union[str, Path],
+    validation_run_id: str,
+) -> Tuple[Tuple[FoldDefinition, ...], dict]:
+    """Constructeur PUR (aucune écriture) du manifeste de capture V1 — extraction mécanique de
+    `_prepare_captured_run()` (ADR 0029, S-2/G-12) : même contenu, octet pour octet, que celui écrit
+    au démarrage d'une capture. Réutilisé par `gate_v_campaign` pour vérifier la PROVENANCE d'une
+    preuve Walk-Forward avant toute réutilisation. Lit seulement le manifeste de données
+    (`ValueError` s'il est absent)."""
+    fold_definitions = compute_fold_definitions(validation_zone, spec, readiness_spec)
+    current_manifest = build_walk_forward_manifest(
+        spec, base_config, data_manifest_path, validation_run_id=validation_run_id,
+    )
+    current_manifest["capture_contract_version"] = WALK_FORWARD_CAPTURE_CONTRACT_VERSION
+    capture_config = dataclasses.asdict(base_config)
+    capture_config.pop("data_file", None)  # Le manifeste de données fige le contenu, pas le chemin local.
+    current_manifest["capture_base_config"] = _capture_jsonable(capture_config)
+    current_manifest["capture_validation_zone"] = dataclasses.asdict(validation_zone)
+    current_manifest["capture_fold_definitions"] = [
+        dataclasses.asdict(fold) for fold in fold_definitions
+    ]
+    return fold_definitions, current_manifest
 
 
 def _capture_checkpoint_dir(output_dir: Union[str, Path]) -> Path:
@@ -2150,19 +2264,11 @@ def _prepare_captured_run(
 ) -> Tuple[Tuple[FoldDefinition, ...], Path, dict]:
     if not isinstance(validation_run_id, str) or not validation_run_id.strip():
         raise ValueError("validation_run_id est obligatoire pour la capture Walk-Forward V1")
-    fold_definitions = compute_fold_definitions(validation_zone, spec, readiness_spec)
-    checkpoint_dir = _capture_checkpoint_dir(output_dir)
-    current_manifest = build_walk_forward_manifest(
-        spec, base_config, data_manifest_path, validation_run_id=validation_run_id,
+    _require_valid_scoring_configuration(base_config)  # ADR 0029 C14 : capture et reprise
+    fold_definitions, current_manifest = build_walk_forward_capture_manifest(
+        validation_zone, spec, readiness_spec, base_config, data_manifest_path, validation_run_id,
     )
-    current_manifest["capture_contract_version"] = WALK_FORWARD_CAPTURE_CONTRACT_VERSION
-    capture_config = dataclasses.asdict(base_config)
-    capture_config.pop("data_file", None)  # Le manifeste de données fige le contenu, pas le chemin local.
-    current_manifest["capture_base_config"] = _capture_jsonable(capture_config)
-    current_manifest["capture_validation_zone"] = dataclasses.asdict(validation_zone)
-    current_manifest["capture_fold_definitions"] = [
-        dataclasses.asdict(fold) for fold in fold_definitions
-    ]
+    checkpoint_dir = _capture_checkpoint_dir(output_dir)
     checkpoint_manifest = checkpoint_dir / _MANIFEST_FILENAME
     if resume:
         if not checkpoint_manifest.is_file():

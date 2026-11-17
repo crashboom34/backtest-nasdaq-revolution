@@ -120,7 +120,10 @@ class _RecordingRunBacktest:
         # n_trades > 0 : évite le court-circuit "Aucun trade" de _run_single() avant même
         # l'appel à compute_score() — la valeur réelle n'a pas d'importance pour ces tests
         # (qui verrouillent les bornes/contexte transmis au moteur, pas la logique de scoring).
-        return pd.DataFrame(), pd.DataFrame(), {"n_trades": 1, "net_ret_pct": 1.0}
+        # ADR 0029 (U-2) : artefacts cohérents et 14 métriques, valeurs = défauts implicites
+        # historiques de compute_score (score inchangé) — jamais `{"n_trades": 1}` + frames vides.
+        from tests._scoring_fixtures import legacy_equivalent_artifacts
+        return legacy_equivalent_artifacts(1, 1.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

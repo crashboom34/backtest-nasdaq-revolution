@@ -580,7 +580,9 @@ class TestConsistencyWithARealWalkForwardFold:
                 equity = pd_module.DataFrame(
                     [{"date": "2020-01-01", "capital": 10_000.0 + net_ret}]
                 )
-                return trades, equity, {"n_trades": 1, "net_ret_pct": net_ret}
+                # ADR 0029 (U-2) : 14 métriques complètes (défauts implicites historiques).
+                from tests._scoring_fixtures import legacy_equivalent_stats
+                return trades, equity, legacy_equivalent_stats(1, net_ret)
 
         import pandas as pd_module
 

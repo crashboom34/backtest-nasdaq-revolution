@@ -492,3 +492,35 @@ Statut : **À confirmer** (règle de l'ADR 0025 §23.27.5 ; terme à confirmer c
 Dossier de campagne lu parce que la chaîne du registre le référence ; c'est une source lue, jamais une racine d'audit statique de la configuration de root. Le fait qu'une racine soit dérivée est déclaré par l'appelant et vérifié avant l'admission.
 _À ne pas confondre avec_ : une racine d'audit configurée (statique).
 Statut : **À confirmer** (règle de l'ADR 0025 §23.27.3 et §23.30.3 ; terme à confirmer comme vocabulaire du projet).
+
+### Intégrité numérique du scoring (ADR 0029)
+
+**Sémantique de scoring** :
+Version du contrat numérique sous lequel un score a été calculé (`finite-metrics-v1` depuis l'ADR 0029). Deux scores ne sont comparables ou fusionnables que sous la même sémantique ; une trace sans version est « legacy ».
+_À ne pas confondre avec_ : la sémantique TRAIN/TEST, la sémantique Walk-Forward ou celle de readiness, qui versionnent d'autres contrats.
+Statut : **Confirmé** (ADR 0029).
+
+**Rejet numérique typé** :
+Issue d'un candidat dont une métrique ou la configuration est invalide : le candidat est inéligible avec un motif `INVALID_METRIC:<code>:<champ>` (métrique du candidat) ou `INVALID_CONFIG:<code>:<champ>` (configuration globale). Ce n'est jamais une performance, bonne ou mauvaise.
+_À ne pas confondre avec_ : un candidat filtré pour performance (trop peu de trades, drawdown trop élevé…), ni avec un échec du moteur (`Exception:`).
+Statut : **Confirmé** (ADR 0029).
+
+**Métrique indéfinie** :
+Métrique sans valeur mathématique pour les trades observés, par exemple un profit factor 0/0 (aucun gain, aucune perte). Elle rend le candidat inéligible et, sur un pli TEST, fait échouer techniquement le pli.
+_À ne pas confondre avec_ : un profit factor infini légitime (gains strictement positifs, pertes nulles), ni avec une valeur très mauvaise.
+Statut : **Confirmé** (ADR 0029).
+
+**Zéro trade authentique** :
+Résultat d'un backtest qui n'a produit aucun trade, sous la forme exacte que rend le moteur (aucun trade, statistiques réduites au nombre de trades nul, equity finie). C'est une observation scientifique, jamais une erreur.
+_À ne pas confondre avec_ : des statistiques vides ou mal formées qui prétendent zéro trade, traitées comme un rejet numérique typé.
+Statut : **Confirmé** (ADR 0029).
+
+**Frontière moteur → optimizer** :
+Point unique où les artefacts rendus par un backtest (trades, equity, statistiques) sont contrôlés avant tout scoring sur un chemin scientifique : complétude des métriques, finitude du PnL et du capital, cohérence du nombre de trades.
+_À ne pas confondre avec_ : la validation des barres de marché en amont du moteur (hors de ce contrat).
+Statut : **Confirmé** (ADR 0029).
+
+**Provenance d'une preuve Walk-Forward** :
+Établissement qu'une preuve Walk-Forward présente dans une campagne a été produite sous la sémantique de scoring courante et la configuration exacte attendue, par égalité de son manifeste de capture avec le manifeste recalculé. Sans provenance établie, la preuve n'est jamais réutilisée.
+_À ne pas confondre avec_ : l'intégrité d'un fichier (empreinte), qui ne dit rien de la sémantique sous laquelle il a été produit.
+Statut : **Confirmé** (ADR 0029).

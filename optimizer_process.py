@@ -57,6 +57,8 @@ if __name__ == "__main__":
         normalize_max_combinations, resolve_execution_window,
         TRAIN_TEST_SEMANTICS_VERSION, validate_resume_train_test_semantics,
         STATE_READINESS_SEMANTICS_VERSION, validate_resume_state_readiness_semantics,
+        SCORING_SEMANTICS_VERSION, InvalidScoringConfiguration, validate_scoring_configuration,
+        validate_resume_scoring_semantics,
         _load_strategy,
     )
     from report_generator import generate_report
@@ -192,6 +194,22 @@ if __name__ == "__main__":
         benchmark_n_sample=cfg_dict.get("benchmark_n_sample", 5),
         quick_validation_mode=cfg_dict.get("quick_validation_mode", False),
     )
+
+    # ADR 0029 (C14, G-7) : configuration de scoring validée AVANT save_config(), le chargement des
+    # données et le benchmark — une configuration invalide ne coûte aucun calcul et laisse une
+    # erreur explicite au lecteur de progression.
+    try:
+        validate_scoring_configuration(score_weights, filters, param_ranges)
+    except InvalidScoringConfiguration as exc:
+        _log(f"ERREUR : {exc}")
+        write_progress(run_id, {
+            "run_id": run_id, "status": "error", "error_message": str(exc),
+            "total_combinations": 0, "completed": 0, "failed": 0, "progress_pct": 0.0,
+            "started_at": _run_started,
+        }, job_dir=job_dir)
+        sys.exit(1)
+    # Sémantique de scoring TOUJOURS persistée (avec ou sans train/test, ADR 0029 F-4).
+    cfg_dict["scoring_semantics_version"] = SCORING_SEMANTICS_VERSION
 
     # Correction scientifique du split TRAIN/TEST (2026-09-12) : la sémantique train/test est
     # une propriété LOGICIELLE/reproductible, jamais une option UI — injectée automatiquement,
@@ -333,6 +351,8 @@ if __name__ == "__main__":
         # même précédent, contrat indépendant (voir STATE_READINESS_SEMANTICS_VERSION).
         validate_resume_state_readiness_semantics(
             _current_is_readiness_aware, source_config, config.resume_run_id)
+        # ADR 0029 (F-4) : garde INCONDITIONNELLE, avant toute lecture des hashs et le benchmark.
+        validate_resume_scoring_semantics(source_config, config.resume_run_id)
 
         already_tested = load_tested_hashes(config.resume_run_id, job_dir=resume_job_dir)
         _log(f"Reprise : {len(already_tested)} combinaisons déjà testées")
@@ -393,6 +413,7 @@ if __name__ == "__main__":
         "best_stats":     {},
         "all_results":    [],
         "csv_fieldnames": None,
+        "error_message":  None,  # ADR 0029 G-4 : jamais réécrit à None après une erreur
     }
 
     def write_state(status="running"):
@@ -421,7 +442,7 @@ if __name__ == "__main__":
             "workers_used":              config.n_workers,
             "benchmark_ms_per_backtest": round(benchmark_ms, 1),
             "already_tested_count":      len(already_tested),
-            "error_message":             None,
+            "error_message":             state["error_message"],
             "started_at":                _run_started,
             "strategy_name":             cfg_dict.get("strategy_name", ""),
             "mode":                      cfg_dict.get("mode", ""),
@@ -522,8 +543,17 @@ if __name__ == "__main__":
     except Exception as e:
         import traceback
         final_status = "error"
+        state["error_message"] = str(e)
         tb = traceback.format_exc()
         _log(f"ERREUR : {e}\n{tb}")
+        if config.train_test.enabled:
+            # ADR 0029, S-1 option B (G-5) : un run TRAIN/TEST en erreur ne présente AUCUN résultat
+            # (build_meta substituerait le score TRAIN à un score_test absent) et aucun meilleur
+            # score TRAIN comme résultat du job. Les lignes TRAIN déjà écrites dans results.csv
+            # restent des artefacts partiels (éventuellement incomplets) ; les hashs ne sont pas
+            # sauvegardés.
+            _log("Résultats TEST non présentés : run TRAIN/TEST en échec technique.")
+            state["best_score"], state["best_params"], state["best_stats"] = 0.0, {}, {}
         write_progress(run_id, {
             "run_id":             run_id,
             "status":             "error",
@@ -546,18 +576,27 @@ if __name__ == "__main__":
 
     elapsed     = time.perf_counter() - t_start
     all_results = state["all_results"]
+    # ADR 0029 (G-5) : run TRAIN/TEST en erreur -> aucun résultat présenté, aucun rapport de
+    # performance (le rapport sur liste vide conseillerait de « revoir les filtres »), aucune
+    # finalisation de métriques (metrics.json écrirait best_score_test: 0).
+    fail_closed = final_status == "error" and config.train_test.enabled
+    if fail_closed:
+        all_results = []
 
     # Générer le rapport automatique
-    try:
-        from report_generator import generate_report
-        report = generate_report(
-            all_results=all_results,
-            sensitivity=sensitivity,
-            config_dict=cfg_dict,
-        )
-    except Exception as e:
-        _log(f"[report_generator] Erreur : {e}")
-        report = {"error": str(e)}
+    if fail_closed:
+        report = {"error": state["error_message"]}
+    else:
+        try:
+            from report_generator import generate_report
+            report = generate_report(
+                all_results=all_results,
+                sensitivity=sensitivity,
+                config_dict=cfg_dict,
+            )
+        except Exception as e:
+            _log(f"[report_generator] Erreur : {e}")
+            report = {"error": str(e)}
 
     # Fenêtre TRAIN/TEST réellement résolue (correction scientifique du split, 2026-09-12) —
     # None si train/test désactivé, ou si l'optimisation a échoué avant sa résolution (opt=None
@@ -595,7 +634,9 @@ if __name__ == "__main__":
     # FINALISATION JOB (artefacts supplémentaires)
     # ════════════════════════════════════════════════════════════
 
-    if job_dir:
+    if job_dir and fail_closed:
+        _log("Finalisation job ignorée : run TRAIN/TEST en échec technique (ADR 0029, S-1).")
+    elif job_dir:
         _log("Génération des artefacts job (metrics, best_strategies, report.html, logs, archive)...")
         try:
             from job_store import finalize_job

@@ -29,6 +29,11 @@ from scoring import (
     compute_score,
     compute_sensitivity_filtered,
     compute_sensitivity_correlation,
+    SCORING_SEMANTICS_VERSION,
+    InvalidScoringConfiguration,  # ré-exporté pour optimizer_process / walk_forward / tests
+    TECHNICAL_REJECTION_PREFIXES,
+    number_rejection_code,
+    validate_scoring_configuration,
 )
 from strategy_contracts import resolve_state_ready_boundary
 
@@ -291,6 +296,79 @@ def _load_strategy(module_path: str):
     return mod, mod.Strategy()
 
 
+REQUIRED_ENGINE_METRICS = (
+    "n_trades", "n_win", "n_loss", "win_rate", "profit_factor", "payoff", "gross_win",
+    "gross_loss", "max_dd_pct", "max_dd_usd", "max_consec_loss", "net_ret_pct", "net_ret_usd",
+    "equity_r_squared",
+)
+"""Métriques que `engine._compute_stats()` produit TOUJOURS dès qu'un trade existe (engine.py:563-592)
+et que le score (ou ses contrôles de cohérence C3/C4) lit : sur un chemin scientifique, une clé
+absente n'est JAMAIS remplacée par le défaut favorable de `compute_score` (ADR 0029, U-2)."""
+
+
+def _frame_column_reason(frame, frame_name: str, column: str) -> Optional[str]:
+    """Colonne numérique présente et entièrement finie, sans conversion ni mutation du DataFrame."""
+    if column not in frame.columns:
+        return f"INVALID_METRIC:MISSING:{frame_name}.{column}"
+    if frame.columns.duplicated().any():  # frame[column] serait un DataFrame
+        return f"INVALID_METRIC:TYPE:{frame_name}.{column}"
+    series = frame[column]
+    if (pd.api.types.is_bool_dtype(series) or pd.api.types.is_complex_dtype(series)
+            or not pd.api.types.is_numeric_dtype(series)):
+        return f"INVALID_METRIC:TYPE:{frame_name}.{column}"
+    try:
+        values = series.to_numpy(dtype="float64", na_value=np.nan)
+    except (TypeError, ValueError, OverflowError):
+        return f"INVALID_METRIC:TYPE:{frame_name}.{column}"
+    if not np.isfinite(values).all():
+        return f"INVALID_METRIC:NON_FINITE:{frame_name}.{column}"
+    return None
+
+
+def _validate_backtest_outputs(trades_df, equity_df, stats) -> Optional[str]:
+    """Frontière moteur → optimizer (ADR 0029, C13). Totale : retourne un motif typé
+    `INVALID_METRIC:<CODE>:<champ>` ou None, ne lève jamais.
+
+    - Zéro trade AUTHENTIQUE = `trades` vide ET `stats == {"n_trades": 0}` (int, jamais bool), comme
+      `engine._compute_stats()` le produit ; l'equity non vide doit être entièrement finie. Toute
+      autre forme (`{}`, clés en plus, trades présents) est `INCOHERENT:zero_trade`.
+    - Avec trades : les 14 `REQUIRED_ENGINE_METRICS` présentes, PnL et capital finis (détecte le DD
+      masqué à 0 par un capital NaN, SI-11a, et les PnL NaN, SI-11b), `len(trades) == n_trades`.
+    Types, domaines et cohérence des métriques elles-mêmes : `compute_score` (C1-C7b)."""
+    if not isinstance(stats, dict):
+        return "INVALID_METRIC:TYPE:stats"
+    if not isinstance(trades_df, pd.DataFrame):
+        return "INVALID_METRIC:TYPE:trades"
+    if not isinstance(equity_df, pd.DataFrame):
+        return "INVALID_METRIC:TYPE:equity"
+    n_trades = stats.get("n_trades")
+    zero_claim = len(trades_df) == 0 or (
+        isinstance(n_trades, (int, np.integer)) and n_trades == 0
+    )
+    if zero_claim:
+        authentic = (
+            len(trades_df) == 0 and type(n_trades) is int and n_trades == 0
+            and set(stats) == {"n_trades"}
+        )
+        if not authentic:
+            return "INVALID_METRIC:INCOHERENT:zero_trade"
+        if len(equity_df) == 0:
+            return None  # fenêtre sans barre : le moteur rend une equity vide, rien à masquer
+        return _frame_column_reason(equity_df, "equity", "capital")
+    for key in REQUIRED_ENGINE_METRICS:
+        if key not in stats:
+            return f"INVALID_METRIC:MISSING:{key}"
+    code = number_rejection_code(n_trades, "count")
+    if code is not None:
+        return f"INVALID_METRIC:{code}:n_trades"
+    reason = _frame_column_reason(trades_df, "trades", "resultat_net")
+    if reason is not None:
+        return reason
+    if len(trades_df) != n_trades:
+        return "INVALID_METRIC:INCOHERENT:n_trades"
+    return _frame_column_reason(equity_df, "equity", "capital")
+
+
 def _run_single(params: dict, config: OptimizationConfig,
                 df, start_date=None, end_date=None,
                 end_boundary: Literal["inclusive", "exclusive"] = "inclusive",
@@ -343,6 +421,20 @@ def _run_single(params: dict, config: OptimizationConfig,
         if include_artifacts:
             result["trades"] = None
             result["equity"] = None
+        return result
+
+    # Frontière moteur → optimizer (ADR 0029, C13, U-2 strict) : HORS du try ci-dessus (un défaut du
+    # validateur n'est jamais relabellisé "Exception:"), sur les SEULS artefacts déjà rendus par
+    # l'unique backtest — jamais une seconde exécution.
+    boundary_reason = _validate_backtest_outputs(trades_df, equity_df, stats)
+    if boundary_reason is not None:
+        result = {
+            "score": 0.0, "params": params, "stats": stats if isinstance(stats, dict) else {},
+            "filtered": True, "filter_reason": boundary_reason, "warnings": [],
+        }
+        if include_artifacts:
+            result["trades"] = trades_df
+            result["equity"] = equity_df
         return result
 
     if stats.get("n_trades", 0) == 0:
@@ -451,6 +543,29 @@ _TEST_END_BOUNDARY:  Literal["inclusive"] = "inclusive"
 # changement de code sans impact sur les bornes produites) — voir validate_resume_train_test_
 # semantics() et docs/adr/0018-*.md pour la garde de reprise cross-version associée.
 TRAIN_TEST_SEMANTICS_VERSION = "exact-boundary-v2"
+
+class LegacyTestValidationFailed(RuntimeError):
+    """ADR 0029, S-1 option B : le TEST d'un candidat (mode TRAIN/TEST legacy de
+    `Optimizer.run`) a un rejet TECHNIQUE (`INVALID_METRIC:`, `INVALID_CONFIG:`, `Exception:`).
+    Échec explicite du run, jamais un `score_test` artificiel."""
+
+
+class ScoringSemanticsMismatch(ValueError):
+    """Reprise refusée : le job source n'a pas été calculé sous `SCORING_SEMANTICS_VERSION`
+    (absente = "legacy"). Jamais un mélange de scores sous deux sémantiques (ADR 0029)."""
+
+
+def validate_resume_scoring_semantics(source_config: Optional[dict], source_run_id: str) -> None:
+    """Garde de reprise INCONDITIONNELLE (ADR 0029, F-4) — avec ou sans train/test : un job source
+    legacy (clé absente, None ou différente) est refusé AVANT toute lecture des hashs déjà testés
+    et avant le benchmark. Jamais un candidat legacy sauté comme « déjà testé »."""
+    source_version = (source_config or {}).get("scoring_semantics_version")
+    if source_version != SCORING_SEMANTICS_VERSION:
+        raise ScoringSemanticsMismatch(
+            f"Reprise refusée : le job source {source_run_id!r} utilise la sémantique de scoring "
+            f"{source_version!r} (legacy si absente), incompatible avec {SCORING_SEMANTICS_VERSION!r}. "
+            "Relancer un nouveau run sans resume_run_id."
+        )
 
 
 @dataclass(frozen=True)
@@ -710,17 +825,19 @@ class Optimizer:
         results = []
         total   = len(combos)
         tested  = already_tested or set()
+        pending = set()  # déduplication intra-lot ; `tested` ne reçoit qu'un résultat RÉELLEMENT reçu
 
         for idx, params in enumerate(combos):
             if stop_flag_fn and stop_flag_fn():
                 break
 
             h = params_hash(params)
-            if h in tested:
+            if h in tested or h in pending:
                 continue
-            tested.add(h)
+            pending.add(h)
 
             result = _run_single(params, self.config, self.df, start_date, end_date, end_boundary)
+            tested.add(h)  # ADR 0029 F-12 : jamais marqué testé avant d'avoir son résultat
             results.append(result)
 
             if progress_cb:
@@ -749,45 +866,58 @@ class Optimizer:
         if not filtered:
             return results
 
-        # Pré-ajouter les hashs
-        for p in filtered:
-            tested.add(params_hash(p))
-
+        # ADR 0029 (C15, F-12, G-1) : un hash n'est ajouté à `tested` qu'à la RÉCEPTION du résultat
+        # (jamais avant soumission : un candidat annulé n'est jamais « testé ») ; une exception de
+        # worker n'est plus convertie en candidat « Worker error » score 0 — elle annule les
+        # candidats en file et remonte, exactement comme en séquentiel.
         futures = {}
+        received = set()
+        done_count = 0
+
+        def _receive(fut):
+            nonlocal done_count
+            result = fut.result()  # relance l'exception d'un worker, jamais masquée
+            received.add(fut)
+            tested.add(params_hash(futures[fut]))
+            results.append(result)
+            done_count += 1
+            if progress_cb:
+                progress_cb(done_count, total, result)
+
         with ProcessPoolExecutor(
             max_workers=self.config.n_workers,
             initializer=_worker_init,
             initargs=(self.df,),
         ) as pool:
-            for params in filtered:
-                fut = pool.submit(
-                    _worker_run_single,
-                    params,
-                    self.config,
-                    start_date,
-                    end_date,
-                    end_boundary,
-                )
-                futures[fut] = params
+            try:
+                for params in filtered:
+                    fut = pool.submit(
+                        _worker_run_single,
+                        params,
+                        self.config,
+                        start_date,
+                        end_date,
+                        end_boundary,
+                    )
+                    futures[fut] = params
 
-            done_count = 0
-            for fut in as_completed(futures):
-                if stop_flag_fn and stop_flag_fn():
-                    for f in futures:
-                        f.cancel()
-                    break
-                try:
-                    result = fut.result()
-                except Exception as e:
-                    result = {
-                        "score": 0.0, "params": futures[fut], "stats": {},
-                        "filtered": True, "filter_reason": f"Worker error: {e}",
-                        "warnings": [],
-                    }
-                results.append(result)
-                done_count += 1
-                if progress_cb:
-                    progress_cb(done_count, total, result)
+                for fut in as_completed(futures):
+                    if stop_flag_fn and stop_flag_fn():
+                        for f in futures:
+                            f.cancel()  # False pour un candidat déjà démarré : récolté plus bas
+                        break
+                    _receive(fut)
+            except BaseException:
+                for f in futures:
+                    f.cancel()
+                pool.shutdown(wait=True, cancel_futures=True)
+                raise
+
+        # Arrêt coopératif : les candidats réellement TERMINÉS (démarrés avant l'arrêt) sont récoltés
+        # dans l'ordre de soumission ; seuls les candidats `cancelled()` sont annulés.
+        for fut in futures:
+            if fut not in received and fut.done() and not fut.cancelled():
+                _receive(fut)
 
         return results
 
@@ -1065,6 +1195,9 @@ class Optimizer:
         self._search_seed = seed
         cfg = self.config
         tt  = cfg.train_test
+        # ADR 0029 (C14) : une configuration de scoring invalide arrête la recherche AVANT tout
+        # backtest (jamais N candidats tous rejetés pour une même cause globale).
+        validate_scoring_configuration(cfg.score_weights, cfg.filters, cfg.param_ranges)
 
         # ── Calcul des fenêtres de split (correction scientifique, 2026-09-12) ──
         train_start = train_end = None
@@ -1167,6 +1300,16 @@ class Optimizer:
                     result["params"], cfg, self.df, windows.boundary, windows.test_end,
                     end_boundary=_TEST_END_BOUNDARY,
                 )
+                # ADR 0029, S-1 option B (U-6 reportée) : un TEST techniquement invalide n'est
+                # JAMAIS un score_test 0.0, ni le score TRAIN, ni une alerte de sur-apprentissage
+                # fabriquée — échec technique explicite du run.
+                test_reason = test_result.get("filter_reason") or ""
+                if test_result.get("filtered") and test_reason.startswith(TECHNICAL_REJECTION_PREFIXES):
+                    raise LegacyTestValidationFailed(
+                        f"Validation TEST legacy impossible pour le candidat "
+                        f"{params_hash(result['params'])} : {test_reason} — échec technique, "
+                        "jamais un score TEST (ADR 0029, S-1)."
+                    )
                 result["score_train"]      = result["score"]
                 result["score_test"]       = test_result["score"]
                 result["stats_test"]       = test_result.get("stats", {})

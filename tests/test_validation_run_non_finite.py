@@ -741,13 +741,17 @@ def test_validation_run_imports_only_the_standard_library_and_atomic_json_store(
 
 # NB : la tranche PN-1-S2 modifiera `walk_forward.py` (3 lecteurs / écrivains intermédiaires) : elle devra mettre à jour explicitement l'épingle
 # `walk_forward.py` ci-dessous, avec sa justification, et non la contourner.
+# ADR 0029 (Scoring Integrity, 2026-11-17) : exception de gel U-5 accordée par le propriétaire pour
+# `scoring.py`, `optimizer.py`, `walk_forward.py` (+ `optimizer_process.py`, `gate_v_campaign.py`,
+# non épinglés) — épingles mises à jour explicitement ; `engine.py` et tous les autres modules
+# restent inchangés. Toute modification ultérieure exige une nouvelle justification.
 _FORBIDDEN_MODULE_PINS = {
-    "walk_forward.py": "dc83bcc4bf4912b3b165f04fd741bdfc43bd6921920efbd226fff7caf6a3879c",
+    "walk_forward.py": "2265a2d485f2be62d386fafcabafb71e843118fe879d77c676d1a2dfaabcb78f",  # ADR 0029 (Scoring Integrity, exception de gel U-5)
     "engine.py": "451e80c4d74b4cb9fc0218736986d044fc39ff8a94c1393d82d75ee102e4e753",
-    "scoring.py": "4919dcb8454a2f0995ef268bc84da565bde016e83d8c28185172e093a6f71d22",
+    "scoring.py": "d5c9b10b47a47f689f08f628ebc6f3e9b075b5ebc27f6eed47316bd3c268f087",  # ADR 0029 (Scoring Integrity, exception de gel U-5)
     "atomic_json_store.py": "3e354c32797379aa6b5e2f28dff1e52f3844ee4a59f5c401718d0acb677da577",
     "validation_oos.py": "1d53cfcca02db38463d6b27ed26517a17c59ecaf7bad45f2e7e3a0f4a9f27c6c",
-    "optimizer.py": "63e22aed2f3be03454013a35398bdfa690864467f0a6006ea4ec3bee6066bf59",
+    "optimizer.py": "c492ca1e142b07ec5b92061434cbdf49541747521581a97842b5cf664b372ced",  # ADR 0029 (Scoring Integrity, exception de gel U-5)
     "gate_v_exposure_scan.py": "dacc0f8ba1fda33dfd7bc9c8234a42e62309fe7dc6cd7ecabc087d8d98a194a2",
     "gate_v_exposure_interpreters.py": "a1f0da2573c8ed2935b89669d72ab87eab3d7b1382cfb592db2f7ce48eef330e",
     "gate_v_exposure_interpreters_v5.py": "9f6414ffe2a331e5b01bbaf7bbddffebf48850c59187728fd9ccee4b09392a88",

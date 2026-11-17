@@ -3,9 +3,276 @@ scoring.py — Module de scoring pour l'optimisateur.
 Fonctions pures : pas d'I/O, pas de Streamlit, pas d'état global.
 """
 
+import dataclasses
 import math
 import numpy as np
 from dataclasses import dataclass, field
+from typing import Optional
+
+
+# Sémantique de scoring (ADR 0029, Scoring Integrity) : identifie le CONTRAT numérique du score
+# (validation des entrées, rejets typés, frontière moteur → optimizer). Distincte de
+# TRAIN_TEST_SEMANTICS_VERSION / WALK_FORWARD_SEMANTICS_VERSION / STATE_READINESS_SEMANTICS_VERSION.
+# Absente d'une configuration ou d'un manifeste = "legacy" : jamais réutilisable sous cette version.
+SCORING_SEMANTICS_VERSION = "finite-metrics-v1"
+
+
+class ScoringInvariantError(Exception):
+    """Invariant numérique interne violé (valeur non finie produite par le calcul lui-même).
+    Inatteignable après validation des entrées ; `compute_score` l'attrape PAR SON TYPE EXACT et
+    la convertit en rejet typé `INVALID_METRIC:NON_FINITE:computed` — jamais un score favorable.
+    Hérite d'`Exception` (pas d'`ArithmeticError`) : aucun filet `except ArithmeticError` externe
+    ne peut l'avaler."""
+
+
+class InvalidScoringConfiguration(ValueError):
+    """Configuration globale de scoring invalide (poids, seuils, plages de paramètres) : erreur de
+    configuration, jamais une mauvaise performance de candidat. Levée par
+    `validate_scoring_configuration()` AVANT tout calcul coûteux (benchmark, envoi des candidats)."""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VALIDATION NUMÉRIQUE (ADR 0029, C1-C7b)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_REAL_TYPES = (int, float, np.integer, np.floating)
+
+TECHNICAL_REJECTION_PREFIXES = ("INVALID_METRIC:", "INVALID_CONFIG:", "Exception:")
+"""Familles de motifs de rejet TECHNIQUES (ADR 0029) : rejet numérique de métrique, de configuration,
+ou exception du moteur (`optimizer._run_single`). Jamais une performance ; unique définition, importée
+par `optimizer` et `walk_forward`."""
+
+# (champ principal, alias lu par compute_score si le principal est absent, nature, bornes, +inf ?)
+# L'ordre de résolution reproduit EXACTEMENT `stats.get(principal, stats.get(alias, défaut))`.
+_SCORED_FIELDS = (
+    ("n_trades",         "total_trades",           "count", (0, None),   False),
+    ("max_dd_pct",       None,                     "real",  (0, None),   False),
+    ("profit_factor",    None,                     "real",  (0, None),   True),
+    ("max_consec_loss",  "max_consecutive_losses", "count", (0, None),   False),
+    ("win_rate",         None,                     "real",  (0, 100),    False),
+    ("net_ret_pct",      "pct_gain",               "real",  (None, None), False),
+    ("payoff",           "avg_win_loss_ratio",     "real",  (0, None),   True),
+    ("equity_r_squared", None,                     "real",  (0, 1),      False),
+    ("net_ret_usd",      "net_profit",             "real",  (None, None), False),
+    ("max_dd_usd",       None,                     "real",  (0, None),   False),
+)
+# Clés auxiliaires non lues par le score, validées seulement pour la cohérence (C3/C4).
+_AUXILIARY_FIELDS = (
+    ("n_win",      "count", (0, None)),
+    ("n_loss",     "count", (0, None)),
+    ("gross_win",  "real",  (0, None)),
+    ("gross_loss", "real",  (0, None)),
+)
+
+
+def number_rejection_code(value, kind: str = "real", allow_pos_inf: bool = False) -> Optional[str]:
+    """Code de rejet d'une valeur numérique, ou None si valide. Total : ne lève jamais."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, _REAL_TYPES):
+        return "TYPE"
+    if allow_pos_inf and value == math.inf:
+        return None
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        return "OVERFLOW"
+    if not finite:
+        return "NON_FINITE"
+    if kind == "count" and not isinstance(value, (int, np.integer)):
+        if not float(value).is_integer():
+            return "TYPE"
+    return None
+
+
+def _domain_ok(value, bounds) -> bool:
+    lo, hi = bounds
+    if value == math.inf:
+        return True
+    return (lo is None or value >= lo) and (hi is None or value <= hi)
+
+
+def _resolve(stats: dict, primary: str, alias: Optional[str]):
+    """(présent, nom lu, valeur) selon l'ordre de résolution de `compute_score`."""
+    if primary in stats:
+        return True, primary, stats[primary]
+    if alias is not None and alias in stats:
+        return True, alias, stats[alias]
+    return False, primary, None
+
+
+def _validate_config_fields(weights, filters) -> Optional[str]:
+    """Motif `INVALID_CONFIG:<CODE>:<champ>` pour des poids ou seuils invalides, sinon None."""
+    if not dataclasses.is_dataclass(weights) or isinstance(weights, type):
+        return "INVALID_CONFIG:TYPE:weights"
+    if not dataclasses.is_dataclass(filters) or isinstance(filters, type):
+        return "INVALID_CONFIG:TYPE:filters"
+    total = 0.0
+    for f in dataclasses.fields(weights):
+        value = getattr(weights, f.name)
+        code = number_rejection_code(value)
+        if code is None and value < 0:
+            code = "OUT_OF_DOMAIN"
+        if code is not None:
+            return f"INVALID_CONFIG:{code}:weights.{f.name}"
+        total += value
+    if not math.isfinite(total) or total <= 0:
+        return "INVALID_CONFIG:OUT_OF_DOMAIN:weights.total"
+    for f in dataclasses.fields(filters):
+        value = getattr(filters, f.name)
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, _REAL_TYPES):
+            return f"INVALID_CONFIG:TYPE:filters.{f.name}"
+        try:
+            is_nan = math.isnan(value)
+        except OverflowError:
+            return f"INVALID_CONFIG:OVERFLOW:filters.{f.name}"
+        if is_nan:
+            return f"INVALID_CONFIG:NON_FINITE:filters.{f.name}"
+    return None
+
+
+def _param_range_get(obj, attr, default=None):
+    return obj.get(attr, default) if isinstance(obj, dict) else getattr(obj, attr, default)
+
+
+def _numeric_param_ranges(param_ranges):
+    """(nom, ParamRange) des plages lues par `compute_penalties`, ou motif INVALID_CONFIG."""
+    if param_ranges is None:
+        return [], None
+    if isinstance(param_ranges, (str, bytes, dict)):
+        return [], "INVALID_CONFIG:TYPE:param_ranges"
+    try:
+        items = list(param_ranges)
+    except TypeError:
+        return [], "INVALID_CONFIG:TYPE:param_ranges"
+    selected = []
+    for pr in items:
+        if pr is None:
+            return [], "INVALID_CONFIG:TYPE:param_ranges"
+        if _param_range_get(pr, "param_type") != "number" or _param_range_get(pr, "min_val") is None:
+            continue
+        name = _param_range_get(pr, "name")
+        try:
+            hash(name)
+        except TypeError:
+            return [], "INVALID_CONFIG:TYPE:param_ranges"
+        for attr, default in (("min_val", None), ("max_val", None), ("step", 1)):
+            value = _param_range_get(pr, attr, default)
+            if value is None and attr == "max_val":
+                continue
+            code = number_rejection_code(value)
+            if code is None and attr == "step" and value <= 0:
+                code = "OUT_OF_DOMAIN"
+            if code is not None:
+                return [], f"INVALID_CONFIG:{code}:param_ranges.{name}"
+        selected.append((name, pr))
+    return selected, None
+
+
+def validate_scoring_configuration(weights, filters, param_ranges=None) -> None:
+    """Valide la configuration GLOBALE (poids finis ≥ 0 de somme finie > 0, seuils non NaN — `±inf`
+    admis pour les seuils neutralisés —, plages numériques finies à pas > 0). Lève
+    `InvalidScoringConfiguration` : à appeler avant tout benchmark ou envoi de candidats (C14)."""
+    reason = _validate_config_fields(weights, filters)
+    if reason is None:
+        _ranges, reason = _numeric_param_ranges(param_ranges)
+    if reason is not None:
+        raise InvalidScoringConfiguration(
+            f"Configuration de scoring invalide ({reason}) — refusée avant tout calcul "
+            f"(sémantique {SCORING_SEMANTICS_VERSION})."
+        )
+
+
+def validate_score_inputs(stats, weights, filters, params=None, param_ranges=None) -> Optional[str]:
+    """Pré-validation totale de `compute_score` (ADR 0029, C1-C7b). Retourne le motif de rejet
+    (`INVALID_CONFIG:<CODE>:<champ>` ou `INVALID_METRIC:<CODE>:<champ>`) ou None. Ne lève jamais,
+    ne convertit ni ne modifie rien. Une clé ABSENTE garde le défaut legacy de `compute_score`
+    (appel utilitaire) ; la complétude des chemins scientifiques est exigée à la frontière moteur →
+    optimizer (`optimizer._validate_backtest_outputs`)."""
+    reason = _validate_config_fields(weights, filters)
+    if reason is not None:
+        return reason
+    ranges, reason = _numeric_param_ranges(param_ranges)
+    if reason is not None:
+        return reason
+    if not isinstance(stats, dict):
+        return "INVALID_METRIC:TYPE:stats"
+
+    values = {}
+    for primary, alias, kind, bounds, allow_inf in _SCORED_FIELDS:
+        present, name, value = _resolve(stats, primary, alias)
+        if not present:
+            continue
+        code = number_rejection_code(value, kind, allow_inf)
+        if code is None and not _domain_ok(value, bounds):
+            code = "OUT_OF_DOMAIN"
+        if code is not None:
+            return f"INVALID_METRIC:{code}:{name}"
+        if name == primary and alias is not None and alias in stats:
+            other = stats[alias]
+            if number_rejection_code(other, kind, allow_inf) is not None or other != value:
+                return f"INVALID_METRIC:INCOHERENT:{primary}"
+        values[primary] = value
+    for name, kind, bounds in _AUXILIARY_FIELDS:
+        if name not in stats:
+            continue
+        value = stats[name]
+        code = number_rejection_code(value, kind)
+        if code is None and not _domain_ok(value, bounds):
+            code = "OUT_OF_DOMAIN"
+        if code is not None:
+            return f"INVALID_METRIC:{code}:{name}"
+        values[name] = value
+
+    reason = _coherence_reason(stats, values)
+    if reason is not None:
+        return reason
+
+    if ranges:
+        if params is not None and not isinstance(params, dict):
+            return "INVALID_METRIC:TYPE:params"
+        for name, _pr in ranges:
+            value = (params or {}).get(name)
+            if value is None:
+                continue
+            code = number_rejection_code(value)
+            if code is not None:
+                return f"INVALID_METRIC:{code}:param.{name}"
+    return None
+
+
+def _coherence_reason(stats: dict, v: dict) -> Optional[str]:
+    """C3/C4 : cohérence minimale, seulement entre clés présentes."""
+    def name_of(primary, alias):
+        return primary if primary in stats or alias is None or alias not in stats else alias
+
+    n, nw, nl = v.get("n_trades"), v.get("n_win"), v.get("n_loss")
+    if n is not None and nw is not None and nl is not None and nw + nl != n:
+        return f"INVALID_METRIC:INCOHERENT:{name_of('n_trades', 'total_trades')}"
+    consec = v.get("max_consec_loss")
+    if consec is not None and nl is not None and consec > nl:
+        return f"INVALID_METRIC:INCOHERENT:{name_of('max_consec_loss', 'max_consecutive_losses')}"
+    wr = v.get("win_rate")
+    if wr is not None and nw is not None and n is not None and n > 0:
+        if not math.isclose(float(wr), float(nw) / float(n) * 100, rel_tol=1e-9):
+            return "INVALID_METRIC:INCOHERENT:win_rate"
+    gw, gl = v.get("gross_win"), v.get("gross_loss")
+    gross_known = gw is not None and gl is not None
+    pf = v.get("profit_factor")
+    if pf is not None and gross_known:
+        if pf == math.inf:
+            if gw == 0 and gl == 0:
+                return "INVALID_METRIC:UNDEFINED:profit_factor"
+            if not (gw > 0 and gl == 0):
+                return "INVALID_METRIC:INCOHERENT:profit_factor"
+        else:
+            if gl <= 0:
+                return "INVALID_METRIC:INCOHERENT:profit_factor"
+            ratio = gw / gl
+            if math.isfinite(ratio) and not math.isclose(float(pf), float(ratio), rel_tol=1e-9, abs_tol=0.0):
+                return "INVALID_METRIC:INCOHERENT:profit_factor"
+    payoff = v.get("payoff")
+    if payoff is not None and payoff == math.inf and gross_known and not (gw > 0 and gl == 0):
+        return f"INVALID_METRIC:UNDEFINED:{name_of('payoff', 'avg_win_loss_ratio')}"
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -88,8 +355,9 @@ def is_filtered_out(stats: dict, filters: FilterConfig) -> tuple:
     n_trades = stats.get("n_trades", stats.get("total_trades", 0))
     dd       = stats.get("max_dd_pct", 0.0)
     pf       = stats.get("profit_factor", 0.0)
-    # PF infini = pas de pertes, on le laisse passer les filtres (pénalisé ensuite)
-    if math.isinf(pf):
+    # PF infini = pas de pertes, on le laisse passer les filtres (pénalisé ensuite).
+    # `== +inf` (ADR 0029, C8) : `-inf` n'est jamais traité comme « aucune perte ».
+    if pf == math.inf:
         pf_check = False
     else:
         pf_check = pf < filters.min_profit_factor
@@ -120,6 +388,10 @@ def is_filtered_out(stats: dict, filters: FilterConfig) -> tuple:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    # `min(1.0, nan)` rend 1.0 : sans cette garde, NaN obtiendrait la normalisation maximale
+    # (ADR 0029, SI-01, C8).
+    if v != v:
+        raise ScoringInvariantError("_clamp : valeur NaN — jamais une normalisation maximale.")
     return max(lo, min(hi, v))
 
 
@@ -129,7 +401,7 @@ def normalize_profit_factor(pf: float) -> float:
     Log car PF=3 n'est pas 3× meilleur que PF=2.
     PF=∞ → 0.95 (trop parfait = suspect).
     """
-    if math.isinf(pf) or pf > 20.0:
+    if pf == math.inf or pf > 20.0:  # C8 : -inf n'est pas « trop parfait »
         return 0.95
     if pf <= 1.0:
         return 0.0
@@ -175,7 +447,7 @@ def normalize_equity_regularity(r_squared: float) -> float:
 
 def normalize_recovery_factor(rf: float) -> float:
     """RF=2.5→0.5, RF=5+→1."""
-    if math.isinf(rf) or rf > 50.0:
+    if rf == math.inf or rf > 50.0:  # C8 : un rf dérivé de -inf vaut 0, jamais 0.95
         return 0.95
     return _clamp(rf / 5.0)
 
@@ -281,7 +553,31 @@ def compute_score(
     param_ranges: list = None,
 ) -> tuple:
     """
-    Calcule le score global d'un résultat de backtest.
+    Calcule le score global d'un résultat de backtest (ADR 0029, finite-metrics-v1).
+
+    Toute entrée invalide (métrique non finie, de mauvais type, hors domaine, indéfinie ou
+    incohérente ; configuration invalide) donne `(0.0, True, "INVALID_METRIC|INVALID_CONFIG:
+    <CODE>:<champ>", [])` — inéligible, distincte d'une mauvaise performance, sans exception.
+    Une entrée valide garde EXACTEMENT son score historique (vecteurs dorés `ffa987c`).
+    """
+    reason = validate_score_inputs(stats, weights, filters, params, param_ranges)
+    if reason is not None:
+        return 0.0, True, reason, []
+    try:
+        return _compute_score_validated(stats, weights, filters, params, param_ranges)
+    except ScoringInvariantError:
+        return 0.0, True, "INVALID_METRIC:NON_FINITE:computed", []
+
+
+def _compute_score_validated(
+    stats: dict,
+    weights: ScoreWeights,
+    filters: FilterConfig,
+    params: dict = None,
+    param_ranges: list = None,
+) -> tuple:
+    """
+    Calcule le score global d'un résultat de backtest (entrées déjà validées).
 
     Paramètres
     ----------
@@ -349,6 +645,8 @@ def compute_score(
 
     # ── 5. Score final ─────────────────────────────────────────
     final_score = 100.0 * base_score * (1.0 - penalty)
+    if not math.isfinite(final_score):  # C8 : `min(100, nan)` rendait 100
+        raise ScoringInvariantError("score final non fini — jamais borné à 100.")
     final_score = max(0.0, min(100.0, final_score))
 
     return final_score, False, "", warnings

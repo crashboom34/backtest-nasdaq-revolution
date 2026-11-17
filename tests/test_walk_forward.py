@@ -24,6 +24,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from tests._scoring_fixtures import legacy_equivalent_stats  # ADR 0029 (U-2)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataset_split import build_dataset_split_plan, build_split_boundary
@@ -807,7 +809,7 @@ class _ScoreByParamRunBacktest:
         net_ret = params.get("ema_trend_len", 0) / 100.0
         trades = pd.DataFrame([{"resultat_net": 10.0, "raison_sortie": "fin-donnees"}])
         equity = pd.DataFrame([{"date": "2020-01-01", "capital": 10_000.0 + net_ret}])
-        return trades, equity, {"n_trades": 1, "net_ret_pct": net_ret}
+        return trades, equity, legacy_equivalent_stats(1, net_ret)
 
 
 def _patch_score_by_net_ret(monkeypatch):
@@ -926,7 +928,7 @@ class TestRunFoldTrain:
             seen_df_lengths.append(len(df_))
             trades = pd.DataFrame([{"resultat_net": 10.0, "raison_sortie": "fin-donnees"}])
             equity = pd.DataFrame([{"date": "2020-01-01", "capital": 10_010.0}])
-            return trades, equity, {"n_trades": 1, "net_ret_pct": 0.1}
+            return trades, equity, legacy_equivalent_stats(1, 0.1)
 
         import engine
         monkeypatch.setattr(engine, "run_backtest", fake_run_backtest)
@@ -1037,8 +1039,13 @@ class TestRunFoldTest:
         ])
         equity = pd.DataFrame([{"date": "x", "capital": 10_008.0}])
         stats = {
-            "n_trades": 3, "net_ret_pct": 0.08, "max_dd_pct": 1.5,
-            "profit_factor": 2.1, "win_rate": 66.7,
+            # ADR 0029 (U-2, C4) : stats complètes et COHÉRENTES avec les 3 trades ci-dessus
+            # (n_win 2 / n_loss 1, gains 12 / pertes 4 -> PF 3.0, win rate 200/3) — l'ancien
+            # faux déclarait PF 2.1 et win rate 66.7, incohérents avec ses propres trades.
+            "n_trades": 3, "n_win": 2, "n_loss": 1, "win_rate": 200 / 3,
+            "gross_win": 12.0, "gross_loss": 4.0, "profit_factor": 3.0, "payoff": 1.5,
+            "net_ret_pct": 0.08, "net_ret_usd": 8.0, "max_dd_pct": 1.5, "max_dd_usd": 1.0,
+            "max_consec_loss": 1, "equity_r_squared": 0.5,
         }
 
         def fake_run_backtest(df_, strategy, params, **kwargs):
@@ -1057,8 +1064,8 @@ class TestRunFoldTest:
         assert result.n_trades == 3
         assert result.net_ret_pct == 0.08
         assert result.max_dd_pct == 1.5
-        assert result.profit_factor == 2.1
-        assert result.win_rate == 66.7
+        assert result.profit_factor == 3.0  # ADR 0029 : faux rendu cohérent (12 / 4)
+        assert result.win_rate == 200 / 3  # ADR 0029 : 2 gains sur 3 trades
         assert result.expectancy == pytest.approx((10.0 - 4.0 + 2.0) / 3)
         assert result.forced_closes == 1
         assert result.zero_trade_oos is False
@@ -1073,12 +1080,15 @@ class TestRunFoldTest:
             boundary=df["time_paris"].iloc[100].isoformat(),
             test_end=df["time_paris"].iloc[110].isoformat(),
         )
-        empty_trades, empty_equity = pd.DataFrame(), pd.DataFrame()
+        empty_trades = pd.DataFrame()
+        # ADR 0029 (F-8) : zéro trade sur une fenêtre COUVERTE -> le vrai moteur rend une equity
+        # plate et finie (une ligne de capital par barre), jamais une equity vide.
+        flat_equity = pd.DataFrame({"date": ["2020-01-01"], "capital": [10_000.0]})
 
         import engine
         monkeypatch.setattr(
             engine, "run_backtest",
-            lambda *a, **k: (empty_trades, empty_equity, {"n_trades": 0}),
+            lambda *a, **k: (empty_trades, flat_equity, {"n_trades": 0}),
         )
         config = _minimal_optimizer_config()
         selection = _fold_selection(fold)
@@ -1121,8 +1131,13 @@ class TestRunFoldTest:
         ])
         equity = pd.DataFrame([{"date": "x", "capital": 10_008.0}])
         stats = {
-            "n_trades": 3, "net_ret_pct": 0.08, "max_dd_pct": 1.5,
-            "profit_factor": 2.1, "win_rate": 66.7,
+            # ADR 0029 (U-2, C4) : stats complètes et COHÉRENTES avec les 3 trades ci-dessus
+            # (n_win 2 / n_loss 1, gains 12 / pertes 4 -> PF 3.0, win rate 200/3) — l'ancien
+            # faux déclarait PF 2.1 et win rate 66.7, incohérents avec ses propres trades.
+            "n_trades": 3, "n_win": 2, "n_loss": 1, "win_rate": 200 / 3,
+            "gross_win": 12.0, "gross_loss": 4.0, "profit_factor": 3.0, "payoff": 1.5,
+            "net_ret_pct": 0.08, "net_ret_usd": 8.0, "max_dd_pct": 1.5, "max_dd_usd": 1.0,
+            "max_consec_loss": 1, "equity_r_squared": 0.5,
         }
 
         def fake_run_backtest(df_, strategy, params, **kwargs):
@@ -1151,7 +1166,7 @@ class TestRunFoldTest:
         assert result.score_test == pytest.approx(expected_score)
         assert result.score_test > 0.0
         assert result.n_trades == 3
-        assert result.profit_factor == 2.1
+        assert result.profit_factor == 3.0  # ADR 0029 : faux rendu cohérent (12 / 4)
 
     def test_technical_exception_during_test_execution_is_never_reported_as_zero_trade(
         self, monkeypatch,
@@ -1591,9 +1606,13 @@ class TestRunFoldTestExposesGrossWinLossForAggregation:
         ])
         equity = pd.DataFrame([{"date": "x", "capital": 10_008.0}])
         stats = {
-            "n_trades": 3, "net_ret_pct": 0.08, "max_dd_pct": 1.5,
-            "profit_factor": 2.1, "win_rate": 66.7,
-            "gross_win": 12.0, "gross_loss": 4.0, "n_win": 2,
+            # ADR 0029 (U-2, C4) : stats complètes et COHÉRENTES avec les 3 trades ci-dessus
+            # (n_win 2 / n_loss 1, gains 12 / pertes 4 -> PF 3.0, win rate 200/3) — l'ancien
+            # faux déclarait PF 2.1 et win rate 66.7, incohérents avec ses propres trades.
+            "n_trades": 3, "n_win": 2, "n_loss": 1, "win_rate": 200 / 3,
+            "gross_win": 12.0, "gross_loss": 4.0, "profit_factor": 3.0, "payoff": 1.5,
+            "net_ret_pct": 0.08, "net_ret_usd": 8.0, "max_dd_pct": 1.5, "max_dd_usd": 1.0,
+            "max_consec_loss": 1, "equity_r_squared": 0.5,
         }
 
         def fake_run_backtest(df_, strategy, params, **kwargs):
@@ -1617,12 +1636,15 @@ class TestRunFoldTestExposesGrossWinLossForAggregation:
             boundary=df["time_paris"].iloc[100].isoformat(),
             test_end=df["time_paris"].iloc[110].isoformat(),
         )
-        empty_trades, empty_equity = pd.DataFrame(), pd.DataFrame()
+        empty_trades = pd.DataFrame()
+        # ADR 0029 (F-8) : zéro trade sur une fenêtre COUVERTE -> le vrai moteur rend une equity
+        # plate et finie (une ligne de capital par barre), jamais une equity vide.
+        flat_equity = pd.DataFrame({"date": ["2020-01-01"], "capital": [10_000.0]})
 
         import engine
         monkeypatch.setattr(
             engine, "run_backtest",
-            lambda *a, **k: (empty_trades, empty_equity, {"n_trades": 0}),
+            lambda *a, **k: (empty_trades, flat_equity, {"n_trades": 0}),
         )
         config = _minimal_optimizer_config()
         selection = _fold_selection(fold)
@@ -2007,7 +2029,7 @@ class TestRunWalkForwardOrchestration:
                 net_ret = 1_000.0 if self.call_index == 1 else params.get("ema_trend_len", 0) / 100.0
                 trades = pd.DataFrame([{"resultat_net": 10.0, "raison_sortie": "fin-donnees"}])
                 equity = pd.DataFrame([{"date": "2020-01-01", "capital": initial_capital + net_ret}])
-                return trades, equity, {"n_trades": 1, "net_ret_pct": net_ret}
+                return trades, equity, legacy_equivalent_stats(1, net_ret)
 
         fake = _CapitalTrackingRunBacktest()
         import engine
@@ -2353,7 +2375,10 @@ class TestPersistWalkForwardRun:
             test_end=df["time_paris"].iloc[150].isoformat(),
         )
         import engine
-        empty_trades, empty_equity = pd.DataFrame(), pd.DataFrame()
+        empty_trades = pd.DataFrame()
+        # ADR 0029 (F-8) : zéro trade sur une fenêtre COUVERTE -> le vrai moteur rend une equity
+        # plate et finie (une ligne de capital par barre), jamais une equity vide.
+        flat_equity = pd.DataFrame({"date": ["2020-01-01"], "capital": [10_000.0]})
         real_trades = pd.DataFrame([{"resultat_net": 5.0, "raison_sortie": "target"}])
         real_equity = pd.DataFrame([{"date": "x", "capital": 10_005.0}])
         calls = {"count": 0}
@@ -2364,8 +2389,8 @@ class TestPersistWalkForwardRun:
             # 2e appel = l'UNIQUE exécution TEST du fold, volontairement zéro-trade.
             calls["count"] += 1
             if calls["count"] == 1:
-                return real_trades, real_equity, {"n_trades": 1, "net_ret_pct": 1.0}
-            return empty_trades, empty_equity, {"n_trades": 0}
+                return real_trades, real_equity, legacy_equivalent_stats(1, 1.0)
+            return empty_trades, flat_equity, {"n_trades": 0}
 
         monkeypatch.setattr(engine, "run_backtest", fake_run_backtest)
         _patch_score_by_net_ret(monkeypatch)
@@ -2391,7 +2416,8 @@ class TestPersistWalkForwardRun:
         # une observation zéro-trade, ex. TestRunFoldTest) — to_csv() écrit un fichier vide, sans
         # exception : "pas d'erreur", jamais un pd.read_csv() qui suppose des colonnes réelles.
         assert trades_path.read_text(encoding="utf-8").strip() == ""
-        assert equity_path.read_text(encoding="utf-8").strip() == ""
+        # ADR 0029 (F-8) : l'equity d'un zéro trade sur fenêtre couverte est plate et finie.
+        assert pd.read_csv(equity_path)["capital"].tolist() == [10_000.0]
 
     def test_every_json_file_is_written_through_save_atomic(self, tmp_path, monkeypatch):
         """Test de câblage — jamais un open()/json.dump() direct qui contournerait l'écriture
@@ -2592,7 +2618,10 @@ class TestLoadTrainProgress:
         ]
         walk_forward_module._write_train_progress(tmp_path, fold, config, candidates)
 
-        assert walk_forward_module._load_train_progress(tmp_path, fold, config) == candidates
+        # ADR 0029 (U-9) : le motif de rejet est désormais persisté et relu ("" = éligible/sans motif).
+        assert walk_forward_module._load_train_progress(tmp_path, fold, config) == [
+            dict(c, filter_reason="") for c in candidates
+        ]
 
     def test_mismatched_fold_geometry_is_never_reused(self, tmp_path):
         """Une dérive de géométrie (`validation_zone`/`readiness_spec` différents entre deux

@@ -67,6 +67,8 @@ from walk_forward import (
     compute_fold_definitions,
     load_walk_forward_captured_run_v1,
     persist_walk_forward_run,
+    build_walk_forward_capture_manifest,
+    fingerprint_divergent_keys,
 )
 
 
@@ -1491,6 +1493,102 @@ def _mark_technical_failure_if_running(
     )
 
 
+class GateVEvidenceProvenanceMismatch(ValueError):
+    """ADR 0029, S-2 : une preuve Walk-Forward (ou une preuve Monte-Carlo / Parameter Stability qui
+    en dérive) présente dans la campagne ne peut pas être rattachée à la sémantique de scoring
+    courante et à la configuration exacte de sa production. Refus de PRÉCONDITION : aucune
+    réutilisation, aucun recalcul silencieux, aucun écrasement, aucun marquage rétroactif."""
+
+
+def _campaign_has_reusable_evidence(campaign_dir: Path, manifest: GateVCampaignManifest) -> bool:
+    """Artefact réutilisable = id rattaché au manifeste, ou fichier régulier non `*.tmp` sous
+    `walk_forward/` ou `validations/` (G-8 : dossiers vides et `*.tmp` seuls = fenêtre de crash)."""
+    if (
+        manifest.walk_forward_validation_run_id is not None
+        or manifest.monte_carlo_validation_run_id is not None
+        or manifest.parameter_stability_validation_run_ids_by_fold
+    ):
+        return True
+    for name in (_WALK_FORWARD_DIRNAME, _VALIDATIONS_DIRNAME):
+        root = campaign_dir / name
+        if root.is_dir() and any(
+            path.is_file() and not path.name.endswith(".tmp") for path in root.rglob("*")
+        ):
+            return True
+    return False
+
+
+def _json_normalized(value: dict) -> dict:
+    return json.loads(json.dumps(value))
+
+
+_CAPTURE_ONLY_KEY_PREFIX = "capture_"
+"""Clés ajoutées par `build_walk_forward_capture_manifest` au manifeste de run : le manifeste de run
+attendu est le manifeste de capture privé de ces clés (une seule lecture du manifeste de données)."""
+
+
+def _require_walk_forward_evidence_provenance(
+    plan: GateVCampaignPlan, campaign_dir: Path, manifest: GateVCampaignManifest,
+    split_plan: DatasetSplitPlan, base_config, data_manifest_path: Union[str, Path],
+) -> None:
+    """ADR 0029 (S-2, G-8..G-10) : dès qu'un artefact réutilisable existe, le manifeste de capture
+    `walk_forward/.gate_v_checkpoints_v1/manifest.json` doit exister et être ÉGAL, clé par clé (hors
+    `data_manifest_path`, règle de `check_resume_fingerprint`), au manifeste attendu recalculé
+    depuis le plan, `base_config` et le manifeste de données — `scoring_semantics_version`,
+    configuration complète et plis compris. Si une persistance Walk-Forward existe (`aggregate.json`
+    ou `folds/`), `walk_forward/manifest.json` est exigé et vérifié de même. Lève
+    `GateVEvidenceProvenanceMismatch` ; ne lit que des fichiers, n'écrit rien."""
+    if not _campaign_has_reusable_evidence(campaign_dir, manifest):
+        return
+    wf_validation_run_id = gate_v_validation_run_id(plan, VALIDATION_TYPE_WALK_FORWARD)
+    wf_dir = campaign_dir / _WALK_FORWARD_DIRNAME
+    checkpoint_path = wf_dir / _WALK_FORWARD_CHECKPOINT_DIRNAME / _WALK_FORWARD_MANIFEST_FILENAME
+    persisted_capture = load_json_tolerant(checkpoint_path)
+    if not isinstance(persisted_capture, dict):
+        raise GateVEvidenceProvenanceMismatch(
+            f"Campagne {plan.campaign_id!r} : preuve présente sans manifeste de capture lisible "
+            f"({checkpoint_path}) — provenance non établie, réutilisation refusée."
+        )
+    try:
+        _folds, expected_capture = build_walk_forward_capture_manifest(
+            split_plan.validation, plan.walk_forward_specification, plan.readiness_spec,
+            base_config, data_manifest_path, wf_validation_run_id,
+        )
+        expected_capture = _json_normalized(expected_capture)
+        expected_run = {
+            key: value for key, value in expected_capture.items()
+            if not key.startswith(_CAPTURE_ONLY_KEY_PREFIX)
+        }
+    except (TypeError, ValueError) as exc:
+        raise GateVEvidenceProvenanceMismatch(
+            f"Campagne {plan.campaign_id!r} : manifeste attendu non reconstructible ({exc})."
+        ) from exc
+    divergent = fingerprint_divergent_keys(persisted_capture, expected_capture)
+    if divergent:
+        raise GateVEvidenceProvenanceMismatch(
+            f"Campagne {plan.campaign_id!r} : preuve Walk-Forward produite sous un autre contrat "
+            f"(clés divergentes {divergent!r}) — jamais réutilisée sous la sémantique courante."
+        )
+    run_manifest_path = wf_dir / _WALK_FORWARD_MANIFEST_FILENAME
+    persisted_layout = (
+        (wf_dir / _WALK_FORWARD_AGGREGATE_FILENAME).exists()
+        or (wf_dir / _WALK_FORWARD_FOLDS_DIRNAME).exists()
+    )
+    if persisted_layout or run_manifest_path.exists():
+        persisted_run = load_json_tolerant(run_manifest_path)
+        if not isinstance(persisted_run, dict):
+            raise GateVEvidenceProvenanceMismatch(
+                f"Campagne {plan.campaign_id!r} : persistance Walk-Forward sans manifeste de run "
+                f"lisible ({run_manifest_path}) — provenance non établie."
+            )
+        divergent = fingerprint_divergent_keys(persisted_run, expected_run)
+        if divergent:
+            raise GateVEvidenceProvenanceMismatch(
+                f"Campagne {plan.campaign_id!r} : manifeste de run Walk-Forward divergent "
+                f"({divergent!r}) — réutilisation refusée."
+            )
+
+
 def execute_gate_v_campaign(
     plan: GateVCampaignPlan,
     *,
@@ -1573,6 +1671,11 @@ def execute_gate_v_campaign(
             f"Campagne {plan.campaign_id!r} déjà marquée TECHNICAL_FAILURE — reprise manuelle "
             "requise, jamais un nouvel essai automatique."
         )
+    # ADR 0029, S-2 option A : précondition de PROVENANCE, hors du try (refus avant tout calcul et
+    # avant toute mutation du manifeste — jamais TECHNICAL_FAILURE).
+    _require_walk_forward_evidence_provenance(
+        plan, campaign_dir, manifest, split_plan, base_config, data_manifest_path,
+    )
 
     try:
         if manifest.walk_forward_validation_run_id is None:
